@@ -42,15 +42,19 @@ class SquelchGate:
         sample_rate: float,
         threshold_dbfs: Optional[float],
         silence_trim: bool,
-        hold_ms: float = 120.0,
+        hold_ms: float = 250.0,
+        open_margin_db: float = 4.0,
+        noise_alpha: float = 0.9,
     ):
         self.sample_rate = sample_rate
         self.manual_threshold = threshold_dbfs
         self.silence_trim = silence_trim
-        self.hold_samples = int(sample_rate * hold_ms / 1000.0)
+        self.hold_samples = max(int(sample_rate * hold_ms / 1000.0), 1)
         self.hold_counter = 0
         self.noise_dbfs: Optional[float] = None
         self.open = False
+        self.open_margin_db = max(open_margin_db, 0.0)
+        self.noise_alpha = float(np.clip(noise_alpha, 0.0, 0.999))
 
     def process(self, samples: np.ndarray) -> tuple[np.ndarray, float, float, bool]:
         if samples.size == 0:
@@ -60,18 +64,15 @@ class SquelchGate:
         dbfs = 20.0 * math.log10(rms + 1e-12)
 
         if self.manual_threshold is None:
-            if self.noise_dbfs is None:
-                self.noise_dbfs = dbfs
-            elif not self.open:
-                self.noise_dbfs = 0.95 * self.noise_dbfs + 0.05 * dbfs
-            threshold = (self.noise_dbfs or dbfs) + 6.0
+            noise_estimate = self.noise_dbfs if self.noise_dbfs is not None else dbfs
+            threshold = noise_estimate + self.open_margin_db
         else:
             threshold = self.manual_threshold
 
         dropped = False
         if dbfs >= threshold:
             self.open = True
-            self.hold_counter = self.hold_samples
+            self.hold_counter = self.hold_samples + samples.size
         else:
             if self.hold_counter > 0:
                 self.hold_counter = max(0, self.hold_counter - samples.size)
@@ -86,5 +87,12 @@ class SquelchGate:
                 dropped = True
             else:
                 audio = np.zeros_like(samples)
+
+        if self.manual_threshold is None and not self.open:
+            if self.noise_dbfs is None:
+                self.noise_dbfs = dbfs
+            else:
+                alpha = self.noise_alpha
+                self.noise_dbfs = alpha * self.noise_dbfs + (1.0 - alpha) * dbfs
 
         return audio, threshold, dbfs, dropped

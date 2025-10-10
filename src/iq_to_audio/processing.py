@@ -545,6 +545,24 @@ class ProcessingPipeline:
                 total_input_samples / sample_rate if sample_rate > 0 else 0.0
             )
             estimated_audio_samples = max(duration_seconds * 48_000.0, 0.0)
+            chunk_size = max(1, self.config.chunk_size)
+            estimated_chunks = (
+                int(math.ceil(total_input_samples / chunk_size))
+                if total_input_samples > 0
+                else 0
+            )
+            if estimated_chunks > 0:
+                LOG.info(
+                    "Expecting approximately %d processing chunks (chunk size %d samples, %.2f s of IQ).",
+                    estimated_chunks,
+                    chunk_size,
+                    duration_seconds,
+                )
+            else:
+                LOG.info(
+                    "Processing chunk size %d samples; input duration could not be estimated from metadata.",
+                    chunk_size,
+                )
 
             phases: list[PhaseState] = [
                 PhaseState("ingest", "Ingest IQ", total_input_samples, unit="samples"),

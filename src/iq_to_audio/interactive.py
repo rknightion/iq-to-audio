@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import queue
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -17,7 +16,7 @@ from .probe import SampleRateProbe, probe_sample_rate
 from .utils import detect_center_frequency
 from .spectrum import WaterfallResult, compute_psd, streaming_waterfall
 from .visualize import SelectionResult, ensure_matplotlib
-from .progress import PhaseState, ProgressSink
+from .progress import ProgressSink
 
 LOG = logging.getLogger(__name__)
 
@@ -77,6 +76,61 @@ class SnapshotData:
     samples: Optional[np.ndarray]
     params: Dict[str, Any]
     fft_frames: int
+
+
+class StatusProgressSink(ProgressSink):
+    """Simple progress sink that reflects pipeline status in the main status bar."""
+
+    def __init__(self, update: Callable[[str, bool], None]):
+        self._update = update
+        self._status: Optional[str] = None
+        self._overall_total = 0.0
+        self._overall_completed = 0.0
+        self._cancel_callback: Optional[Callable[[], None]] = None
+
+    def start(self, phases, *, overall_total: float) -> None:
+        self._overall_total = max(overall_total, 0.0)
+        self._overall_completed = 0.0
+        self._status = "Processing…"
+        self._emit(highlight=True)
+
+    def advance(
+        self,
+        phase,
+        delta: float,
+        *,
+        overall_completed: float,
+        overall_total: float,
+    ) -> None:
+        if delta <= 0:
+            return
+        self._overall_completed = max(0.0, overall_completed)
+        self._overall_total = max(self._overall_total, overall_total)
+        self._emit(highlight=True)
+
+    def status(self, message: str) -> None:
+        self._status = message
+        self._emit(highlight=True)
+
+    def close(self) -> None:
+        self._update("Processing complete.", False)
+
+    def cancel(self) -> None:
+        self._update("Cancelling…", True)
+
+    def set_cancel_callback(self, callback: Callable[[], None]) -> None:
+        self._cancel_callback = callback
+
+    def trigger_cancel(self) -> None:
+        if self._cancel_callback is not None:
+            self._cancel_callback()
+
+    def _emit(self, *, highlight: bool) -> None:
+        message = self._status or "Processing…"
+        if self._overall_total > 0 and self._overall_completed > 0:
+            pct = 100.0 * min(self._overall_completed / self._overall_total, 1.0)
+            message = f"{message} — {pct:4.1f}%"
+        self._update(message, highlight)
 
 def gather_snapshot(
     config: ProcessingConfig,
@@ -341,6 +395,8 @@ class _InteractiveApp:
         self._active_pipeline = None
         self._preview_running = False
         self._snapshot_thread: Optional[threading.Thread] = None
+        self.stop_btn: Optional[ttk.Button] = None
+        self._status_sink: Optional[StatusProgressSink] = None
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_cancel)
@@ -546,7 +602,7 @@ class _InteractiveApp:
         )
         ttk.Label(
             options_frame,
-            text="Adaptive squelch tracks the noise floor and opens when the signal rises ~6 dB above it.\nLeave the threshold blank to auto-track, or enter a negative dBFS value to pin the gate.",
+            text="Adaptive squelch tracks the noise floor, opening when the signal rises ~4 dB above it and holding for a short period.\nLeave the threshold blank to auto-track, or enter a negative dBFS value to pin the gate.",
             foreground="SlateGray",
             wraplength=580,
             justify="left",
@@ -699,6 +755,13 @@ class _InteractiveApp:
         button_frame = ttk.Frame(main)
         button_frame.pack(fill="x", expand=False)
         button_frame.columnconfigure(0, weight=1)
+        self.stop_btn = ttk.Button(
+            button_frame,
+            text="Stop DSP",
+            command=self._on_stop_processing,
+        )
+        self.stop_btn.grid(row=0, column=0, sticky="w", padx=6)
+        self.stop_btn.configure(state="disabled")
         self.preview_btn = ttk.Button(
             button_frame,
             text="Preview DSP",
@@ -1119,16 +1182,16 @@ class _InteractiveApp:
 
         self._ensure_output_directory(config.output_path)
         self._preview_running = True
-        try:
-            sink: Optional[ProgressSink] = TkProgressSink(self.root)
-        except RuntimeError as exc:
-            LOG.warning("Progress UI unavailable: %s", exc)
-            sink = None
+        sink = StatusProgressSink(
+            lambda message, highlight: self._threadsafe_status(message, error=highlight)
+        )
+        self._status_sink = sink
         if self.preview_btn:
             self.preview_btn.configure(state="disabled")
         if self.confirm_btn:
             self.confirm_btn.configure(state="disabled")
-        self._set_status(f"Previewing {seconds:.2f} s…", error=False)
+        self._set_stop_enabled(True)
+        self._set_status(f"Previewing {seconds:.2f} s…", error=True)
 
         def worker() -> None:
             try:
@@ -1168,6 +1231,7 @@ class _InteractiveApp:
 
     def _on_cancel(self) -> None:
         self._cancel_active_pipeline()
+        self._set_stop_enabled(False)
         self.selection = None
         self.root.quit()
 
@@ -1189,6 +1253,8 @@ class _InteractiveApp:
         self._preview_thread = None
         with self._preview_lock:
             self._active_pipeline = None
+        self._set_stop_enabled(False)
+        self._status_sink = None
         if self.preview_btn:
             self.preview_btn.configure(state="normal")
         if self.confirm_btn:
@@ -1683,6 +1749,23 @@ class _InteractiveApp:
                 foreground="Firebrick" if error else "SlateGray"
             )
 
+    def _set_stop_enabled(self, enabled: bool) -> None:
+        if self.stop_btn:
+            state = "normal" if enabled else "disabled"
+            self.stop_btn.configure(state=state)
+
+    def _on_stop_processing(self) -> None:
+        if not self._preview_running:
+            return
+        self._set_status("Cancelling preview…", error=True)
+        if self._status_sink is not None:
+            try:
+                self._status_sink.cancel()
+            except Exception:
+                pass
+        self._set_stop_enabled(False)
+        self._cancel_active_pipeline()
+
     @staticmethod
     def _fft_worker_count() -> Optional[int]:
         cpu_count = os.cpu_count() or 1
@@ -1776,6 +1859,22 @@ class _InteractiveApp:
 
         chunk_samples = max(config.chunk_size, nfft)
         consumed = 0
+        try:
+            file_size = config.in_path.stat().st_size
+        except OSError:
+            file_size = 0
+        header_bytes = 44
+        frame_bytes = 4
+        payload_bytes = max(file_size - header_bytes, 0)
+        estimated_total_samples = (
+            payload_bytes // frame_bytes if payload_bytes > 0 else 0
+        )
+        estimated_chunks = (
+            int(math.ceil(estimated_total_samples / chunk_samples))
+            if estimated_total_samples > 0
+            else 0
+        )
+        status_stride = max(1, estimated_chunks // 25) if estimated_chunks else 4
 
         try:
             from .processing import IQReader
@@ -1797,9 +1896,28 @@ class _InteractiveApp:
                         break
                     consumed += block.size
                     chunk_index += 1
-                    if status_cb and chunk_index % 4 == 0:
+                    if status_cb and (
+                        chunk_index == 1
+                        or chunk_index % status_stride == 0
+                        or (estimated_chunks and chunk_index >= estimated_chunks)
+                    ):
                         try:
-                            status_cb(f"Averaging PSD chunk {chunk_index}…")
+                            if estimated_chunks:
+                                pct = min(chunk_index / estimated_chunks, 1.0) * 100.0
+                                seconds_done = (
+                                    consumed / sample_rate if sample_rate > 0 else 0.0
+                                )
+                                total_seconds = (
+                                    estimated_total_samples / sample_rate
+                                    if sample_rate > 0
+                                    else 0.0
+                                )
+                                status_cb(
+                                    f"Averaging PSD chunk {chunk_index}/{estimated_chunks} "
+                                    f"({pct:4.1f}% ≈ {seconds_done:.1f}s/{total_seconds:.1f}s)"
+                                )
+                            else:
+                                status_cb(f"Averaging PSD chunk {chunk_index}…")
                         except Exception:
                             pass
                     yield block
@@ -2016,249 +2134,6 @@ class _WaterfallWindow:
         self.window.destroy()
         if self._on_close:
             self._on_close()
-
-
-class TkProgressSink(ProgressSink):
-    """Thread-aware Tk progress renderer usable from worker threads."""
-
-    def __init__(self, master: tk.Misc):
-        if tk is None or ttk is None:
-            raise RuntimeError(TK_DEPENDENCY_HINT)
-        if master is None:
-            raise RuntimeError("Tk root unavailable for progress dialog.")
-        self.master = master
-        self._queue: queue.Queue[tuple[str, tuple, dict]] = queue.Queue()
-        self._after_id: Optional[str] = None
-        self._window: Optional[tk.Toplevel] = None
-        self._overall_total = 0.0
-        self._overall_var: Optional[tk.DoubleVar] = None
-        self._overall_completed = 0.0
-        self._status_var: Optional[tk.StringVar] = None
-        self._bars: Dict[str, Dict[str, object]] = {}
-        self._cancel_callback: Optional[Callable[[], None]] = None
-        self._stop_button: Optional[ttk.Button] = None
-        self._cancelled = False
-        self._closed = False
-
-    # -- ProgressSink interface -----------------------------------------
-    def start(self, phases, *, overall_total: float) -> None:
-        copied = [PhaseState(**phase.__dict__) for phase in phases]
-        self._enqueue("start", copied, overall_total)
-
-    def advance(
-        self,
-        phase,
-        delta: float,
-        *,
-        overall_completed: float,
-        overall_total: float,
-    ) -> None:
-        if delta <= 0:
-            return
-        self._enqueue(
-            "advance",
-            phase.key,
-            phase.completed,
-            overall_completed,
-            overall_total,
-        )
-
-    def status(self, message: str) -> None:
-        self._enqueue("status", message)
-
-    def close(self) -> None:
-        self._enqueue("close")
-
-    def cancel(self) -> None:
-        self._enqueue("cancel")
-
-    def set_cancel_callback(self, callback: Callable[[], None]) -> None:
-        self._enqueue("set_callback", callback)
-
-    # -- Event routing ---------------------------------------------------
-    def _enqueue(self, event: str, *args, **kwargs) -> None:
-        if self._closed and event != "start":
-            return
-        self._queue.put((event, args, kwargs))
-        self._schedule()
-
-    def _schedule(self) -> None:
-        if self._after_id is not None:
-            return
-        try:
-            self._after_id = self.master.after(0, self._drain_queue)
-        except tk.TclError:
-            self._after_id = None
-
-    def _drain_queue(self) -> None:
-        self._after_id = None
-        while not self._queue.empty():
-            event, args, kwargs = self._queue.get()
-            handler = getattr(self, f"_handle_{event}", None)
-            if handler is None:
-                continue
-            try:
-                handler(*args, **kwargs)
-            except tk.TclError:
-                self._closed = True
-                break
-
-    # -- Handlers --------------------------------------------------------
-    def _handle_start(self, phases, overall_total: float) -> None:
-        self._closed = False
-        if self._window is None or not bool(self._window.winfo_exists()):
-            self._window = tk.Toplevel(self.master)
-            self._window.title("IQ to Audio — Processing")
-            self._window.geometry("520x540")
-            self._window.transient(self.master)
-            self._window.grab_set()
-            self._window.protocol("WM_DELETE_WINDOW", self._trigger_cancel)
-            wrapper = ttk.Frame(self._window, padding=16)
-            wrapper.pack(fill="both", expand=True)
-            ttk.Label(
-                wrapper,
-                text="Processing status",
-                font=("TkDefaultFont", 12, "bold"),
-            ).pack(anchor="w")
-
-            self._overall_total = max(overall_total, 1.0)
-            self._overall_completed = 0.0
-            self._overall_var = tk.DoubleVar(value=0.0)
-            overall_bar = ttk.Progressbar(
-                wrapper,
-                mode="determinate",
-                maximum=self._overall_total,
-                variable=self._overall_var,
-            )
-            overall_bar.pack(fill="x", pady=(6, 12))
-
-            self._bars = {}
-            for phase in phases:
-                frame = ttk.Frame(wrapper)
-                frame.pack(fill="x", pady=4)
-                ttk.Label(frame, text=phase.label).pack(anchor="w")
-                maximum = max(phase.total, 1.0)
-                var = tk.DoubleVar(value=0.0)
-                bar = ttk.Progressbar(
-                    frame,
-                    mode="determinate",
-                    maximum=maximum,
-                    variable=var,
-                )
-                bar.pack(fill="x", padx=(12, 0))
-                pct_var = tk.StringVar(value="0.0%")
-                ttk.Label(
-                    frame,
-                    textvariable=pct_var,
-                    foreground="SlateGray",
-                    font=("TkDefaultFont", 9),
-                ).pack(anchor="e")
-                self._bars[phase.key] = {
-                    "var": var,
-                    "total": maximum,
-                    "percent": pct_var,
-                }
-
-            self._status_var = tk.StringVar(value="Starting…")
-            ttk.Label(
-                wrapper,
-                textvariable=self._status_var,
-                foreground="SlateGray",
-            ).pack(anchor="w", pady=(12, 0))
-            self._stop_button = ttk.Button(
-                wrapper,
-                text="Stop processing",
-                command=self._trigger_cancel,
-            )
-            state = "normal" if self._cancel_callback is not None else "disabled"
-            self._stop_button.configure(state=state)
-            self._stop_button.pack(anchor="e", pady=(16, 0))
-        else:
-            # Reset totals if a previous run reused the window.
-            self._overall_total = max(overall_total, 1.0)
-            self._overall_completed = 0.0
-            if self._overall_var is not None:
-                self._overall_var.set(0.0)
-            for bar in self._bars.values():
-                bar["var"].set(0.0)
-                bar["percent"].set("0.0%")
-        if self._window is not None:
-            try:
-                self._window.deiconify()
-                self._window.lift()
-                self._window.attributes("-topmost", True)
-                self._window.after(200, lambda: self._window.attributes("-topmost", False))
-                self._window.focus_force()
-            except Exception:  # pragma: no cover - best effort
-                pass
-            try:
-                self._window.update_idletasks()
-            except Exception:
-                pass
-        self._cancelled = False
-
-    def _handle_advance(
-        self,
-        key: str,
-        phase_completed: float,
-        overall_completed: float,
-        overall_total: float,
-    ) -> None:
-        if self._closed or self._overall_var is None:
-            return
-        if key in self._bars:
-            bar = self._bars[key]
-            total = max(bar["total"], 1.0)
-            bar["var"].set(min(phase_completed, total))
-            pct = 100.0 * min(phase_completed / total, 1.0)
-            bar["percent"].set(f"{pct:5.1f}%")
-        self._overall_completed = min(overall_completed, overall_total)
-        self._overall_var.set(self._overall_completed)
-
-    def _handle_status(self, message: str) -> None:
-        if self._status_var is not None:
-            self._status_var.set(message)
-
-    def _handle_close(self) -> None:
-        self._closed = True
-        if self._window is not None:
-            try:
-                self._window.grab_release()
-                self._window.destroy()
-            except tk.TclError:
-                pass
-            self._window = None
-        self._bars.clear()
-        self._overall_var = None
-        self._status_var = None
-        self._stop_button = None
-        self._cancel_callback = None
-
-    def _handle_cancel(self) -> None:
-        if self._cancelled:
-            return
-        self._cancelled = True
-        if self._status_var is not None:
-            self._status_var.set("Cancelling…")
-        if self._stop_button is not None:
-            self._stop_button.configure(state="disabled")
-
-    def _handle_set_callback(self, callback: Optional[Callable[[], None]]) -> None:
-        self._cancel_callback = callback
-        if self._stop_button is not None:
-            state = "normal" if callback is not None else "disabled"
-            self._stop_button.configure(state=state)
-
-    # -- Helpers ---------------------------------------------------------
-    def _trigger_cancel(self) -> None:
-        if self._cancelled:
-            return
-        self._handle_cancel()
-        if self._cancel_callback is not None:
-            try:
-                self._cancel_callback()
-            except Exception as exc:  # pragma: no cover - keep UI responsive
-                LOG.warning("Failed to invoke cancel callback: %s", exc)
 
 
 def interactive_select(
