@@ -1,0 +1,1441 @@
+================================================================================
+PySide6 Migration Plan for iq-to-audio Interactive Mode
+================================================================================
+
+Project: iq-to-audio
+Target: Migrate interactive.py from Tkinter/matplotlib to PySide6/Qt6
+Estimated Effort: 2-4 hours for direct port, 4-8 hours with enhancements
+Current State: Fully functional Tk-based interactive spectrum viewer
+
+
+================================================================================
+SECTION 1: MIGRATION RATIONALE & BENEFITS
+================================================================================
+
+1.1 Current Limitations
+------------------------
+- Tkinter widgets are basic and dated in appearance
+- Limited UI control sophistication (sliders, dials)
+- Rendering performance constraints with large spectrograms
+- HiDPI/dark mode support inconsistent across platforms
+- Mouse/scroll event handling requires significant boilerplate
+- Custom scrollable frames needed (_ScrollableFrame class)
+
+1.2 PySide6 Advantages
+----------------------
+- Modern, native-looking widgets with Qt6 styling
+- Rich widget library: QSlider, QDial, QSpinBox, QGroupBox
+- Superior matplotlib integration via FigureCanvasQTAgg
+- Built-in dock widgets, status bars, and toolbars
+- Qt Signals/Slots for clean event handling
+- Better threading model with QThread
+- Enhanced performance for real-time updates
+- Consistent HiDPI and dark mode support
+- Future extensibility (plugins, custom drawing)
+
+1.3 Architecture Preservation
+-----------------------------
+CRITICAL: Core DSP pipeline in processing.py MUST remain unchanged.
+Only interactive.py requires modification. CLI and processing modules
+maintain current architecture per AGENTS.md guidelines.
+
+
+================================================================================
+SECTION 2: DEPENDENCY & ENVIRONMENT CHANGES
+================================================================================
+
+2.1 Update pyproject.toml
+--------------------------
+Current dependencies include: numpy, scipy, soundfile, soxr, tqdm, matplotlib
+
+ADD to [project.dependencies]:
+  "PySide6>=6.6.0",  # Qt6 for Python bindings
+  "PySide6-Addons>=6.6.0",  # Additional Qt widgets if needed
+
+MODIFY matplotlib line to:
+  "matplotlib>=3.10.7",  # Already present, ensure Qt backend support
+
+2.2 Installation Commands
+--------------------------
+Command for users:
+  uv pip install PySide6 PySide6-Addons
+
+Verification:
+  python -c "from PySide6 import QtWidgets; print(QtWidgets.__version__)"
+
+2.3 Matplotlib Backend Configuration
+-------------------------------------
+Current code uses: from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+Migration target: from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+
+No changes needed to matplotlib installation; Qt backend is built-in.
+
+
+================================================================================
+SECTION 3: CODE STRUCTURE CHANGES
+================================================================================
+
+3.1 Import Block Transformation
+--------------------------------
+
+CURRENT (lines 25-36 in interactive.py):
+  try:
+      import tkinter as tk
+      from tkinter import filedialog, messagebox, ttk
+  except Exception:
+      tk = None
+
+  try:
+      from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+      from matplotlib.figure import Figure
+      from matplotlib.widgets import SpanSelector
+      from matplotlib.ticker import FuncFormatter
+  except Exception:
+      FigureCanvasTkAgg = None
+
+REPLACE WITH:
+  try:
+      from PySide6 import QtCore, QtGui, QtWidgets
+      from PySide6.QtCore import Qt, Signal, Slot
+      from PySide6.QtWidgets import (
+          QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+          QLabel, QLineEdit, QPushButton, QGroupBox, QComboBox,
+          QCheckBox, QSpinBox, QFileDialog, QMessageBox, QStatusBar,
+          QScrollArea, QSizePolicy
+      )
+  except Exception:
+      QtWidgets = None
+
+  try:
+      from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+      from matplotlib.figure import Figure
+      from matplotlib.widgets import SpanSelector
+      from matplotlib.ticker import FuncFormatter
+  except Exception:
+      FigureCanvasQTAgg = None
+
+UPDATE ERROR MESSAGE (line 38):
+  CURRENT: TK_DEPENDENCY_HINT = "Tkinter is required for --interactive..."
+  REPLACE: QT_DEPENDENCY_HINT = "PySide6 is required for --interactive. Install via: pip install PySide6"
+
+
+3.2 Data Classes (No Changes Required)
+---------------------------------------
+The following dataclasses remain identical:
+- InteractiveOutcome (lines 40-45)
+- InteractiveSessionResult (lines 48-51)
+- SnapshotData (lines 56-67)
+- StatusProgressSink (lines 70-110)
+
+These are UI-agnostic and require no modification.
+
+
+3.3 ScrollableFrame Elimination
+--------------------------------
+CURRENT: Custom _ScrollableFrame class (lines 113-202)
+REPLACE WITH: QScrollArea (Qt built-in)
+
+The entire _ScrollableFrame class can be DELETED.
+Qt's QScrollArea provides identical functionality:
+
+  scroll_area = QScrollArea()
+  scroll_area.setWidgetResizable(True)
+  content_widget = QWidget()
+  scroll_area.setWidget(content_widget)
+  # Add widgets to content_widget's layout
+
+
+================================================================================
+SECTION 4: MAIN WINDOW CLASS TRANSFORMATION
+================================================================================
+
+4.1 Class Declaration Change
+-----------------------------
+
+CURRENT (line 413):
+  class _InteractiveApp:
+
+REPLACE WITH:
+  class _InteractiveApp(QMainWindow):
+      """PySide6-based interactive spectrum viewer for IQ to Audio."""
+
+Add to __init__ before other initialization:
+  super().__init__()
+
+
+4.2 Root Window Initialization
+-------------------------------
+
+CURRENT (lines 427-429):
+  self.root = tk.Tk()
+  self.root.title("IQ to Audio — Interactive Mode")
+  self._configure_root_window()
+
+REPLACE WITH:
+  self.setWindowTitle("IQ to Audio — Interactive Mode")
+  self._configure_main_window()
+  
+  # Qt application already created in launch_interactive_session()
+  # No need to create QApplication here
+
+
+4.3 Main Window Configuration
+------------------------------
+
+CURRENT _configure_root_window() (lines 519-526):
+  def _configure_root_window(self) -> None:
+      screen_w = max(1, self.root.winfo_screenwidth())
+      screen_h = max(1, self.root.winfo_screenheight())
+      usable_width = min(1150, max(1000, screen_w - 160))
+      usable_height = min(max(780, screen_h - 200), screen_h - 60)
+      usable_height = max(680, usable_height)
+      self.root.geometry(f"{int(usable_width)}x{int(usable_height)}")
+      self.root.minsize(960, 680)
+
+REPLACE WITH:
+  def _configure_main_window(self) -> None:
+      screen = QApplication.primaryScreen()
+      screen_geometry = screen.availableGeometry()
+      screen_w = screen_geometry.width()
+      screen_h = screen_geometry.height()
+      
+      usable_width = min(1150, max(1000, screen_w - 160))
+      usable_height = min(max(780, screen_h - 200), screen_h - 60)
+      usable_height = max(680, usable_height)
+      
+      self.resize(int(usable_width), int(usable_height))
+      self.setMinimumSize(960, 680)
+
+
+4.4 Variable Declarations
+--------------------------
+
+CURRENT (uses tk.StringVar, tk.IntVar, tk.BooleanVar throughout lines 460-497):
+
+REPLACE ALL Tk variables with simple Python attributes:
+  # BEFORE: self.file_var = tk.StringVar(value=str(initial_path) if initial_path else "")
+  # AFTER:  self.file_value = str(initial_path) if initial_path else ""
+
+  # BEFORE: self.center_var = tk.StringVar(value=self._format_float(...))
+  # AFTER:  self.center_value = self._format_float(...)
+
+Complete variable transformation list:
+  tk.StringVar → Python str attributes
+  tk.IntVar → Python int attributes
+  tk.BooleanVar → Python bool attributes
+
+Access pattern changes:
+  # BEFORE: value = self.file_var.get()
+  # AFTER:  value = self.file_value
+
+  # BEFORE: self.file_var.set("new_value")
+  # AFTER:  self.file_value = "new_value"
+             self.file_entry.setText("new_value")  # Update widget
+
+Note: Qt widgets (QLineEdit, QSpinBox, etc.) have direct .text() and .setText()
+methods, eliminating the need for separate variable objects.
+
+
+4.5 Widget References
+----------------------
+
+CURRENT widget references (ttk.Button, ttk.Entry, etc.) remain as instance
+attributes but change type:
+
+  # BEFORE: self.load_preview_button: Optional[ttk.Button] = None
+  # AFTER:  self.load_preview_button: Optional[QPushButton] = None
+
+  # BEFORE: self.preview_btn: Optional[ttk.Button] = None
+  # AFTER:  self.preview_btn: Optional[QPushButton] = None
+
+Complete widget type mapping:
+  ttk.Entry → QLineEdit
+  ttk.Button → QPushButton
+  ttk.Checkbutton → QCheckBox
+  ttk.Combobox → QComboBox
+  ttk.Spinbox → QSpinBox
+  ttk.Label → QLabel
+  ttk.Frame → QWidget (with layout)
+  ttk.LabelFrame → QGroupBox
+
+
+================================================================================
+SECTION 5: UI CONSTRUCTION (_build_ui method)
+================================================================================
+
+5.1 Overall Layout Strategy
+----------------------------
+
+CURRENT: Pack-based layout with _ScrollableFrame
+REPLACE WITH: QVBoxLayout inside QScrollArea
+
+Structure:
+  QMainWindow
+    └─ QScrollArea (central widget)
+        └─ QWidget (scroll content)
+            └─ QVBoxLayout
+                ├─ Recording QGroupBox
+                ├─ Spectrum Preview QGroupBox
+                ├─ Options QGroupBox
+                ├─ Selection QGroupBox
+                ├─ Status QLabel
+                └─ Button QHBoxLayout
+
+
+5.2 Central Widget Setup
+-------------------------
+
+CURRENT (line 546):
+  def _build_ui(self) -> None:
+      scroll = _ScrollableFrame(self.root, padding=12)
+      scroll.pack(fill="both", expand=True)
+      scroll.enable_mousewheel()
+      self._scroll_frame = scroll
+      main = scroll.content
+
+REPLACE WITH:
+  def _build_ui(self) -> None:
+      # Central scroll area
+      scroll_area = QScrollArea()
+      scroll_area.setWidgetResizable(True)
+      scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+      scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+      
+      # Content widget
+      content_widget = QWidget()
+      main_layout = QVBoxLayout(content_widget)
+      main_layout.setContentsMargins(12, 12, 12, 12)
+      main_layout.setSpacing(8)
+      
+      scroll_area.setWidget(content_widget)
+      self.setCentralWidget(scroll_area)
+
+
+5.3 Recording Section
+----------------------
+
+CURRENT (lines 550-624):
+  file_frame = ttk.LabelFrame(main, text="Recording")
+  file_frame.pack(fill="x", expand=False)
+  file_frame.columnconfigure(1, weight=1)
+  file_frame.columnconfigure(3, weight=0)
+
+  ttk.Label(file_frame, text="Input WAV:").grid(...)
+  entry = ttk.Entry(file_frame, textvariable=self.file_var, width=64)
+  entry.grid(...)
+  ttk.Button(file_frame, text="Browse…", command=self._on_browse).grid(...)
+
+REPLACE WITH:
+  # Recording group
+  file_group = QGroupBox("Recording")
+  file_layout = QVBoxLayout()
+  
+  # Input WAV row
+  input_row = QHBoxLayout()
+  input_row.addWidget(QLabel("Input WAV:"))
+  self.file_entry = QLineEdit(self.file_value)
+  self.file_entry.setMinimumWidth(400)
+  input_row.addWidget(self.file_entry, stretch=1)
+  browse_btn = QPushButton("Browse…")
+  browse_btn.clicked.connect(self._on_browse)
+  input_row.addWidget(browse_btn)
+  file_layout.addLayout(input_row)
+  
+  # Center frequency row
+  center_row = QHBoxLayout()
+  center_row.addWidget(QLabel("Center freq (Hz):"))
+  self.center_entry = QLineEdit(self.center_value)
+  self.center_entry.setMaximumWidth(200)
+  self.center_entry.editingFinished.connect(self._on_center_manual)
+  center_row.addWidget(self.center_entry)
+  detect_btn = QPushButton("Detect from file")
+  detect_btn.clicked.connect(self._parse_center_from_name)
+  center_row.addWidget(detect_btn)
+  self.center_source_label = QLabel(self.center_source_value)
+  self.center_source_label.setStyleSheet("color: #708090;")  # SlateGray
+  center_row.addWidget(self.center_source_label)
+  center_row.addStretch()
+  file_layout.addLayout(center_row)
+  
+  # Similar pattern for snapshot, output directory, demodulator rows
+  # ...
+  
+  file_group.setLayout(file_layout)
+  main_layout.addWidget(file_group)
+
+
+5.4 Spectrum Plot Section
+--------------------------
+
+CURRENT (lines 650-668):
+  self.plot_frame = ttk.LabelFrame(main, text="Spectrum preview")
+  self.plot_frame.pack(fill="both", expand=True, pady=(12, 8))
+  self.placeholder_label = ttk.Label(
+      self.plot_frame,
+      text="Load a recording to view its spectrum.",
+      anchor="center",
+      justify="center",
+  )
+  self.placeholder_label.pack(fill="both", expand=True, padx=12, pady=12)
+
+REPLACE WITH:
+  # Spectrum preview group
+  self.plot_group = QGroupBox("Spectrum preview")
+  plot_layout = QVBoxLayout()
+  
+  self.placeholder_label = QLabel("Load a recording to view its spectrum.")
+  self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+  self.placeholder_label.setMinimumHeight(400)
+  plot_layout.addWidget(self.placeholder_label)
+  
+  self.plot_group.setLayout(plot_layout)
+  main_layout.addWidget(self.plot_group, stretch=1)  # Allow expansion
+
+
+5.5 Options Section
+--------------------
+
+CURRENT (lines 627-648):
+  options_frame = ttk.LabelFrame(main, text="Demod options")
+  options_frame.pack(fill="x", expand=False, pady=(8, 8))
+  options_frame.columnconfigure(0, weight=1)
+
+  self.squelch_check = ttk.Checkbutton(
+      options_frame,
+      text="Adaptive squelch",
+      variable=self.squelch_var,
+      command=self._on_toggle_squelch,
+  )
+  self.squelch_check.grid(row=0, column=0, sticky="w", padx=4, pady=2)
+
+REPLACE WITH:
+  # Demod options group
+  options_group = QGroupBox("Demod options")
+  options_layout = QVBoxLayout()
+  
+  # Checkboxes row
+  checks_row = QHBoxLayout()
+  self.squelch_check = QCheckBox("Adaptive squelch")
+  self.squelch_check.setChecked(self.squelch_enabled)
+  self.squelch_check.stateChanged.connect(self._on_toggle_squelch)
+  checks_row.addWidget(self.squelch_check)
+  
+  self.trim_check = QCheckBox("Trim silences")
+  self.trim_check.setChecked(self.silence_trim)
+  self.trim_check.stateChanged.connect(self._on_toggle_trim)
+  checks_row.addWidget(self.trim_check)
+  
+  self.agc_check = QCheckBox("Automatic gain control")
+  self.agc_check.setChecked(self.agc_enabled)
+  self.agc_check.stateChanged.connect(self._on_toggle_agc)
+  checks_row.addWidget(self.agc_check)
+  checks_row.addStretch()
+  options_layout.addLayout(checks_row)
+  
+  # Threshold row
+  threshold_row = QHBoxLayout()
+  threshold_row.addWidget(QLabel("Manual threshold (dBFS):"))
+  self.squelch_threshold_entry = QLineEdit(self.squelch_threshold_value)
+  self.squelch_threshold_entry.setMaximumWidth(100)
+  self.squelch_threshold_entry.editingFinished.connect(self._on_squelch_threshold_edit)
+  threshold_row.addWidget(self.squelch_threshold_entry)
+  threshold_row.addStretch()
+  options_layout.addLayout(threshold_row)
+  
+  # Help text
+  help_label = QLabel(
+      "Adaptive squelch tracks the noise floor, opening when the signal rises ~4 dB above it.\n"
+      "Leave the threshold blank to auto-track, or enter a negative dBFS value to pin the gate."
+  )
+  help_label.setStyleSheet("color: #708090;")
+  help_label.setWordWrap(True)
+  options_layout.addWidget(help_label)
+  
+  options_group.setLayout(options_layout)
+  main_layout.addWidget(options_group)
+
+
+5.6 Button Row
+--------------
+
+CURRENT (lines 726-753):
+  button_frame = ttk.Frame(main)
+  button_frame.pack(fill="x", expand=False)
+  button_frame.columnconfigure(0, weight=1)
+  
+  self.stop_btn = ttk.Button(
+      button_frame,
+      text="Stop DSP",
+      command=self._on_stop_processing,
+  )
+  self.stop_btn.grid(row=0, column=0, sticky="w", padx=6)
+  self.stop_btn.configure(state="disabled")
+
+REPLACE WITH:
+  # Button row
+  button_layout = QHBoxLayout()
+  
+  self.stop_btn = QPushButton("Stop DSP")
+  self.stop_btn.clicked.connect(self._on_stop_processing)
+  self.stop_btn.setEnabled(False)
+  button_layout.addWidget(self.stop_btn)
+  
+  button_layout.addStretch()  # Push remaining buttons to right
+  
+  self.preview_btn = QPushButton("Preview DSP")
+  self.preview_btn.clicked.connect(self._on_preview)
+  self.preview_btn.setEnabled(False)
+  button_layout.addWidget(self.preview_btn)
+  
+  self.confirm_btn = QPushButton("Confirm && Run")
+  self.confirm_btn.clicked.connect(self._on_confirm)
+  self.confirm_btn.setEnabled(False)
+  button_layout.addWidget(self.confirm_btn)
+  
+  cancel_btn = QPushButton("Cancel")
+  cancel_btn.clicked.connect(self._on_cancel)
+  button_layout.addWidget(cancel_btn)
+  
+  main_layout.addLayout(button_layout)
+
+
+5.7 Status Bar
+--------------
+
+CURRENT (lines 723-725):
+  self.status_label = ttk.Label(
+      main,
+      textvariable=self.status_var,
+      foreground="SlateGray",
+  )
+  self.status_label.pack(anchor="w", pady=(6, 8))
+
+REPLACE WITH:
+  # Use QMainWindow's built-in status bar
+  self.status_bar = QStatusBar()
+  self.setStatusBar(self.status_bar)
+  self.status_bar.showMessage(self.status_message)
+  
+  # Or continue using label in layout:
+  self.status_label = QLabel(self.status_message)
+  self.status_label.setStyleSheet("color: #708090;")
+  self.status_label.setWordWrap(True)
+  main_layout.addWidget(self.status_label)
+
+
+================================================================================
+SECTION 6: EVENT HANDLER TRANSFORMATIONS
+================================================================================
+
+6.1 Signal/Slot Patterns
+-------------------------
+
+Tk callback pattern:
+  ttk.Button(text="Browse", command=self._on_browse)
+
+Qt Signal/Slot pattern:
+  browse_btn = QPushButton("Browse")
+  browse_btn.clicked.connect(self._on_browse)
+
+Qt provides automatic thread-safe signal delivery, eliminating the need for
+many self.root.after(0, ...) calls in threading code.
+
+
+6.2 File Dialog Changes
+------------------------
+
+CURRENT _on_browse() (lines 760-769):
+  def _on_browse(self) -> None:
+      path = filedialog.askopenfilename(
+          title="Select SDR++ baseband WAV",
+          filetypes=[("WAV files", "*.wav"), ("All files", "*.*")],
+      )
+      if path:
+          self.file_var.set(path)
+          self.selected_path = Path(path)
+          self._update_output_path_hint()
+          self._parse_center_from_name()
+
+REPLACE WITH:
+  def _on_browse(self) -> None:
+      file_path, _ = QFileDialog.getOpenFileName(
+          self,
+          "Select SDR++ baseband WAV",
+          "",  # Start directory (empty = last used)
+          "WAV files (*.wav);;All files (*.*)"
+      )
+      if file_path:
+          self.file_value = file_path
+          self.file_entry.setText(file_path)
+          self.selected_path = Path(file_path)
+          self._update_output_path_hint()
+          self._parse_center_from_name()
+
+
+6.3 Message Box Changes
+------------------------
+
+CURRENT (lines 780-785):
+  messagebox.showinfo(
+      "Center frequency",
+      "Could not derive a center frequency from WAV metadata or filename. Enter it manually.",
+  )
+
+REPLACE WITH:
+  QMessageBox.information(
+      self,
+      "Center frequency",
+      "Could not derive a center frequency from WAV metadata or filename. Enter it manually."
+  )
+
+CURRENT error dialogs:
+  messagebox.showerror("Preview failed", str(error))
+
+REPLACE WITH:
+  QMessageBox.critical(self, "Preview failed", str(error))
+
+
+6.4 Widget State Changes
+-------------------------
+
+CURRENT:
+  self.preview_btn.configure(state="disabled")
+  self.preview_btn.configure(state="normal")
+
+REPLACE WITH:
+  self.preview_btn.setEnabled(False)
+  self.preview_btn.setEnabled(True)
+
+
+6.5 Text Variable Updates
+--------------------------
+
+CURRENT:
+  self.center_var.set(f"{detection.value:.0f}")
+  value = self.center_var.get()
+
+REPLACE WITH:
+  self.center_value = f"{detection.value:.0f}"
+  self.center_entry.setText(self.center_value)
+  value = self.center_entry.text()
+
+
+6.6 Focus and Return Key Bindings
+----------------------------------
+
+CURRENT:
+  center_entry.bind("<FocusOut>", self._on_center_manual)
+  center_entry.bind("<Return>", self._on_center_manual)
+
+REPLACE WITH:
+  self.center_entry.editingFinished.connect(self._on_center_manual)
+  # editingFinished fires on focus loss or Return key
+
+For Enter key specifically:
+  self.center_entry.returnPressed.connect(self._on_center_manual)
+
+
+6.7 Combobox Selection Changes
+-------------------------------
+
+CURRENT:
+  demod_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_option_state())
+
+REPLACE WITH:
+  demod_combo.currentTextChanged.connect(lambda text: self._update_option_state())
+  # Or simply:
+  demod_combo.currentTextChanged.connect(self._update_option_state)
+
+
+================================================================================
+SECTION 7: MATPLOTLIB INTEGRATION
+================================================================================
+
+7.1 Canvas Replacement
+-----------------------
+
+CURRENT (lines 1142-1153):
+  self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_container)
+  self.canvas.draw()
+  if NavigationToolbar2Tk is not None:
+      self.toolbar = NavigationToolbar2Tk(self.canvas, self.plot_container)
+      self.toolbar.update()
+      self.toolbar.pack(side="top", fill="x")
+  canvas_widget = self.canvas.get_tk_widget()
+  canvas_widget.pack(fill="both", expand=True, padx=4, pady=4)
+
+REPLACE WITH:
+  self.canvas = FigureCanvasQTAgg(self.figure)
+  self.canvas.draw()
+  
+  if NavigationToolbar2QT is not None:
+      self.toolbar = NavigationToolbar2QT(self.canvas, self.plot_group)
+  
+  # Add to layout
+  plot_layout = self.plot_group.layout()
+  if self.toolbar:
+      plot_layout.addWidget(self.toolbar)
+  plot_layout.addWidget(self.canvas)
+
+
+7.2 Canvas Event Connections
+-----------------------------
+
+CURRENT (lines 1154-1156):
+  self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
+  self.canvas.mpl_connect("key_press_event", self._on_canvas_key)
+  self.canvas.mpl_connect("scroll_event", self._on_canvas_scroll)
+
+NO CHANGE REQUIRED - matplotlib event API is backend-agnostic.
+
+
+7.3 SpanSelector Integration
+-----------------------------
+
+CURRENT (lines 2185-2193):
+  self.selector = SpanSelector(
+      self.ax,
+      onselect=self._on_select,
+      direction="horizontal",
+      useblit=True,
+  )
+
+NO CHANGE REQUIRED - SpanSelector works identically with Qt backend.
+
+
+7.4 Waterfall Window
+---------------------
+
+CURRENT _WaterfallWindow class (lines 2210-2283):
+  def __init__(self, root: tk.Tk, on_select, on_close) -> None:
+      self.root = root
+      self.window = tk.Toplevel(root)
+      self.window.title("Waterfall (time vs frequency)")
+      self.window.geometry("900x700")
+      self.window.protocol("WM_DELETE_WINDOW", self._handle_close)
+      self.figure = Figure(figsize=(8.5, 5.5))
+      self.ax = self.figure.add_subplot(111)
+      self.canvas = FigureCanvasTkAgg(self.figure, master=self.window)
+      self.canvas.draw()
+      self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+REPLACE WITH:
+  class _WaterfallWindow(QMainWindow):
+      def __init__(self, parent: QMainWindow, on_select, on_close) -> None:
+          super().__init__(parent)
+          self._on_select = on_select
+          self._on_close = on_close
+          
+          self.setWindowTitle("Waterfall (time vs frequency)")
+          self.resize(900, 700)
+          
+          central_widget = QWidget()
+          layout = QVBoxLayout(central_widget)
+          
+          self.figure = Figure(figsize=(8.5, 5.5))
+          self.ax = self.figure.add_subplot(111)
+          self.canvas = FigureCanvasQTAgg(self.figure)
+          self.canvas.draw()
+          
+          layout.addWidget(self.canvas)
+          self.setCentralWidget(central_widget)
+          
+          self.cid = self.figure.canvas.mpl_connect("button_press_event", self._on_click)
+          self.freqs_hz = None
+          self.center_freq = 0.0
+          self.sample_rate = 0.0
+          self.image = None
+          self.alive = True
+          self._colorbar = None
+      
+      def closeEvent(self, event):
+          """Override Qt close event."""
+          self._handle_close()
+          event.accept()
+      
+      def _handle_close(self) -> None:
+          self.alive = False
+          try:
+              if self.cid is not None:
+                  self.figure.canvas.mpl_disconnect(self.cid)
+          except Exception:
+              pass
+          if self._on_close:
+              self._on_close()
+
+
+================================================================================
+SECTION 8: MAIN EVENT LOOP & APPLICATION LIFECYCLE
+================================================================================
+
+8.1 Application Launch
+-----------------------
+
+CURRENT launch_interactive_session() (lines 334-345):
+  def launch_interactive_session(...) -> InteractiveSessionResult:
+      ensure_matplotlib()
+      if tk is None or ttk is None:
+          raise RuntimeError(TK_DEPENDENCY_HINT)
+      if FigureCanvasTkAgg is None:
+          raise RuntimeError("matplotlib TkAgg backend is required")
+      
+      app = _InteractiveApp(...)
+      return app.run()
+
+REPLACE WITH:
+  def launch_interactive_session(...) -> InteractiveSessionResult:
+      ensure_matplotlib()
+      if QtWidgets is None:
+          raise RuntimeError(QT_DEPENDENCY_HINT)
+      if FigureCanvasQTAgg is None:
+          raise RuntimeError("matplotlib Qt backend is required")
+      
+      # Create QApplication if not already running
+      qapp = QApplication.instance()
+      if qapp is None:
+          qapp = QApplication(sys.argv)
+      
+      app = _InteractiveApp(...)
+      return app.run()
+
+
+8.2 Event Loop Execution
+-------------------------
+
+CURRENT run() method (lines 503-517):
+  def run(self) -> InteractiveSessionResult:
+      try:
+          self.root.mainloop()
+      finally:
+          self._cancel_active_pipeline()
+          # Cleanup threads
+          try:
+              self.root.destroy()
+          except Exception:
+              pass
+      if not self.selection or not self.selected_path:
+          raise KeyboardInterrupt()
+      # Build config and return
+
+REPLACE WITH:
+  def run(self) -> InteractiveSessionResult:
+      try:
+          self.show()  # Show the window
+          QApplication.instance().exec()  # Run event loop
+      finally:
+          self._cancel_active_pipeline()
+          # Cleanup threads (unchanged)
+      if not self.selection or not self.selected_path:
+          raise KeyboardInterrupt()
+      # Build config and return (unchanged)
+
+
+8.3 Window Close Handling
+--------------------------
+
+CURRENT (line 513):
+  self.root.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+REPLACE WITH:
+  # Override closeEvent method in _InteractiveApp class:
+  def closeEvent(self, event):
+      """Handle window close button."""
+      self._on_cancel()
+      event.accept()
+
+
+8.4 Application Quit
+---------------------
+
+CURRENT _on_cancel() and _on_confirm():
+  self.root.quit()
+
+REPLACE WITH:
+  QApplication.instance().quit()
+
+
+================================================================================
+SECTION 9: THREADING & PROGRESS UPDATES
+================================================================================
+
+9.1 Thread-Safe UI Updates
+---------------------------
+
+CURRENT pattern (throughout file):
+  try:
+      self.root.after(0, lambda: self._set_status(message, error=error))
+  except Exception:
+      pass
+
+REPLACE WITH Qt Signals:
+  # Define signals in _InteractiveApp class:
+  class _InteractiveApp(QMainWindow):
+      # Class-level signal definitions
+      status_update_signal = Signal(str, bool)  # message, is_error
+      snapshot_ready_signal = Signal(object)    # SnapshotData
+      
+      def __init__(self, ...):
+          super().__init__()
+          # Connect signals
+          self.status_update_signal.connect(self._set_status)
+          self.snapshot_ready_signal.connect(self._on_snapshot_ready)
+
+Usage in threads:
+  # BEFORE: self.root.after(0, lambda: self._set_status(msg, error=False))
+  # AFTER:  self.status_update_signal.emit(msg, False)
+
+
+9.2 StatusProgressSink Updates
+-------------------------------
+
+CURRENT (lines 70-110):
+  class StatusProgressSink(ProgressSink):
+      def __init__(self, update: Callable[[str, bool], None]):
+          self._update = update
+
+StatusProgressSink already uses callbacks, so minimal change needed.
+Just ensure callbacks use Qt signals:
+
+  sink = StatusProgressSink(
+      lambda msg, err: self.status_update_signal.emit(msg, err)
+  )
+
+
+9.3 Threading.Thread Remains Unchanged
+---------------------------------------
+
+Python threading.Thread works identically with Qt.
+No changes needed to _snapshot_thread or _preview_thread.
+
+
+================================================================================
+SECTION 10: STYLING & THEMING
+================================================================================
+
+10.1 Color Application
+-----------------------
+
+CURRENT Tk color setting:
+  self.status_label.configure(foreground="Firebrick" if error else "SlateGray")
+
+REPLACE WITH Qt stylesheets:
+  if error:
+      self.status_label.setStyleSheet("color: #B22222;")  # Firebrick
+  else:
+      self.status_label.setStyleSheet("color: #708090;")  # SlateGray
+
+
+10.2 System Theme Integration
+------------------------------
+
+Qt automatically respects system theme (light/dark mode).
+For explicit styling:
+
+  # Apply global stylesheet
+  app.setStyleSheet("""
+      QGroupBox {
+          font-weight: bold;
+          border: 1px solid gray;
+          border-radius: 5px;
+          margin-top: 1ex;
+          padding: 10px;
+      }
+      QGroupBox::title {
+          subcontrol-origin: margin;
+          subcontrol-position: top left;
+          padding: 0 3px;
+      }
+  """)
+
+
+10.3 Matplotlib Theme Synchronization
+--------------------------------------
+
+Current code already implements theme switching (lines 1086-1091).
+Ensure matplotlib theme matches Qt dark mode:
+
+  from matplotlib import rcParams
+  if QApplication.instance().styleHints().colorScheme() == Qt.ColorScheme.Dark:
+      rcParams['figure.facecolor'] = '#2b2b2b'
+      rcParams['axes.facecolor'] = '#2b2b2b'
+      rcParams['text.color'] = 'white'
+
+
+================================================================================
+SECTION 11: TESTING STRATEGY
+================================================================================
+
+11.1 Unit Test Updates
+-----------------------
+
+CURRENT test file: tests/test_cli_integration.py
+
+ADD new test file: tests/test_interactive_qt.py
+
+Key test scenarios:
+  1. QApplication initialization (mock)
+  2. Window creation and configuration
+  3. Widget state transitions
+  4. Signal/slot connections
+  5. File dialog mocking (QFileDialog.getOpenFileName)
+  6. MessageBox mocking (QMessageBox.information)
+
+Example test structure:
+  import pytest
+  from unittest.mock import MagicMock, patch
+  from PySide6.QtWidgets import QApplication
+  from iq_to_audio.interactive import _InteractiveApp
+
+  @pytest.fixture
+  def qapp():
+      app = QApplication.instance()
+      if app is None:
+          app = QApplication([])
+      yield app
+      # No quit - reuse across tests
+
+  def test_window_initialization(qapp):
+      base_kwargs = {"center_freq": 100e6}
+      app = _InteractiveApp(
+          base_kwargs=base_kwargs,
+          initial_path=None,
+          snapshot_seconds=2.0
+      )
+      assert app.windowTitle() == "IQ to Audio — Interactive Mode"
+      assert app.minimumSize().width() == 960
+
+
+11.2 Integration Testing
+-------------------------
+
+Manual integration tests:
+  1. Launch interactive mode: uv run iq-to-audio --interactive
+  2. Browse and load test WAV file
+  3. Verify spectrum display renders
+  4. Test span selection with mouse drag
+  5. Test waterfall window opening
+  6. Test preview DSP functionality
+  7. Verify Confirm & Run completes pipeline
+  8. Test Cancel button cleanup
+
+
+11.3 Regression Testing
+------------------------
+
+Ensure CLI mode remains functional:
+  uv run iq-to-audio --in testfiles/fc-132334577Hz-ft-132300000-AM.wav --ft 132300000 --bw 12500
+
+Verify processing.py unchanged:
+  Compare hash of processing.py before and after migration
+
+
+================================================================================
+SECTION 12: DOCUMENTATION UPDATES
+================================================================================
+
+12.1 README.md Updates
+-----------------------
+
+ADD to installation section:
+  ## Installation
+  
+  ```bash
+  pip install iq-to-audio
+  
+  # For interactive mode, also install:
+  pip install PySide6
+  ```
+
+UPDATE requirements section:
+  ## Requirements
+  - Python >= 3.14
+  - FFmpeg (for audio processing)
+  - Optional: PySide6 (for interactive mode)
+
+
+12.2 Docstring Updates
+-----------------------
+
+UPDATE launch_interactive_session() docstring:
+  """Launch the PySide6-based interactive GUI for full-session control.
+  
+  Requires PySide6 to be installed. The GUI provides:
+  - Spectrum visualization with interactive frequency selection
+  - Waterfall display for time-domain analysis
+  - Real-time parameter adjustment
+  - DSP preview before full processing
+  
+  Raises:
+      RuntimeError: If PySide6 is not installed
+  """
+
+
+12.3 AGENTS.md Updates
+-----------------------
+
+UPDATE Build, Test, and Development Commands section:
+  For interactive mode testing:
+    uv run --with PySide6 iq-to-audio --interactive
+  
+  For interactive mode development:
+    uv pip install -e ".[dev]"
+    uv pip install PySide6
+
+
+================================================================================
+SECTION 13: MIGRATION EXECUTION CHECKLIST
+================================================================================
+
+Phase 1: Preparation (30 minutes)
+----------------------------------
+[ ] Back up current interactive.py to interactive_tk_backup.py
+[ ] Update pyproject.toml dependencies
+[ ] Install PySide6: uv pip install PySide6
+[ ] Verify Qt backend available: python -c "from PySide6 import QtWidgets; print('OK')"
+[ ] Create feature branch: git checkout -b feature/qt6-migration
+
+Phase 2: Core Migration (2 hours)
+----------------------------------
+[ ] Replace import statements (Section 3.1)
+[ ] Change _InteractiveApp to inherit QMainWindow (Section 4.1)
+[ ] Delete _ScrollableFrame class (Section 3.3)
+[ ] Convert Tk variables to Python attributes (Section 4.4)
+[ ] Update widget type hints (Section 4.5)
+[ ] Rewrite _build_ui() method (Section 5)
+[ ] Update _configure_root_window → _configure_main_window (Section 4.3)
+
+Phase 3: Event Handlers (1 hour)
+---------------------------------
+[ ] Replace filedialog with QFileDialog (Section 6.2)
+[ ] Replace messagebox with QMessageBox (Section 6.3)
+[ ] Update widget state methods .configure() → .setEnabled() (Section 6.4)
+[ ] Update variable access .get()/.set() → .text()/.setText() (Section 6.5)
+[ ] Update event bindings to Qt signals (Section 6.6, 6.7)
+
+Phase 4: Matplotlib Integration (45 minutes)
+---------------------------------------------
+[ ] Replace FigureCanvasTkAgg with FigureCanvasQTAgg (Section 7.1)
+[ ] Replace NavigationToolbar2Tk with NavigationToolbar2QT (Section 7.1)
+[ ] Update canvas embedding in layout (Section 7.1)
+[ ] Migrate _WaterfallWindow to QMainWindow (Section 7.4)
+[ ] Add closeEvent override (Section 7.4)
+
+Phase 5: Application Lifecycle (30 minutes)
+--------------------------------------------
+[ ] Add QApplication initialization in launch_interactive_session (Section 8.1)
+[ ] Update run() method to use app.exec() (Section 8.2)
+[ ] Add closeEvent override to _InteractiveApp (Section 8.3)
+[ ] Replace self.root.quit() with QApplication.quit() (Section 8.4)
+
+Phase 6: Threading & Signals (1 hour)
+--------------------------------------
+[ ] Define Qt signals in _InteractiveApp (Section 9.1)
+[ ] Connect signals in __init__ (Section 9.1)
+[ ] Replace self.root.after(0, ...) with signal.emit() (Section 9.1)
+[ ] Update StatusProgressSink to use signals (Section 9.2)
+[ ] Test thread-safe UI updates
+
+Phase 7: Testing (1 hour)
+--------------------------
+[ ] Create tests/test_interactive_qt.py (Section 11.1)
+[ ] Write unit tests for window initialization
+[ ] Write unit tests for signal/slot connections
+[ ] Manual test: Load WAV file
+[ ] Manual test: Spectrum display
+[ ] Manual test: Span selection
+[ ] Manual test: Waterfall window
+[ ] Manual test: Preview DSP
+[ ] Manual test: Confirm & Run
+[ ] Regression test: CLI mode still works
+
+Phase 8: Polish & Documentation (30 minutes)
+---------------------------------------------
+[ ] Apply Qt stylesheets (Section 10.1, 10.2)
+[ ] Update README.md (Section 12.1)
+[ ] Update docstrings (Section 12.2)
+[ ] Update AGENTS.md (Section 12.3)
+[ ] Add migration notes to commit message
+
+Phase 9: Review & Cleanup (30 minutes)
+---------------------------------------
+[ ] Review all changes against checklist
+[ ] Test on macOS (primary platform per context)
+[ ] Test on Linux (if available)
+[ ] Test on Windows (if available)
+[ ] Remove debug print statements
+[ ] Run full test suite: uv run --with dev pytest
+[ ] Commit changes: git commit -m "Migrate interactive mode from Tkinter to PySide6"
+[ ] Create pull request with before/after screenshots
+
+
+================================================================================
+SECTION 14: ROLLBACK PLAN
+================================================================================
+
+If migration fails:
+  1. git checkout main
+  2. Restore interactive_tk_backup.py to interactive.py
+  3. Revert pyproject.toml changes
+  4. Document blockers in GitHub issue
+
+Partial migration option:
+  Keep both implementations:
+    - interactive_tk.py (original)
+    - interactive_qt.py (new)
+  
+  Add CLI flag to choose:
+    --interactive-backend {tk,qt}
+  
+  Default to Qt if available, fall back to Tk.
+
+
+================================================================================
+SECTION 15: FUTURE ENHANCEMENTS POST-MIGRATION
+================================================================================
+
+Once migration is stable, consider adding:
+
+15.1 Advanced UI Controls
+--------------------------
+- QDial for frequency tuning
+- QSlider for bandwidth adjustment with live preview
+- Keyboard shortcuts (Ctrl+O for open, Ctrl+P for preview)
+- Recent files menu
+- Drag-and-drop file support
+
+15.2 Real-Time Features
+-----------------------
+- Live audio monitoring via QAudioOutput
+- Real-time spectrogram updates
+- Recording level meters with QPainter
+
+15.3 Dock Widgets
+-----------------
+- Separate dock for demod options
+- Separate dock for spectrum controls
+- Dockable waterfall view
+
+15.4 Configuration Persistence
+-------------------------------
+- QSettings for saving window geometry
+- Save/restore last used parameters
+- Export/import configuration presets
+
+15.5 Visualization Enhancements
+--------------------------------
+- Constellation diagram for SSB/AM
+- Real-time FFT updates
+- Multi-channel selection and comparison
+
+
+================================================================================
+SECTION 16: KEY REFERENCE LINKS
+================================================================================
+
+Official Documentation:
+-----------------------
+- PySide6 Overview:
+  https://doc.qt.io/qtforpython-6/
+
+- PySide6 API Reference:
+  https://doc.qt.io/qtforpython-6/api.html
+
+- Qt for Python Tutorial:
+  https://doc.qt.io/qtforpython-6/tutorials/index.html
+
+- Qt Widgets Module:
+  https://doc.qt.io/qt-6/qtwidgets-index.html
+
+- Signals & Slots:
+  https://doc.qt.io/qtforpython-6/overviews/signalsandslots.html
+
+- Qt Layouts:
+  https://doc.qt.io/qt-6/layout.html
+
+Matplotlib Integration:
+-----------------------
+- Matplotlib Qt Backend:
+  https://matplotlib.org/stable/users/explain/backends.html#qt-5-and-6
+
+- Embedding Matplotlib in Qt:
+  https://matplotlib.org/stable/gallery/user_interfaces/embedding_in_qt_sgskip.html
+
+- FigureCanvasQTAgg Documentation:
+  https://matplotlib.org/stable/api/backend_qt_api.html
+
+Migration Guides:
+-----------------
+- Tkinter to Qt Migration:
+  https://wiki.qt.io/Transition_from_Tkinter_to_Qt
+
+- Qt for Python Examples:
+  https://github.com/qt/pyside-examples
+
+- Qt Stylesheets Reference:
+  https://doc.qt.io/qt-6/stylesheet-reference.html
+
+Threading:
+----------
+- QThread Documentation:
+  https://doc.qt.io/qt-6/qthread.html
+
+- Thread-Safe Signal/Slot:
+  https://doc.qt.io/qt-6/threads-qobject.html
+
+Testing:
+--------
+- pytest-qt Plugin:
+  https://pytest-qt.readthedocs.io/
+
+- Qt Test Framework:
+  https://doc.qt.io/qt-6/qtest-overview.html
+
+
+================================================================================
+SECTION 17: COMMON PITFALLS & SOLUTIONS
+================================================================================
+
+17.1 QApplication Not Found
+----------------------------
+SYMPTOM: "QApplication not found" at runtime
+SOLUTION: Always create QApplication before any widgets:
+  qapp = QApplication.instance() or QApplication(sys.argv)
+
+17.2 Signal Connection Timing
+------------------------------
+SYMPTOM: Signals don't fire
+SOLUTION: Connect signals AFTER creating widgets in __init__:
+  self.button = QPushButton("Click")
+  self.button.clicked.connect(self.on_click)  # Connect after creation
+
+17.3 Layout Not Visible
+------------------------
+SYMPTOM: Widgets don't appear
+SOLUTION: Ensure layout is set and show() is called:
+  widget.setLayout(layout)
+  widget.show()
+
+17.4 Thread UI Updates Crash
+-----------------------------
+SYMPTOM: "QObject::setProperty: Cannot set property on a different thread"
+SOLUTION: Use signals to cross thread boundaries:
+  # In thread: self.status_signal.emit("message")
+  # In main: self.status_signal.connect(self._update_status)
+
+17.5 Matplotlib Backend Not Found
+----------------------------------
+SYMPTOM: "No module named 'matplotlib.backends.backend_qtagg'"
+SOLUTION: Ensure matplotlib 3.5+ installed:
+  uv pip install --upgrade matplotlib
+
+17.6 Memory Leaks with Figures
+-------------------------------
+SYMPTOM: Memory grows on repeated preview
+SOLUTION: Explicitly close matplotlib figures:
+  plt.close(self.figure)
+  self.figure = None
+
+17.7 Modal Dialog Blocks
+-------------------------
+SYMPTOM: QFileDialog blocks entire app
+SOLUTION: Use non-modal dialogs or QFileDialog.DontUseNativeDialog:
+  path, _ = QFileDialog.getOpenFileName(
+      self, "Open", "", "WAV (*.wav)",
+      options=QFileDialog.Option.DontUseNativeDialog
+  )
+
+
+================================================================================
+SECTION 18: COMPATIBILITY MATRIX
+================================================================================
+
+| Component          | Tkinter Version | PySide6 Version | Notes              |
+|--------------------|-----------------|-----------------|---------------------|
+| Python Version     | 3.14+           | 3.14+           | No change           |
+| Qt Version         | N/A             | 6.6+            | LTS recommended     |
+| Matplotlib         | 3.10.7+         | 3.10.7+         | Qt backend required |
+| NumPy              | 1.24+           | 1.24+           | No change           |
+| SciPy              | 1.10+           | 1.10+           | No change           |
+| macOS              | 10.15+          | 10.15+          | Tested platform     |
+| Linux              | Any             | X11/Wayland     | Should work         |
+| Windows            | 10+             | 10+             | Should work         |
+
+
+================================================================================
+SECTION 19: MIGRATION VALIDATION
+================================================================================
+
+Validation Checklist:
+---------------------
+[ ] Application launches without errors
+[ ] Window renders at correct size (1150x780 initial)
+[ ] File browse dialog opens and returns selection
+[ ] Center frequency detection works from filename
+[ ] Spectrum plot renders with correct data
+[ ] Span selection works with mouse drag
+[ ] Double-click zoom functions
+[ ] Waterfall window opens in separate window
+[ ] Demod options enable/disable correctly
+[ ] Preview DSP runs without blocking UI
+[ ] Stop button cancels preview
+[ ] Progress updates appear in status bar
+[ ] Confirm & Run completes full pipeline
+[ ] Cancel button closes application cleanly
+[ ] No memory leaks after 10 preview cycles
+[ ] No threading errors in logs
+[ ] All keyboard shortcuts work
+[ ] Window resize preserves layout
+[ ] HiDPI scaling looks correct
+[ ] Dark mode styling applies (if system uses dark mode)
+
+
+================================================================================
+SECTION 20: SUCCESS CRITERIA
+================================================================================
+
+Migration is considered successful when:
+
+Functional:
+-----------
+- All existing Tk features work identically in Qt
+- No regression in DSP processing accuracy
+- CLI mode continues to function
+- Preview and Confirm & Run produce identical audio output
+- Thread cancellation works reliably
+
+Performance:
+------------
+- UI responsiveness equal or better than Tk version
+- Spectrum rendering ≤ 2 seconds for 2-second snapshots
+- Memory usage stable (< 500 MB for typical use)
+- No lag during span selection drag
+
+Quality:
+--------
+- Zero compiler warnings
+- All tests pass
+- Code follows PEP 8 and project style (AGENTS.md)
+- Documentation complete and accurate
+
+User Experience:
+----------------
+- Native look and feel on macOS
+- Intuitive layout (no UX regressions)
+- Error messages clear and helpful
+- Status updates informative
+
+
+================================================================================
+END OF MIGRATION PLAN
+================================================================================
+
+This plan provides comprehensive guidance for migrating iq-to-audio's
+interactive mode from Tkinter to PySide6. Follow sections sequentially,
+validate at each phase, and reference the links for detailed API docs.
+
+The migration preserves all DSP functionality while modernizing the UI
+framework for better performance, appearance, and future extensibility.
+
+Generated: 2025-10-10
+Author: GitHub Copilot
+Project: iq-to-audio (github.com/rknightion/iq-to-audio)

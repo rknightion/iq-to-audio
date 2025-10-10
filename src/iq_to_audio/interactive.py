@@ -132,6 +132,120 @@ class StatusProgressSink(ProgressSink):
             message = f"{message} — {pct:4.1f}%"
         self._update(message, highlight)
 
+
+_ScrollableBase = ttk.Frame if ttk is not None else object
+
+
+class _ScrollableFrame(_ScrollableBase):  # type: ignore[misc]
+    """Canvas-backed frame that exposes a vertical scrollbar."""
+
+    def __init__(self, master: "tk.Misc", *, padding: int = 0):
+        if tk is None or ttk is None:
+            raise RuntimeError("Tk is required to create a scrollable frame.")
+        super().__init__(master)
+        self._wheel_enabled = False
+
+        self.canvas = tk.Canvas(
+            self,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar = ttk.Scrollbar(
+            self,
+            orient="vertical",
+            command=self.canvas.yview,
+        )
+        self.scrollbar.pack(side="right", fill="y")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self._content = ttk.Frame(self.canvas, padding=padding)
+        self._window_id = self.canvas.create_window(
+            (0, 0),
+            window=self._content,
+            anchor="nw",
+        )
+        self._content.bind("<Configure>", self._on_frame_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+    @property
+    def content(self) -> "ttk.Frame":
+        return self._content
+
+    def enable_mousewheel(self) -> None:
+        if self._wheel_enabled:
+            return
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        self.canvas.bind_all("<Button-4>", self._on_scroll_up, add="+")
+        self.canvas.bind_all("<Button-5>", self._on_scroll_down, add="+")
+        self._wheel_enabled = True
+
+    def refresh(self) -> None:
+        bbox = self.canvas.bbox("all")
+        if bbox is not None:
+            self.canvas.configure(scrollregion=bbox)
+
+    def add_scroll_exclusion(self, widget: "tk.Misc") -> None:
+        try:
+            widget.winfo_id()
+        except Exception:
+            return
+        setattr(widget, "_iq_scroll_exclude", True)
+
+    def remove_scroll_exclusion(self, widget: "tk.Misc") -> None:
+        try:
+            widget.winfo_id()
+        except Exception:
+            return
+        if hasattr(widget, "_iq_scroll_exclude"):
+            delattr(widget, "_iq_scroll_exclude")
+
+    # -- internal helpers -------------------------------------------------
+    def _on_frame_configure(self, _event) -> None:
+        self.refresh()
+
+    def _on_canvas_configure(self, event) -> None:
+        self.canvas.itemconfigure(self._window_id, width=event.width)
+
+    def _should_scroll(self, widget: "tk.Misc") -> bool:
+        current: Optional["tk.Misc"] = widget
+        while current is not None:
+            if getattr(current, "_iq_scroll_exclude", False):
+                return False
+            if current is self._content:
+                return True
+            current = getattr(current, "master", None)
+        return False
+
+    def _scroll_units(self, delta: int) -> None:
+        if delta == 0:
+            return
+        self.canvas.yview_scroll(delta, "units")
+
+    def _on_mousewheel(self, event) -> None:
+        if not self._should_scroll(getattr(event, "widget", self.canvas)):
+            return
+        state = getattr(event, "state", 0)
+        # Skip if Shift is held to preserve horizontal scroll gestures.
+        if state & 0x0001:
+            return
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            return
+        if abs(delta) >= 120:
+            steps = int(-delta / 120)
+        else:
+            steps = -1 if delta > 0 else 1
+        self._scroll_units(steps)
+
+    def _on_scroll_up(self, event) -> None:
+        if self._should_scroll(getattr(event, "widget", self.canvas)):
+            self._scroll_units(-1)
+
+    def _on_scroll_down(self, event) -> None:
+        if self._should_scroll(getattr(event, "widget", self.canvas)):
+            self._scroll_units(1)
+
 def gather_snapshot(
     config: ProcessingConfig,
     seconds: float = 2.0,
@@ -304,7 +418,7 @@ class _InteractiveApp:
 
         self.root = tk.Tk()
         self.root.title("IQ to Audio — Interactive Mode")
-        self.root.geometry("1150x1210")
+        self._configure_root_window()
 
         self.selected_path: Optional[Path] = initial_path
         self.selection: Optional[SelectionResult] = None
@@ -403,6 +517,7 @@ class _InteractiveApp:
         self._snapshot_thread: Optional[threading.Thread] = None
         self.stop_btn: Optional[ttk.Button] = None
         self._status_sink: Optional[StatusProgressSink] = None
+        self._scroll_frame: Optional[_ScrollableFrame] = None
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_cancel)
@@ -458,10 +573,40 @@ class _InteractiveApp:
         )
         return InteractiveSessionResult(config=config, progress_sink=self.progress_sink)
 
+    def _configure_root_window(self) -> None:
+        screen_w = max(1, self.root.winfo_screenwidth())
+        screen_h = max(1, self.root.winfo_screenheight())
+        usable_width = min(1150, max(1000, screen_w - 160))
+        usable_height = min(max(780, screen_h - 200), screen_h - 60)
+        usable_height = max(680, usable_height)
+        self.root.geometry(f"{int(usable_width)}x{int(usable_height)}")
+        self.root.minsize(960, 680)
+
+    def _refresh_scroll_region(self) -> None:
+        if self._scroll_frame is None:
+            return
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        self._scroll_frame.refresh()
+
+    def _drop_plot_scroll_exclusions(self) -> None:
+        if self._scroll_frame is None:
+            return
+        if self.canvas:
+            widget = self.canvas.get_tk_widget()
+            self._scroll_frame.remove_scroll_exclusion(widget)
+        if self.toolbar:
+            self._scroll_frame.remove_scroll_exclusion(self.toolbar)
+
     # --- UI Construction -------------------------------------------------
     def _build_ui(self) -> None:
-        main = ttk.Frame(self.root, padding=12)
-        main.pack(fill="both", expand=True)
+        scroll = _ScrollableFrame(self.root, padding=12)
+        scroll.pack(fill="both", expand=True)
+        scroll.enable_mousewheel()
+        self._scroll_frame = scroll
+        main = scroll.content
 
         file_frame = ttk.LabelFrame(main, text="Recording")
         file_frame.pack(fill="x", expand=False)
@@ -792,6 +937,7 @@ class _InteractiveApp:
 
         self._update_option_state()
         self._update_output_path_hint()
+        self._refresh_scroll_region()
 
     # --- Event handlers --------------------------------------------------
     def _on_browse(self) -> None:
@@ -1038,6 +1184,7 @@ class _InteractiveApp:
         if self.placeholder_label:
             self.placeholder_label.destroy()
             self.placeholder_label = None
+        self._drop_plot_scroll_exclusions()
         if self.toolbar:
             self.toolbar.destroy()
             self.toolbar = None
@@ -1101,7 +1248,12 @@ class _InteractiveApp:
             self.toolbar = NavigationToolbar2Tk(self.canvas, self.plot_container)
             self.toolbar.update()
             self.toolbar.pack(side="top", fill="x")
-        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)
+            if self._scroll_frame:
+                self._scroll_frame.add_scroll_exclusion(self.toolbar)
+        canvas_widget = self.canvas.get_tk_widget()
+        canvas_widget.pack(fill="both", expand=True, padx=4, pady=4)
+        if self._scroll_frame:
+            self._scroll_frame.add_scroll_exclusion(canvas_widget)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
         self.canvas.mpl_connect("key_press_event", self._on_canvas_key)
         self.canvas.mpl_connect("scroll_event", self._on_canvas_scroll)
@@ -1131,6 +1283,7 @@ class _InteractiveApp:
         if remember and snapshot is not None:
             self.snapshot_data = snapshot
         self._update_waterfall_display(sample_rate, center_freq, waterfall)
+        self._refresh_scroll_region()
 
     def _on_span_change(self, selection: SelectionResult) -> None:
         self.selection = selection
