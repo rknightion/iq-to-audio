@@ -3,47 +3,53 @@ from __future__ import annotations
 import logging
 import math
 import os
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Optional
 
 import numpy as np
+from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
+)
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
+from matplotlib.widgets import SpanSelector
 
 from .processing import ProcessingCancelled, ProcessingConfig, tune_chunk_size
 from .preview import run_preview
 from .probe import SampleRateProbe, probe_sample_rate
-from .utils import detect_center_frequency
-from .spectrum import WaterfallResult, compute_psd, streaming_waterfall
-from .visualize import SelectionResult, ensure_matplotlib
 from .progress import ProgressSink
+from .spectrum import WaterfallResult, compute_psd, streaming_waterfall
+from .utils import detect_center_frequency
+from .visualize import SelectionResult, ensure_matplotlib
 
 LOG = logging.getLogger(__name__)
 
-try:  # GUI widgets are optional at runtime.
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
-except Exception:  # pragma: no cover - runtime guard
-    tk = None  # type: ignore[assignment]
-    ttk = None  # type: ignore[assignment]
-
-try:  # Matplotlib embedding for Tk.
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-    from matplotlib.figure import Figure
-    from matplotlib.widgets import SpanSelector
-    from matplotlib.ticker import FuncFormatter
-except Exception:  # pragma: no cover - runtime guard
-    FigureCanvasTkAgg = None  # type: ignore[assignment]
-    Figure = None  # type: ignore[assignment]
-    SpanSelector = None  # type: ignore[assignment]
-    NavigationToolbar2Tk = None  # type: ignore[assignment]
-    FuncFormatter = None  # type: ignore[assignment]
-
-TK_DEPENDENCY_HINT = (
-    "Tkinter is required for --interactive. Install system Tk packages "
-    "(e.g., `sudo apt install python3-tk` on Debian/Ubuntu, `brew install python-tk@3.14` on macOS, "
-    "or `sudo pacman -S tk` on Arch)."
+QT_DEPENDENCY_HINT = (
+    "PySide6 is required for --interactive. Install it via "
+    "`uv pip install PySide6 PySide6-Addons`."
 )
+
 
 @dataclass
 class InteractiveOutcome:
@@ -84,7 +90,7 @@ class SnapshotData:
 
 
 class StatusProgressSink(ProgressSink):
-    """Simple progress sink that reflects pipeline status in the main status bar."""
+    """Simple progress sink that reflects pipeline status in the status bar."""
 
     def __init__(self, update: Callable[[str, bool], None]):
         self._update = update
@@ -137,119 +143,6 @@ class StatusProgressSink(ProgressSink):
             message = f"{message} — {pct:4.1f}%"
         self._update(message, highlight)
 
-
-_ScrollableBase = ttk.Frame if ttk is not None else object
-
-
-class _ScrollableFrame(_ScrollableBase):  # type: ignore[misc]
-    """Canvas-backed frame that exposes a vertical scrollbar."""
-
-    def __init__(self, master: "tk.Misc", *, padding: int = 0):
-        if tk is None or ttk is None:
-            raise RuntimeError("Tk is required to create a scrollable frame.")
-        super().__init__(master)
-        self._wheel_enabled = False
-
-        self.canvas = tk.Canvas(
-            self,
-            borderwidth=0,
-            highlightthickness=0,
-        )
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.scrollbar = ttk.Scrollbar(
-            self,
-            orient="vertical",
-            command=self.canvas.yview,
-        )
-        self.scrollbar.pack(side="right", fill="y")
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-
-        self._content = ttk.Frame(self.canvas, padding=padding)
-        self._window_id = self.canvas.create_window(
-            (0, 0),
-            window=self._content,
-            anchor="nw",
-        )
-        self._content.bind("<Configure>", self._on_frame_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-
-    @property
-    def content(self) -> "ttk.Frame":
-        return self._content
-
-    def enable_mousewheel(self) -> None:
-        if self._wheel_enabled:
-            return
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
-        self.canvas.bind_all("<Button-4>", self._on_scroll_up, add="+")
-        self.canvas.bind_all("<Button-5>", self._on_scroll_down, add="+")
-        self._wheel_enabled = True
-
-    def refresh(self) -> None:
-        bbox = self.canvas.bbox("all")
-        if bbox is not None:
-            self.canvas.configure(scrollregion=bbox)
-
-    def add_scroll_exclusion(self, widget: "tk.Misc") -> None:
-        try:
-            widget.winfo_id()
-        except Exception:
-            return
-        setattr(widget, "_iq_scroll_exclude", True)
-
-    def remove_scroll_exclusion(self, widget: "tk.Misc") -> None:
-        try:
-            widget.winfo_id()
-        except Exception:
-            return
-        if hasattr(widget, "_iq_scroll_exclude"):
-            delattr(widget, "_iq_scroll_exclude")
-
-    # -- internal helpers -------------------------------------------------
-    def _on_frame_configure(self, _event) -> None:
-        self.refresh()
-
-    def _on_canvas_configure(self, event) -> None:
-        self.canvas.itemconfigure(self._window_id, width=event.width)
-
-    def _should_scroll(self, widget: "tk.Misc") -> bool:
-        current: Optional["tk.Misc"] = widget
-        while current is not None:
-            if getattr(current, "_iq_scroll_exclude", False):
-                return False
-            if current is self._content:
-                return True
-            current = getattr(current, "master", None)
-        return False
-
-    def _scroll_units(self, delta: int) -> None:
-        if delta == 0:
-            return
-        self.canvas.yview_scroll(delta, "units")
-
-    def _on_mousewheel(self, event) -> None:
-        if not self._should_scroll(getattr(event, "widget", self.canvas)):
-            return
-        state = getattr(event, "state", 0)
-        # Skip if Shift is held to preserve horizontal scroll gestures.
-        if state & 0x0001:
-            return
-        delta = getattr(event, "delta", 0)
-        if delta == 0:
-            return
-        if abs(delta) >= 120:
-            steps = int(-delta / 120)
-        else:
-            steps = -1 if delta > 0 else 1
-        self._scroll_units(steps)
-
-    def _on_scroll_up(self, event) -> None:
-        if self._should_scroll(getattr(event, "widget", self.canvas)):
-            self._scroll_units(-1)
-
-    def _on_scroll_down(self, event) -> None:
-        if self._should_scroll(getattr(event, "widget", self.canvas)):
-            self._scroll_units(1)
 
 def gather_snapshot(
     config: ProcessingConfig,
@@ -382,33 +275,180 @@ def _waterfall_to_tuple(
     )
 
 
-def launch_interactive_session(
-    *,
-    input_path: Optional[Path],
-    base_kwargs: dict,
-    snapshot_seconds: float,
-) -> InteractiveSessionResult:
-    """Launch the Tk-based interactive TUI/GUI for full-session control."""
-    ensure_matplotlib()
-    if tk is None or ttk is None:
-        raise RuntimeError(
-            TK_DEPENDENCY_HINT
+class _WaterfallWindow(QMainWindow):
+    """Secondary window hosting the waterfall plot."""
+
+    def __init__(self, parent: QMainWindow, on_select, on_close) -> None:
+        super().__init__(parent)
+        self._on_select = on_select
+        self._on_close = on_close
+
+        self.setWindowTitle("Waterfall (time vs frequency)")
+        self.resize(900, 700)
+
+        central = QWidget()
+        layout = QVBoxLayout(central)
+
+        self.figure = Figure(figsize=(8.5, 5.5))
+        self.ax = self.figure.add_subplot(111)
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas.draw()
+        layout.addWidget(self.canvas)
+
+        self.setCentralWidget(central)
+
+        self.cid = self.figure.canvas.mpl_connect("button_press_event", self._on_click)
+        self.freqs_hz: Optional[np.ndarray] = None
+        self.center_freq = 0.0
+        self.sample_rate = 0.0
+        self.image = None
+        self.alive = True
+        self._colorbar = None
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._handle_close()
+        event.accept()
+
+    def _handle_close(self) -> None:
+        self.alive = False
+        try:
+            if self.cid is not None:
+                self.figure.canvas.mpl_disconnect(self.cid)
+        except Exception:
+            pass
+        if self._on_close:
+            self._on_close()
+
+    def update(
+        self,
+        *,
+        freqs: np.ndarray,
+        times: np.ndarray,
+        matrix: np.ndarray,
+        center_freq: float,
+        sample_rate: float,
+        floor_db: float,
+        cmap: str,
+    ) -> None:
+        if freqs.size == 0 or matrix.size == 0:
+            return
+        self.freqs_hz = center_freq + freqs
+        self.center_freq = center_freq
+        self.sample_rate = sample_rate
+        if self._colorbar is not None:
+            try:
+                self._colorbar.remove()
+            except Exception:
+                pass
+            self._colorbar = None
+        self.ax.clear()
+        peak = float(np.max(matrix[np.isfinite(matrix)])) if np.isfinite(matrix).any() else 0.0
+        vmin = peak - max(20.0, floor_db)
+        vmax = peak
+        freq_mhz = self.freqs_hz / 1e6
+        extent = [freq_mhz.min(), freq_mhz.max(), times.max(), times.min()]
+        self.image = self.ax.imshow(
+            matrix,
+            aspect="auto",
+            origin="upper",
+            extent=extent,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
         )
-    if FigureCanvasTkAgg is None or Figure is None or SpanSelector is None:
-        raise RuntimeError(
-            "matplotlib TkAgg backend is required for --interactive."
+        self.ax.set_xlabel("Frequency (MHz)")
+        self.ax.set_ylabel("Time (s)")
+        self.ax.set_title("Waterfall (newest at bottom)")
+        self._colorbar = self.figure.colorbar(
+            self.image, ax=self.ax, orientation="vertical", label="Power (dB)"
         )
+        self.canvas.draw_idle()
 
-    app = _InteractiveApp(
-        base_kwargs=base_kwargs,
-        initial_path=input_path,
-        snapshot_seconds=snapshot_seconds,
-    )
-    return app.run()
+    def _on_click(self, event) -> None:
+        if event.inaxes != self.ax or event.xdata is None:
+            return
+        freq_mhz = float(event.xdata)
+        freq_hz = freq_mhz * 1e6
+        if self._on_select:
+            self._on_select(freq_hz)
 
 
-class _InteractiveApp:
-    """Tk + matplotlib workflow for selecting file, frequency span, and running."""
+class _SpanController:
+    """Track matplotlib SpanSelector selections and update overlays."""
+
+    def __init__(
+        self,
+        *,
+        ax,
+        canvas: FigureCanvasQTAgg,
+        initial: SelectionResult,
+        on_change,
+    ):
+        self.ax = ax
+        self.canvas = canvas
+        self.on_change = on_change
+        self.selection = SelectionResult(initial.center_freq, initial.bandwidth)
+
+        half_bw = max(self.selection.bandwidth / 2.0, 1.0)
+        self.center_line = self.ax.axvline(
+            self.selection.center_freq, color="C3", ls="--", lw=1.2, label="Center"
+        )
+        self.low_line = self.ax.axvline(
+            self.selection.center_freq - half_bw, color="C2", ls=":", lw=1.0
+        )
+        self.high_line = self.ax.axvline(
+            self.selection.center_freq + half_bw, color="C2", ls=":", lw=1.0
+        )
+        self.ax.legend(loc="upper right")
+
+        self.selector = SpanSelector(
+            self.ax,
+            onselect=self._on_select,
+            direction="horizontal",
+            useblit=True,
+        )
+        self._emit()
+
+    def _on_select(self, xmin: float, xmax: float) -> None:
+        if xmin == xmax:
+            return
+        lo, hi = sorted((xmin, xmax))
+        center = 0.5 * (lo + hi)
+        bw = max(hi - lo, 10.0)
+        self.selection = SelectionResult(center, bw)
+        self._update_lines()
+        self._emit()
+
+    def _update_lines(self) -> None:
+        half_bw = max(self.selection.bandwidth / 2.0, 1.0)
+        self.center_line.set_xdata(
+            [self.selection.center_freq, self.selection.center_freq]
+        )
+        self.low_line.set_xdata(
+            [self.selection.center_freq - half_bw] * 2
+        )
+        self.high_line.set_xdata(
+            [self.selection.center_freq + half_bw] * 2
+        )
+        self.canvas.draw_idle()
+
+    def _emit(self) -> None:
+        if self.on_change:
+            self.on_change(self.selection)
+
+    def set_selection(self, center: float, bandwidth: float) -> None:
+        self.selection = SelectionResult(center, max(bandwidth, 10.0))
+        self._update_lines()
+        self._emit()
+
+class _InteractiveApp(QMainWindow):
+    """PySide6-based interactive spectrum viewer for IQ to Audio."""
+
+    status_update_signal = Signal(str, bool)
+    snapshot_ready_signal = Signal(object, object, object)  # snapshot, path, previous_path
+    snapshot_failed_signal = Signal(Exception, bool)
+    snapshot_finished_signal = Signal()
+    preview_complete_signal = Signal(object, bool)  # result/error flag
 
     def __init__(
         self,
@@ -417,88 +457,101 @@ class _InteractiveApp:
         initial_path: Optional[Path],
         snapshot_seconds: float,
     ):
+        super().__init__()
         self.base_kwargs = dict(base_kwargs)
         self.initial_path = initial_path
-        self.default_snapshot = snapshot_seconds
+        self.default_snapshot = max(snapshot_seconds, 0.25)
 
-        self.root = tk.Tk()
-        self.root.title("IQ to Audio — Interactive Mode")
-        self._configure_root_window()
-
+        # Session state
         self.selected_path: Optional[Path] = initial_path
         self.selection: Optional[SelectionResult] = None
         self.sample_rate: Optional[float] = None
         self.center_freq: Optional[float] = self.base_kwargs.get("center_freq")
         self.probe: Optional[SampleRateProbe] = None
-        self.snapshot_seconds = max(snapshot_seconds, 0.25)
-
-        self.figure: Optional[Figure] = None
-        self.canvas: Optional[FigureCanvasTkAgg] = None
-        self.span_controller: Optional[_SpanController] = None
-        self.progress_sink: Optional[ProgressSink] = None
-        self.toolbar: Optional[NavigationToolbar2Tk] = None
-        self.plot_container: Optional[ttk.Frame] = None
+        self.snapshot_seconds = self.default_snapshot
         self.snapshot_data: Optional[SnapshotData] = None
-        self._refresh_job: Optional[str] = None
-        self.demod_options = ("nfm", "am", "usb", "lsb", "ssb")
-        self.color_themes: dict[str, dict[str, str]] = {
-            "default": {"bg": "white", "face": "white", "line": "#1f77b4", "fg": "black", "grid": ":", "grid_color": "#d0d0d0"},
-            "contrast": {"bg": "#101010", "face": "#101010", "line": "#ff7600", "fg": "white", "grid": "--", "grid_color": "#444444"},
-            "night": {"bg": "#0b1a2a", "face": "#0b1a2a", "line": "#7fffd4", "fg": "#f0f4ff", "grid": ":", "grid_color": "#223347"},
-        }
+        self._preview_thread: Optional[threading.Thread] = None
+        self._snapshot_thread: Optional[threading.Thread] = None
+        self._preview_running = False
+        self._status_sink: Optional[StatusProgressSink] = None
+        self.progress_sink: Optional[ProgressSink] = None
+        self.waterfall_window: Optional[_WaterfallWindow] = None
+        self.figure: Optional[Figure] = None
+        self.canvas: Optional[FigureCanvasQTAgg] = None
+        self.toolbar: Optional[NavigationToolbar2QT] = None
         self.ax_main = None
+        self.span_controller: Optional[_SpanController] = None
         self._freq_min_hz: Optional[float] = None
         self._freq_max_hz: Optional[float] = None
+        self.plot_layout: Optional[QVBoxLayout] = None
+        self.status_bar: Optional[QStatusBar] = None
+        self._preview_lock = threading.Lock()
+        self._active_pipeline = None
+        self._refresh_timer: Optional[QtCore.QTimer] = None
+        self._refresh_pending: tuple[bool, bool] = (False, False)
 
-        self.file_var = tk.StringVar(
-            value=str(initial_path) if initial_path else ""
-        )
-        self.center_var = tk.StringVar(
-            value=self._format_float(self.base_kwargs.get("center_freq"))
-        )
-        self.center_source_var = tk.StringVar(value="Center source: —")
-        self.center_source: str = "unavailable"
+        # UI state values (replacing Tkinter Variable instances)
+        self.file_value = str(initial_path) if initial_path else ""
+        self.center_value = self._format_float(self.base_kwargs.get("center_freq"))
+        self.center_source_value = "Center source: —"
         initial_source = self.base_kwargs.get("center_freq_source")
+        self.center_source = initial_source or "unavailable"
         if initial_source:
-            self._set_center_source(initial_source)
-        else:
-            self._set_center_source("unavailable")
-        self.snapshot_var = tk.StringVar(
-            value=f"{self.snapshot_seconds:.2f}"
-        )
+            self.center_source_value = f"Center source: {initial_source}"
+        self.snapshot_text = f"{self.default_snapshot:.2f}"
         provided_output = self.base_kwargs.get("output_path")
         self._cli_output_path: Optional[Path] = Path(provided_output) if provided_output else None
-        self.output_dir_var = tk.StringVar(
-            value=str(self._cli_output_path.parent) if self._cli_output_path else ""
+        self.output_dir_value = (
+            str(self._cli_output_path.parent) if self._cli_output_path else ""
         )
-        self.output_path_var = tk.StringVar(value="Select a recording to preview output location.")
-        self.demod_var = tk.StringVar(
-            value=(self.base_kwargs.get("demod_mode") or "nfm").lower()
-        )
-        self.squelch_var = tk.BooleanVar(
-            value=self.base_kwargs.get("squelch_enabled", True)
-        )
-        self.trim_var = tk.BooleanVar(
-            value=self.base_kwargs.get("silence_trim", False)
-        )
-        self.agc_var = tk.BooleanVar(
-            value=self.base_kwargs.get("agc_enabled", True)
-        )
-        self._preferred_agc = self.agc_var.get()
+        self.output_hint = "Select a recording to preview output location."
+        demod_mode = (self.base_kwargs.get("demod_mode") or "nfm").lower()
+        self.demod_options = ("nfm", "am", "usb", "lsb", "ssb")
+        if demod_mode not in self.demod_options:
+            demod_mode = "nfm"
+        self.demod_value = demod_mode
+        self.squelch_enabled = bool(self.base_kwargs.get("squelch_enabled", True))
+        self.trim_enabled = bool(self.base_kwargs.get("silence_trim", False))
+        self.agc_enabled = bool(self.base_kwargs.get("agc_enabled", True))
+        self._preferred_agc = self.agc_enabled
         threshold = self.base_kwargs.get("squelch_dbfs")
-        self.squelch_threshold_var = tk.StringVar(
-            value="" if threshold is None else f"{threshold:.1f}"
-        )
-        self.squelch_threshold_entry: Optional[ttk.Entry] = None
-        self.full_snapshot_var = tk.BooleanVar(value=False)
-        self.nfft_var = tk.StringVar(value="262144")
-        self.smooth_var = tk.IntVar(value=3)
-        self.range_var = tk.IntVar(value=100)
-        self.theme_var = tk.StringVar(value="contrast")
-        self.waterfall_cmap_var = tk.StringVar(value="magma")
-        self.waterfall_slices_var = tk.StringVar(value="400")
-        self.waterfall_floor_var = tk.StringVar(value="110")
-        self.bandwidth_var = tk.StringVar(value="—")
+        self.squelch_threshold_value = "" if threshold is None else f"{threshold:.1f}"
+        self.full_snapshot = False
+        self.nfft_value = "262144"
+        self.smooth_value = 3
+        self.range_value = 100
+        self.theme_value = "contrast"
+        self.color_themes: dict[str, dict[str, str]] = {
+            "default": {
+                "bg": "white",
+                "face": "white",
+                "line": "#1f77b4",
+                "fg": "black",
+                "grid": ":",
+                "grid_color": "#d0d0d0",
+            },
+            "contrast": {
+                "bg": "#101010",
+                "face": "#101010",
+                "line": "#ff7600",
+                "fg": "white",
+                "grid": "--",
+                "grid_color": "#444444",
+            },
+            "night": {
+                "bg": "#0b1a2a",
+                "face": "#0b1a2a",
+                "line": "#7fffd4",
+                "fg": "#f0f4ff",
+                "grid": ":",
+                "grid_color": "#223347",
+            },
+        }
+        self.waterfall_cmap_value = "magma"
+        self.waterfall_slices_value = "400"
+        self.waterfall_floor_value = "110"
+        bandwidth = self.base_kwargs.get("bandwidth")
+        self.bandwidth_value = "—" if bandwidth is None else f"{bandwidth:.0f}"
         raw_targets = self.base_kwargs.get("target_freqs") or []
         if not raw_targets:
             initial_target = self.base_kwargs.get("target_freq")
@@ -513,529 +566,875 @@ class _InteractiveApp:
             defaults.append(f"{freq_val:.0f}" if freq_val > 0 else "")
         while len(defaults) < MAX_TARGET_FREQUENCIES:
             defaults.append("")
-        self.target_freq_vars = [tk.StringVar(value=val) for val in defaults]
-        self.offset_var = tk.StringVar(value="Offset: —")
-        self.sample_rate_var = tk.StringVar(value="Sample rate: —")
-        self.status_var = tk.StringVar(value="Select a recording to begin.")
-        self._update_target_freq_state()
+        self.target_freq_values: list[str] = defaults
+        self.offset_value = "Offset: —"
+        self.sample_rate_value = "Sample rate: —"
+        self.status_message = "Select a recording to begin."
 
-        self.load_preview_button: Optional[ttk.Button] = None
-        self.preview_btn: Optional[ttk.Button] = None
-        self.confirm_btn: Optional[ttk.Button] = None
-        self.status_label: Optional[ttk.Label] = None
-        self.plot_frame: Optional[ttk.LabelFrame] = None
-        self.placeholder_label: Optional[ttk.Label] = None
-        self.trim_check: Optional[ttk.Checkbutton] = None
-        self.agc_check: Optional[ttk.Checkbutton] = None
-        self.squelch_check: Optional[ttk.Checkbutton] = None
+        # Widget references
+        self.file_entry: Optional[QLineEdit] = None
+        self.center_entry: Optional[QLineEdit] = None
+        self.center_source_label: Optional[QLabel] = None
+        self.snapshot_entry: Optional[QLineEdit] = None
+        self.load_preview_button: Optional[QPushButton] = None
+        self.full_snapshot_check: Optional[QCheckBox] = None
+        self.output_dir_entry: Optional[QLineEdit] = None
+        self.output_hint_label: Optional[QLabel] = None
+        self.demod_combo: Optional[QComboBox] = None
+        self.squelch_check: Optional[QCheckBox] = None
+        self.trim_check: Optional[QCheckBox] = None
+        self.agc_check: Optional[QCheckBox] = None
+        self.squelch_threshold_entry: Optional[QLineEdit] = None
+        self.plot_group: Optional[QGroupBox] = None
+        self.placeholder_label: Optional[QLabel] = None
+        self.spectrum_nfft_combo: Optional[QComboBox] = None
+        self.spectrum_theme_combo: Optional[QComboBox] = None
+        self.spectrum_refresh_button: Optional[QPushButton] = None
+        self.spectrum_smooth_spin: Optional[QSpinBox] = None
+        self.spectrum_range_spin: Optional[QSpinBox] = None
+        self.waterfall_slices_spin: Optional[QSpinBox] = None
+        self.waterfall_floor_spin: Optional[QSpinBox] = None
+        self.waterfall_cmap_combo: Optional[QComboBox] = None
+        self.bandwidth_entry: Optional[QLineEdit] = None
+        self.sample_rate_label: Optional[QLabel] = None
+        self.offset_label: Optional[QLabel] = None
+        self.target_entries: list[QLineEdit] = []
+        self.status_label: Optional[QLabel] = None
+        self.stop_btn: Optional[QPushButton] = None
+        self.preview_btn: Optional[QPushButton] = None
+        self.confirm_btn: Optional[QPushButton] = None
 
-        self.waterfall_window: Optional[_WaterfallWindow] = None
-        self._preview_thread: Optional[threading.Thread] = None
-        self._preview_lock = threading.Lock()
-        self._active_pipeline = None
-        self._preview_running = False
-        self._snapshot_thread: Optional[threading.Thread] = None
-        self.stop_btn: Optional[ttk.Button] = None
-        self._status_sink: Optional[StatusProgressSink] = None
-        self._scroll_frame: Optional[_ScrollableFrame] = None
+        # Signal wiring
+        self.status_update_signal.connect(self._set_status)
+        self.snapshot_ready_signal.connect(self._on_snapshot_ready)
+        self.snapshot_failed_signal.connect(self._on_snapshot_failed)
+        self.snapshot_finished_signal.connect(self._on_snapshot_thread_finished)
+        self.preview_complete_signal.connect(self._on_preview_completed)
 
+        self._apply_styles()
+
+        # Window setup
+        self.setWindowTitle("IQ to Audio — Interactive Mode")
+        self._configure_main_window()
         self._build_ui()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self._update_option_state()
+        self._update_output_path_hint()
+        self._set_status(self.status_message, error=False)
 
-        if self.initial_path and self.initial_path.exists():
-            # Attempt to auto-populate center frequency from metadata/filename and preload snapshot.
-            detection = detect_center_frequency(self.initial_path)
-            if detection.value is not None:
-                self.center_var.set(f"{detection.value:.0f}")
-                self._set_center_source(detection.source)
-                self.base_kwargs["center_freq"] = detection.value
-                self.base_kwargs["center_freq_source"] = detection.source
-            else:
-                self._set_center_source("unavailable")
-            self.root.after(150, lambda: self._load_preview(auto=True))
+        if initial_path:
+            self._schedule_preview(auto=True)
 
     def run(self) -> InteractiveSessionResult:
         try:
-            self.root.mainloop()
+            self.show()
+            app = QApplication.instance()
+            if app is None:
+                raise RuntimeError("QApplication instance missing during run()")
+            app.exec()
         finally:
             self._cancel_active_pipeline()
-            if self._preview_thread and self._preview_thread.is_alive():
-                self._preview_thread.join(timeout=5.0)
-            self._preview_thread = None
-            if self._snapshot_thread and self._snapshot_thread.is_alive():
-                self._snapshot_thread.join(timeout=5.0)
-            self._snapshot_thread = None
-            try:
-                self.root.destroy()
-            except Exception:  # pragma: no cover - safe cleanup
-                pass
+            self._join_threads()
         if not self.selection or not self.selected_path:
             raise KeyboardInterrupt()
-        self.base_kwargs["silence_trim"] = self.trim_var.get()
-        self.base_kwargs["squelch_enabled"] = self.squelch_var.get()
-        self.base_kwargs["agc_enabled"] = self.agc_var.get()
-        demod_mode = (self.demod_var.get() or self.base_kwargs.get("demod_mode", "nfm")).lower()
-        self.base_kwargs["demod_mode"] = demod_mode
+        self.base_kwargs["silence_trim"] = self.trim_enabled
+        self.base_kwargs["squelch_enabled"] = self.squelch_enabled
+        self.base_kwargs["agc_enabled"] = self.agc_enabled
+        self.base_kwargs["demod_mode"] = self.demod_value
         configs = self._build_configs(self.selected_path, self.center_freq)
         if not configs:
             raise ValueError("Enter at least one target frequency before running DSP.")
-        bandwidth = configs[0].bandwidth
         LOG.info(
             "Interactive selection: center %.0f Hz, %d target(s), bandwidth %.0f Hz",
             self.center_freq or 0.0,
             len(configs),
-            bandwidth,
+            configs[0].bandwidth,
         )
         return InteractiveSessionResult(configs=configs, progress_sink=self.progress_sink)
 
-    def _configure_root_window(self) -> None:
-        screen_w = max(1, self.root.winfo_screenwidth())
-        screen_h = max(1, self.root.winfo_screenheight())
-        usable_width = min(1150, max(1000, screen_w - 160))
-        usable_height = min(max(780, screen_h - 200), screen_h - 60)
-        usable_height = max(680, usable_height)
-        self.root.geometry(f"{int(usable_width)}x{int(usable_height)}")
-        self.root.minsize(960, 680)
+    def _apply_styles(self) -> None:
+        palette = self.palette()
+        border = palette.color(QtGui.QPalette.ColorRole.Mid).name()
+        bg = palette.color(QtGui.QPalette.ColorRole.Base).name()
+        self.setStyleSheet(
+            f"""
+            QGroupBox {{
+                font-weight: bold;
+                border: 1px solid {border};
+                border-radius: 6px;
+                margin-top: 8px;
+                background-color: {bg};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 6px;
+            }}
+            """
+        )
 
-    def _refresh_scroll_region(self) -> None:
-        if self._scroll_frame is None:
-            return
-        try:
-            self.root.update_idletasks()
-        except Exception:
-            pass
-        self._scroll_frame.refresh()
+    def _configure_main_window(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen:
+            geometry = screen.availableGeometry()
+            width = min(1150, max(1000, geometry.width() - 160))
+            height = min(max(780, geometry.height() - 200), geometry.height() - 60)
+            height = max(680, height)
+        else:
+            width, height = 1150, 780
+        self.resize(int(width), int(height))
+        self.setMinimumSize(960, 680)
 
-    def _drop_plot_scroll_exclusions(self) -> None:
-        if self._scroll_frame is None:
-            return
-        if self.canvas:
-            widget = self.canvas.get_tk_widget()
-            self._scroll_frame.remove_scroll_exclusion(widget)
-        if self.toolbar:
-            self._scroll_frame.remove_scroll_exclusion(self.toolbar)
-
-    # --- UI Construction -------------------------------------------------
     def _build_ui(self) -> None:
-        scroll = _ScrollableFrame(self.root, padding=12)
-        scroll.pack(fill="both", expand=True)
-        scroll.enable_mousewheel()
-        self._scroll_frame = scroll
-        main = scroll.content
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-        file_frame = ttk.LabelFrame(main, text="Recording")
-        file_frame.pack(fill="x", expand=False)
-        file_frame.columnconfigure(1, weight=1)
-        file_frame.columnconfigure(3, weight=0)
+        content = QWidget()
+        main_layout = QVBoxLayout(content)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(12)
 
-        ttk.Label(file_frame, text="Input WAV:").grid(
-            row=0, column=0, sticky="w", pady=4
-        )
-        entry = ttk.Entry(
-            file_frame,
-            textvariable=self.file_var,
-            width=64,
-        )
-        entry.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
-        ttk.Button(
-            file_frame,
-            text="Browse…",
-            command=self._on_browse,
-        ).grid(row=0, column=2, sticky="w", padx=4, pady=4)
+        self._build_recording_section(main_layout)
+        self._build_demod_options_section(main_layout)
+        self._build_plot_section(main_layout)
+        self._build_spectrum_options_section(main_layout)
+        self._build_waterfall_options_section(main_layout)
+        self._build_selection_section(main_layout)
+        self._build_targets_section(main_layout)
+        self._build_status_section(main_layout)
+        self._build_button_row(main_layout)
 
-        ttk.Label(file_frame, text="Center freq (Hz):").grid(
-            row=1, column=0, sticky="w", pady=4
-        )
-        center_entry = ttk.Entry(
-            file_frame,
-            textvariable=self.center_var,
-            width=24,
-        )
-        center_entry.grid(row=1, column=1, sticky="w", padx=4, pady=4)
-        center_entry.bind("<FocusOut>", self._on_center_manual)
-        center_entry.bind("<Return>", self._on_center_manual)
-        ttk.Button(
-            file_frame,
-            text="Detect from file",
-            command=self._parse_center_from_name,
-        ).grid(row=1, column=2, sticky="w", padx=4, pady=4)
-        ttk.Label(
-            file_frame,
-            textvariable=self.center_source_var,
-            foreground="SlateGray",
-        ).grid(row=1, column=3, sticky="w", padx=4, pady=4)
+        content.setLayout(main_layout)
+        scroll_area.setWidget(content)
+        self.setCentralWidget(scroll_area)
 
-        ttk.Label(file_frame, text="Snapshot (seconds):").grid(
-            row=2, column=0, sticky="w", pady=4
-        )
-        ttk.Entry(
-            file_frame,
-            textvariable=self.snapshot_var,
-            width=12,
-        ).grid(row=2, column=1, sticky="w", padx=4, pady=4)
-        self.load_preview_button = ttk.Button(
-            file_frame,
-            text="Load FFT",
-            command=self._load_preview,
-        )
-        self.load_preview_button.grid(row=2, column=2, sticky="w", padx=4, pady=4)
-        ttk.Checkbutton(
-            file_frame,
-            text="Analyze entire recording",
-            variable=self.full_snapshot_var,
-            command=self._schedule_refresh,
-        ).grid(row=2, column=3, sticky="w", padx=4, pady=4)
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage(self.status_message)
 
-        ttk.Label(file_frame, text="Output directory:").grid(
-            row=3, column=0, sticky="w", pady=4
-        )
-        out_entry = ttk.Entry(
-            file_frame,
-            textvariable=self.output_dir_var,
-            width=64,
-        )
-        out_entry.grid(row=3, column=1, sticky="ew", padx=4, pady=4)
-        out_entry.bind("<FocusOut>", lambda _event: self._on_output_dir_changed())
-        out_entry.bind("<Return>", lambda _event: self._on_output_dir_changed())
-        ttk.Button(
-            file_frame,
-            text="Browse…",
-            command=self._on_output_dir_browse,
-        ).grid(row=3, column=2, sticky="w", padx=4, pady=4)
-        ttk.Label(
-            file_frame,
-            textvariable=self.output_path_var,
-            foreground="SlateGray",
-        ).grid(row=3, column=3, sticky="w", padx=4, pady=4)
-        self.output_dir_var.trace_add("write", lambda *_: self._update_output_path_hint())
+    def _build_recording_section(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Recording")
+        layout = QVBoxLayout()
 
-        ttk.Label(file_frame, text="Demodulator:").grid(
-            row=4, column=0, sticky="w", pady=4
-        )
-        demod_combo = ttk.Combobox(
-            file_frame,
-            textvariable=self.demod_var,
-            values=self.demod_options,
-            state="readonly",
-            width=16,
-        )
-        demod_combo.grid(row=4, column=1, sticky="w", padx=4, pady=4)
-        ttk.Label(
-            file_frame,
-            text="Choose AM/NFM/USB/LSB demodulation",
-            foreground="SlateGray",
-        ).grid(row=4, column=2, sticky="w", padx=4, pady=4)
-        demod_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_option_state())
+        # Input file row
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("Input WAV:"))
+        self.file_entry = QLineEdit(self.file_value)
+        self.file_entry.setPlaceholderText("Select a baseband WAV recording…")
+        self.file_entry.textChanged.connect(self._on_file_text_changed)
+        file_row.addWidget(self.file_entry, stretch=1)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._on_browse)
+        file_row.addWidget(browse_btn)
+        layout.addLayout(file_row)
 
-        options_frame = ttk.LabelFrame(main, text="Demod options")
-        options_frame.pack(fill="x", expand=False, pady=(8, 8))
-        options_frame.columnconfigure(0, weight=1)
+        # Center frequency row
+        center_row = QHBoxLayout()
+        center_row.addWidget(QLabel("Center freq (Hz):"))
+        self.center_entry = QLineEdit(self.center_value)
+        self.center_entry.setMaximumWidth(180)
+        self.center_entry.editingFinished.connect(self._on_center_manual)
+        center_row.addWidget(self.center_entry)
+        detect_btn = QPushButton("Detect from file")
+        detect_btn.clicked.connect(self._parse_center_from_name)
+        center_row.addWidget(detect_btn)
+        self.center_source_label = QLabel(self.center_source_value)
+        self.center_source_label.setStyleSheet("color: #708090;")
+        center_row.addWidget(self.center_source_label)
+        center_row.addStretch()
+        layout.addLayout(center_row)
 
-        self.squelch_check = ttk.Checkbutton(
-            options_frame,
-            text="Adaptive squelch",
-            variable=self.squelch_var,
-            command=self._on_toggle_squelch,
-        )
-        self.squelch_check.grid(row=0, column=0, sticky="w", padx=4, pady=2)
-        self.trim_check = ttk.Checkbutton(
-            options_frame,
-            text="Trim silences",
-            variable=self.trim_var,
-            command=self._on_toggle_trim,
-        )
-        self.trim_check.grid(row=0, column=1, sticky="w", padx=4, pady=2)
-        self.agc_check = ttk.Checkbutton(
-            options_frame,
-            text="Automatic gain control",
-            variable=self.agc_var,
-            command=self._on_toggle_agc,
-        )
-        self.agc_check.grid(row=0, column=2, sticky="w", padx=4, pady=2)
-        ttk.Label(
-            options_frame,
-            text="Manual threshold (dBFS):",
-        ).grid(row=1, column=0, sticky="w", padx=4, pady=(0, 2))
-        self.squelch_threshold_entry = ttk.Entry(
-            options_frame,
-            textvariable=self.squelch_threshold_var,
-            width=10,
-        )
-        self.squelch_threshold_entry.grid(row=1, column=1, sticky="w", padx=4, pady=(0, 2))
-        self.squelch_threshold_entry.bind(
-            "<FocusOut>", lambda _e: self._on_squelch_threshold_edit()
-        )
-        self.squelch_threshold_entry.bind(
-            "<Return>", lambda _e: self._on_squelch_threshold_edit()
-        )
-        ttk.Label(
-            options_frame,
-            text="Adaptive squelch tracks the noise floor, opening when the signal rises ~4 dB above it and holding for a short period.\nLeave the threshold blank to auto-track, or enter a negative dBFS value to pin the gate.",
-            foreground="SlateGray",
-            wraplength=580,
-            justify="left",
-        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 4))
+        # Snapshot row
+        snapshot_row = QHBoxLayout()
+        snapshot_row.addWidget(QLabel("Snapshot (seconds):"))
+        self.snapshot_entry = QLineEdit(self.snapshot_text)
+        self.snapshot_entry.setMaximumWidth(100)
+        self.snapshot_entry.editingFinished.connect(self._on_snapshot_changed)
+        snapshot_row.addWidget(self.snapshot_entry)
+        self.load_preview_button = QPushButton("Load FFT")
+        self.load_preview_button.clicked.connect(lambda: self._schedule_preview(auto=False))
+        snapshot_row.addWidget(self.load_preview_button)
+        self.full_snapshot_check = QCheckBox("Analyze entire recording")
+        self.full_snapshot_check.setChecked(self.full_snapshot)
+        self.full_snapshot_check.stateChanged.connect(self._on_full_snapshot_toggled)
+        snapshot_row.addWidget(self.full_snapshot_check)
+        snapshot_row.addStretch()
+        layout.addLayout(snapshot_row)
 
-        self.plot_frame = ttk.LabelFrame(main, text="Spectrum preview")
-        self.plot_frame.pack(fill="both", expand=True, pady=(12, 8))
-        self.placeholder_label = ttk.Label(
-            self.plot_frame,
-            text="Load a recording to view its spectrum.",
-            anchor="center",
-            justify="center",
-        )
-        self.placeholder_label.pack(fill="both", expand=True, padx=12, pady=12)
+        # Output directory row
+        output_row = QHBoxLayout()
+        output_row.addWidget(QLabel("Output directory:"))
+        self.output_dir_entry = QLineEdit(self.output_dir_value)
+        self.output_dir_entry.setPlaceholderText("Optional override – defaults beside input WAV")
+        self.output_dir_entry.editingFinished.connect(self._on_output_dir_changed)
+        output_row.addWidget(self.output_dir_entry, stretch=1)
+        out_browse = QPushButton("Browse…")
+        out_browse.clicked.connect(self._on_output_dir_browse)
+        output_row.addWidget(out_browse)
+        layout.addLayout(output_row)
 
-        spectrum_options = ttk.LabelFrame(main, text="Spectrum options")
-        spectrum_options.pack(fill="x", expand=False, pady=(0, 8))
+        self.output_hint_label = QLabel(self.output_hint)
+        self.output_hint_label.setWordWrap(True)
+        self.output_hint_label.setStyleSheet("color: #708090;")
+        layout.addWidget(self.output_hint_label)
 
-        ttk.Label(spectrum_options, text="FFT size").grid(row=0, column=0, sticky="w", padx=4, pady=2)
-        nfft_combo = ttk.Combobox(
-            spectrum_options,
-            textvariable=self.nfft_var,
-            values=["65536", "131072", "262144", "524288"],
-            state="readonly",
-            width=10,
-        )
-        nfft_combo.grid(row=0, column=1, sticky="w", padx=4, pady=2)
-        nfft_combo.bind("<<ComboboxSelected>>", lambda _event: None)
+        # Demod row
+        demod_row = QHBoxLayout()
+        demod_row.addWidget(QLabel("Demodulator:"))
+        self.demod_combo = QComboBox()
+        self.demod_combo.addItems(self.demod_options)
+        self.demod_combo.setCurrentText(self.demod_value)
+        self.demod_combo.currentTextChanged.connect(self._on_demod_changed)
+        demod_row.addWidget(self.demod_combo)
+        demod_help = QLabel("Choose AM/NFM/USB/LSB demodulation")
+        demod_help.setStyleSheet("color: #708090;")
+        demod_row.addWidget(demod_help)
+        demod_row.addStretch()
+        layout.addLayout(demod_row)
 
-        ttk.Label(spectrum_options, text="Smoothing").grid(row=0, column=2, sticky="w", padx=4, pady=2)
-        smooth_spin = ttk.Spinbox(
-            spectrum_options,
-            from_=1,
-            to=20,
-            textvariable=self.smooth_var,
-            width=5,
-            command=lambda: None,
-        )
-        smooth_spin.grid(row=0, column=3, sticky="w", padx=4, pady=2)
+        group.setLayout(layout)
+        parent_layout.addWidget(group)
 
-        ttk.Label(spectrum_options, text="Dynamic range (dB)").grid(row=0, column=4, sticky="w", padx=4, pady=2)
-        range_spin = ttk.Spinbox(
-            spectrum_options,
-            from_=20,
-            to=140,
-            textvariable=self.range_var,
-            width=5,
-            command=lambda: None,
-        )
-        range_spin.grid(row=0, column=5, sticky="w", padx=4, pady=2)
+    def _build_plot_section(self, parent_layout: QVBoxLayout) -> None:
+        self.plot_group = QGroupBox("Spectrum preview")
+        layout = QVBoxLayout()
+        self.plot_layout = layout
+        self.placeholder_label = QLabel("Load a recording to view its spectrum.")
+        self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder_label.setMinimumHeight(420)
+        layout.addWidget(self.placeholder_label)
+        self.plot_group.setLayout(layout)
+        parent_layout.addWidget(self.plot_group, stretch=1)
 
-        ttk.Label(spectrum_options, text="Theme").grid(row=0, column=6, sticky="w", padx=4, pady=2)
-        theme_combo = ttk.Combobox(
-            spectrum_options,
-            textvariable=self.theme_var,
-            values=list(self.color_themes.keys()),
-            state="readonly",
-            width=10,
-        )
-        theme_combo.grid(row=0, column=7, sticky="w", padx=4, pady=2)
-        theme_combo.bind("<<ComboboxSelected>>", lambda _event: None)
-        ttk.Button(
-            spectrum_options,
-            text="Reset defaults",
-            command=self._reset_spectrum_defaults,
-        ).grid(row=0, column=8, sticky="w", padx=4, pady=2)
+    def _build_spectrum_options_section(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Spectrum options")
+        layout = QHBoxLayout()
 
-        ttk.Button(
-            spectrum_options,
-            text="Refresh preview",
-            command=self._refresh_preview_manual,
-        ).grid(row=0, column=9, sticky="w", padx=4, pady=2)
+        layout.addWidget(QLabel("FFT size"))
+        self.spectrum_nfft_combo = QComboBox()
+        self.spectrum_nfft_combo.addItems(["65536", "131072", "262144", "524288"])
+        self.spectrum_nfft_combo.setCurrentText(self.nfft_value)
+        layout.addWidget(self.spectrum_nfft_combo)
 
-        waterfall_options = ttk.LabelFrame(main, text="Waterfall options")
-        waterfall_options.pack(fill="x", expand=False, pady=(0, 8))
+        layout.addWidget(QLabel("Smoothing"))
+        self.spectrum_smooth_spin = QSpinBox()
+        self.spectrum_smooth_spin.setRange(1, 20)
+        self.spectrum_smooth_spin.setValue(self.smooth_value)
+        layout.addWidget(self.spectrum_smooth_spin)
 
-        ttk.Label(waterfall_options, text="Max slices").grid(row=0, column=0, sticky="w", padx=4, pady=2)
-        slices_spin = ttk.Spinbox(
-            waterfall_options,
-            from_=50,
-            to=800,
-            textvariable=self.waterfall_slices_var,
-            width=6,
-            command=lambda: None,
-        )
-        slices_spin.grid(row=0, column=1, sticky="w", padx=4, pady=2)
+        layout.addWidget(QLabel("Dynamic range (dB)"))
+        self.spectrum_range_spin = QSpinBox()
+        self.spectrum_range_spin.setRange(20, 140)
+        self.spectrum_range_spin.setValue(self.range_value)
+        layout.addWidget(self.spectrum_range_spin)
 
-        ttk.Label(waterfall_options, text="Range (dB)").grid(row=0, column=2, sticky="w", padx=4, pady=2)
-        waterfall_range_spin = ttk.Spinbox(
-            waterfall_options,
-            from_=20,
-            to=140,
-            textvariable=self.waterfall_floor_var,
-            width=6,
-            command=lambda: None,
-        )
-        waterfall_range_spin.grid(row=0, column=3, sticky="w", padx=4, pady=2)
+        layout.addWidget(QLabel("Theme"))
+        self.spectrum_theme_combo = QComboBox()
+        self.spectrum_theme_combo.addItems(list(self.color_themes.keys()))
+        if self.theme_value in self.color_themes:
+            self.spectrum_theme_combo.setCurrentText(self.theme_value)
+        self.spectrum_theme_combo.currentTextChanged.connect(self._on_theme_changed)
+        layout.addWidget(self.spectrum_theme_combo)
 
-        ttk.Label(waterfall_options, text="Colormap").grid(row=0, column=4, sticky="w", padx=4, pady=2)
-        waterfall_cmap_combo = ttk.Combobox(
-            waterfall_options,
-            textvariable=self.waterfall_cmap_var,
-            values=["viridis", "plasma", "inferno", "magma", "cividis"],
-            state="readonly",
-            width=10,
-        )
-        waterfall_cmap_combo.grid(row=0, column=5, sticky="w", padx=4, pady=2)
-        waterfall_cmap_combo.bind("<<ComboboxSelected>>", lambda _event: None)
+        reset_btn = QPushButton("Reset defaults")
+        reset_btn.clicked.connect(self._reset_spectrum_defaults)
+        layout.addWidget(reset_btn)
 
-        selection_frame = ttk.LabelFrame(main, text="Channel selection")
-        selection_frame.pack(fill="x", expand=False, pady=(0, 8))
-        selection_frame.columnconfigure(1, weight=1)
+        self.spectrum_refresh_button = QPushButton("Refresh preview")
+        self.spectrum_refresh_button.clicked.connect(self._refresh_preview_manual)
+        layout.addWidget(self.spectrum_refresh_button)
 
-        ttk.Label(selection_frame, textvariable=self.sample_rate_var).grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(4, 8)
-        )
-        ttk.Label(selection_frame, text="Bandwidth (Hz):").grid(
-            row=1, column=0, sticky="w", pady=4
-        )
-        bandwidth_entry = ttk.Entry(
-            selection_frame,
-            textvariable=self.bandwidth_var,
-            width=24,
-        )
-        bandwidth_entry.grid(row=1, column=1, sticky="w", padx=4, pady=4)
-        bandwidth_entry.bind("<FocusOut>", lambda _e: self._on_bandwidth_edit())
-        bandwidth_entry.bind("<Return>", lambda _e: self._on_bandwidth_edit())
-        ttk.Label(selection_frame, textvariable=self.offset_var).grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0)
-        )
+        layout.addStretch()
+        group.setLayout(layout)
+        parent_layout.addWidget(group)
 
-        target_frame = ttk.LabelFrame(main, text="Target frequencies (Hz)")
-        target_frame.pack(fill="x", expand=False, pady=(0, 8))
+    def _build_waterfall_options_section(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Waterfall options")
+        layout = QHBoxLayout()
+
+        layout.addWidget(QLabel("Max slices"))
+        self.waterfall_slices_spin = QSpinBox()
+        self.waterfall_slices_spin.setRange(50, 800)
+        self.waterfall_slices_spin.setValue(int(self.waterfall_slices_value))
+        layout.addWidget(self.waterfall_slices_spin)
+
+        layout.addWidget(QLabel("Range (dB)"))
+        self.waterfall_floor_spin = QSpinBox()
+        self.waterfall_floor_spin.setRange(20, 140)
+        self.waterfall_floor_spin.setValue(int(self.waterfall_floor_value))
+        layout.addWidget(self.waterfall_floor_spin)
+
+        layout.addWidget(QLabel("Colormap"))
+        self.waterfall_cmap_combo = QComboBox()
+        self.waterfall_cmap_combo.addItems(["viridis", "plasma", "inferno", "magma", "cividis"])
+        self.waterfall_cmap_combo.setCurrentText(self.waterfall_cmap_value)
+        layout.addWidget(self.waterfall_cmap_combo)
+
+        layout.addStretch()
+        group.setLayout(layout)
+        parent_layout.addWidget(group)
+
+    def _build_selection_section(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Channel selection")
+        layout = QVBoxLayout()
+
+        self.sample_rate_label = QLabel(self.sample_rate_value)
+        layout.addWidget(self.sample_rate_label)
+
+        bandwidth_row = QHBoxLayout()
+        bandwidth_row.addWidget(QLabel("Bandwidth (Hz):"))
+        self.bandwidth_entry = QLineEdit(self.bandwidth_value)
+        self.bandwidth_entry.setMaximumWidth(140)
+        self.bandwidth_entry.editingFinished.connect(self._on_bandwidth_edit)
+        bandwidth_row.addWidget(self.bandwidth_entry)
+        bandwidth_row.addStretch()
+        layout.addLayout(bandwidth_row)
+
+        self.offset_label = QLabel(self.offset_value)
+        layout.addWidget(self.offset_label)
+
+        group.setLayout(layout)
+        parent_layout.addWidget(group)
+
+    def _build_targets_section(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Target frequencies (Hz)")
+        grid = QtWidgets.QGridLayout()
+        self.target_entries = []
         per_row = 3
-        for idx, var in enumerate(self.target_freq_vars):
+        for idx, value in enumerate(self.target_freq_values):
             row = idx // per_row
             col = (idx % per_row) * 2
-            ttk.Label(target_frame, text=f"Target {idx + 1}:").grid(
-                row=row,
-                column=col,
-                sticky="w",
-                padx=4,
-                pady=4,
-            )
-            entry = ttk.Entry(
-                target_frame,
-                textvariable=var,
-                width=18,
-            )
-            entry.grid(row=row, column=col + 1, sticky="w", padx=4, pady=4)
-            entry.bind("<FocusOut>", lambda _e, i=idx: self._on_target_entry_edit(i))
-            entry.bind("<Return>", lambda _e, i=idx: self._on_target_entry_edit(i))
+            grid.addWidget(QLabel(f"Target {idx + 1}:"), row, col, alignment=Qt.AlignmentFlag.AlignLeft)
+            entry = QLineEdit(value)
+            entry.setMaximumWidth(160)
+            entry.editingFinished.connect(lambda i=idx, line=entry: self._on_target_entry_edit(i, line.text()))
+            grid.addWidget(entry, row, col + 1)
+            self.target_entries.append(entry)
+        group.setLayout(grid)
+        parent_layout.addWidget(group)
 
-        self.status_label = ttk.Label(
-            main,
-            textvariable=self.status_var,
-            foreground="SlateGray",
-        )
-        self.status_label.pack(anchor="w", pady=(6, 8))
+    def _build_status_section(self, parent_layout: QVBoxLayout) -> None:
+        self.status_label = QLabel(self.status_message)
+        self.status_label.setObjectName("statusLabel")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: #708090;")
+        parent_layout.addWidget(self.status_label)
 
-        button_frame = ttk.Frame(main)
-        button_frame.pack(fill="x", expand=False)
-        button_frame.columnconfigure(0, weight=1)
-        self.stop_btn = ttk.Button(
-            button_frame,
-            text="Stop DSP",
-            command=self._on_stop_processing,
-        )
-        self.stop_btn.grid(row=0, column=0, sticky="w", padx=6)
-        self.stop_btn.configure(state="disabled")
-        self.preview_btn = ttk.Button(
-            button_frame,
-            text="Preview DSP",
-            command=self._on_preview,
-        )
-        self.preview_btn.grid(row=0, column=1, sticky="e", padx=6)
-        self.preview_btn.configure(state="disabled")
-        self.confirm_btn = ttk.Button(
-            button_frame,
-            text="Confirm & Run",
-            command=self._on_confirm,
-        )
-        self.confirm_btn.grid(row=0, column=2, sticky="e", padx=6)
-        self.confirm_btn.configure(state="disabled")
-        ttk.Button(
-            button_frame,
-            text="Cancel",
-            command=self._on_cancel,
-        ).grid(row=0, column=3, sticky="e")
+    def _build_button_row(self, parent_layout: QVBoxLayout) -> None:
+        row = QHBoxLayout()
 
-        self._update_option_state()
+        self.stop_btn = QPushButton("Stop DSP")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._on_stop_processing)
+        row.addWidget(self.stop_btn)
+
+        row.addStretch()
+
+        self.preview_btn = QPushButton("Preview DSP")
+        self.preview_btn.setEnabled(False)
+        self.preview_btn.clicked.connect(self._on_preview)
+        row.addWidget(self.preview_btn)
+
+        self.confirm_btn = QPushButton("Confirm && Run")
+        self.confirm_btn.setEnabled(False)
+        self.confirm_btn.clicked.connect(self._on_confirm)
+        row.addWidget(self.confirm_btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self._on_cancel)
+        row.addWidget(cancel_btn)
+
+        parent_layout.addLayout(row)
+
+    @Slot(str, bool)
+    def _set_status(self, message: str, error: bool) -> None:
+        self.status_message = message
+        color = "#B22222" if error else "#708090"
+        if self.status_label:
+            self.status_label.setText(message)
+            self.status_label.setStyleSheet(f"color: {color};")
+        if self.status_bar:
+            self.status_bar.showMessage(message)
+
+    def _join_threads(self) -> None:
+        if self._preview_thread and self._preview_thread.is_alive():
+            self._preview_thread.join(timeout=5.0)
+        self._preview_thread = None
+        if self._snapshot_thread and self._snapshot_thread.is_alive():
+            self._snapshot_thread.join(timeout=5.0)
+        self._snapshot_thread = None
+
+    def _cancel_active_pipeline(self) -> None:
+        with self._preview_lock:
+            pipeline = self._active_pipeline
+        if pipeline is not None:
+            try:
+                pipeline.cancel()
+            except Exception as exc:  # pragma: no cover - defensive
+                LOG.debug("Failed to cancel pipeline cleanly: %s", exc)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._on_cancel()
+        event.accept()
+
+    def _set_center_source(self, source: Optional[str]) -> None:
+        resolved = source or "unavailable"
+        self.center_source = resolved
+        self.base_kwargs["center_freq_source"] = resolved
+        if resolved == "unavailable":
+            label = "—"
+        else:
+            label = self._describe_center_source(resolved)
+        self.center_source_value = f"Center source: {label}"
+        if self.center_source_label:
+            self.center_source_label.setText(self.center_source_value)
+
+    def _describe_center_source(self, source: Optional[str]) -> str:
+        resolved = source or "unavailable"
+        if resolved in {"unavailable", "manual"}:
+            return "manual entry"
+        if resolved.startswith("metadata:"):
+            detail = resolved.split(":", 1)[1] or "metadata"
+            return f"WAV metadata ({detail})"
+        if resolved.startswith("filename"):
+            return "filename pattern"
+        if resolved == "config":
+            return "configuration"
+        return resolved
+
+    def _current_output_dir(self) -> Optional[Path]:
+        text = self.output_dir_entry.text().strip() if self.output_dir_entry else self.output_dir_value.strip()
+        if not text:
+            return None
+        return Path(text).expanduser()
+
+    def _default_output_filename(self, target_freq: float) -> str:
+        finest = int(round(target_freq)) if target_freq else 0
+        return f"audio_{finest}_48k.wav"
+
+    def _resolve_output_path(self, input_path: Path, target_freq: float) -> Optional[Path]:
+        directory = self._current_output_dir()
+        if directory:
+            return directory / self._default_output_filename(target_freq)
+        if self._cli_output_path is not None:
+            return self._cli_output_path
+        existing = self.base_kwargs.get("output_path")
+        if existing:
+            return Path(existing)
+        return None
+
+    def _update_output_path_hint(self) -> None:
+        target = self.selection.center_freq if self.selection else self.base_kwargs.get("target_freq", 0.0)
+        input_path = self.selected_path or (Path(self.file_value) if self.file_value else None)
+        resolved: Optional[Path] = None
+        if input_path:
+            try:
+                resolved = self._resolve_output_path(input_path, target)
+            except Exception:
+                resolved = None
+        if resolved is None and not input_path and self._cli_output_path is not None:
+            resolved = self._cli_output_path
+        if resolved is None and input_path:
+            resolved = input_path.with_name(self._default_output_filename(target))
+        if resolved is not None:
+            hint = f"Preview/output files: {resolved}"
+        else:
+            filename = self._default_output_filename(target)
+            hint = f"Preview/output files: {filename} (default)"
+        self.output_hint = hint
+        if self.output_hint_label:
+            self.output_hint_label.setText(hint)
+
+    def _on_file_text_changed(self, text: str) -> None:
+        self.file_value = text.strip()
+        if self.file_value:
+            self.selected_path = Path(self.file_value)
+        else:
+            self.selected_path = None
         self._update_output_path_hint()
-        self._refresh_scroll_region()
+        self._update_option_state()
 
-    # --- Event handlers --------------------------------------------------
     def _on_browse(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Select SDR++ baseband WAV",
-            filetypes=[("WAV files", "*.wav"), ("All files", "*.*")],
+        initial_dir = str(Path(self.file_value).parent) if self.file_value else ""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select SDR++ baseband WAV",
+            initial_dir,
+            "WAV files (*.wav);;All files (*.*)",
         )
-        if path:
-            self.file_var.set(path)
-            self.selected_path = Path(path)
-            self._update_output_path_hint()
-            self._parse_center_from_name()
-
-    def _parse_center_from_name(self) -> None:
-        path_text = self.file_var.get().strip()
-        if not path_text:
-            self._set_status("Browse to a recording before parsing.", error=True)
+        if not file_path:
             return
-        path = Path(path_text)
-        detection = detect_center_frequency(path)
-        if detection.value is None:
-            messagebox.showinfo(
-                "Center frequency",
-                "Could not derive a center frequency from WAV metadata or filename. Enter it manually.",
+        self.file_value = file_path
+        if self.file_entry:
+            self.file_entry.setText(file_path)
+        self.selected_path = Path(file_path)
+        self._update_output_path_hint()
+        self._parse_center_from_name(silent=True)
+        self._schedule_preview(auto=True)
+
+    def _on_snapshot_changed(self) -> None:
+        if not self.snapshot_entry:
+            return
+        text = self.snapshot_entry.text().strip()
+        value = self._parse_float(text)
+        if value is None or value <= 0:
+            self.snapshot_entry.setText(self.snapshot_text)
+            self._set_status("Snapshot duration must be a positive number.", error=True)
+            return
+        self.snapshot_seconds = value
+        self.snapshot_text = f"{value:.2f}"
+        self.snapshot_entry.setText(self.snapshot_text)
+
+    def _on_full_snapshot_toggled(self, state: int) -> None:
+        self.full_snapshot = state == Qt.CheckState.Checked
+
+    def _on_output_dir_browse(self) -> None:
+        current = self._current_output_dir()
+        if current is None and self.selected_path:
+            current = self.selected_path.parent
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select output directory",
+            str(current) if current else "",
+        )
+        if directory:
+            self.output_dir_value = directory
+            if self.output_dir_entry:
+                self.output_dir_entry.setText(directory)
+            self._on_output_dir_changed()
+        else:
+            if self.output_dir_entry:
+                self.output_dir_entry.setText(self.output_dir_value)
+
+    def _on_output_dir_changed(self) -> None:
+        if self.output_dir_entry:
+            self.output_dir_value = self.output_dir_entry.text().strip()
+        directory = self._current_output_dir()
+        if directory:
+            self._set_status(f"Output directory set to {directory}", error=False)
+        else:
+            self._set_status(
+                "Output directory cleared; previews and outputs will default beside the recording.",
+                error=False,
             )
-            self._set_center_source("unavailable")
-            self._set_status("Enter center frequency manually.", error=True)
-            return
-        self.center_var.set(f"{detection.value:.0f}")
-        self.center_freq = detection.value
-        self._set_center_source(detection.source or "filename")
-        self.base_kwargs["center_freq"] = detection.value
-        friendly = self._describe_center_source(detection.source)
-        self._set_status(f"Center frequency populated from {friendly}.", error=False)
+        self._update_output_path_hint()
 
-    def _on_center_manual(self, _event=None) -> None:
+    def _on_demod_changed(self, value: str) -> None:
+        self.demod_value = value.lower()
+        self._update_option_state()
+
+    def _on_toggle_squelch(self, state: int) -> None:
+        self.squelch_enabled = state == Qt.CheckState.Checked
+        self._update_option_state()
+
+    def _on_toggle_trim(self, state: int) -> None:
+        self.trim_enabled = state == Qt.CheckState.Checked
+
+    def _on_toggle_agc(self, state: int) -> None:
+        self.agc_enabled = state == Qt.CheckState.Checked
+        self._update_option_state()
+
+    def _on_squelch_threshold_edit(self) -> None:
+        if not self.squelch_threshold_entry:
+            return
+        text = self.squelch_threshold_entry.text().strip()
+        if not text:
+            self.squelch_threshold_value = ""
+            self.base_kwargs["squelch_dbfs"] = None
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            self.squelch_threshold_entry.setText(self.squelch_threshold_value)
+            self._set_status("Invalid squelch threshold; enter a numeric dBFS value.", error=True)
+            return
+        self.squelch_threshold_value = f"{value:.1f}"
+        self.squelch_threshold_entry.setText(self.squelch_threshold_value)
+        self.base_kwargs["squelch_dbfs"] = value
+
+    def _on_theme_changed(self, name: str) -> None:
+        if name not in self.color_themes:
+            return
+        self.theme_value = name
+        if self.snapshot_data:
+            self._render_snapshot(self.snapshot_data, remember=False)
+
+    def _reset_spectrum_defaults(self) -> None:
+        self.nfft_value = "262144"
+        self.smooth_value = 3
+        self.range_value = 100
+        self.theme_value = "contrast"
+        if self.spectrum_nfft_combo:
+            self.spectrum_nfft_combo.setCurrentText(self.nfft_value)
+        if self.spectrum_smooth_spin:
+            self.spectrum_smooth_spin.setValue(self.smooth_value)
+        if self.spectrum_range_spin:
+            self.spectrum_range_spin.setValue(self.range_value)
+        if self.spectrum_theme_combo:
+            self.spectrum_theme_combo.setCurrentText(self.theme_value)
+        if self.snapshot_data:
+            self._render_snapshot(self.snapshot_data, remember=False)
+
+    def _refresh_preview_manual(self) -> None:
+        self._schedule_preview(auto=False)
+
+    def _on_bandwidth_edit(self) -> None:
+        if not self.bandwidth_entry:
+            return
+        text = self.bandwidth_entry.text().strip()
+        try:
+            bandwidth = float(text)
+            if bandwidth <= 0:
+                raise ValueError()
+        except ValueError:
+            self._set_status("Bandwidth must be positive.", error=True)
+            self.bandwidth_entry.setText(self.bandwidth_value)
+            return
+        self.bandwidth_value = f"{bandwidth:.0f}"
+        self.bandwidth_entry.setText(self.bandwidth_value)
+        freqs = self._current_target_frequencies()
+        target = freqs[0] if freqs else (self.selection.center_freq if self.selection else None)
+        if self.span_controller and target:
+            self.span_controller.set_selection(target, bandwidth)
+        elif target is not None:
+            self.selection = SelectionResult(target, bandwidth)
+            if self.center_freq is not None and self.offset_label:
+                offset = target - self.center_freq
+                self.offset_label.setText(f"Offset: {offset:+.0f} Hz")
+        elif self.selection:
+            self.selection = SelectionResult(self.selection.center_freq, bandwidth)
+        self.base_kwargs["bandwidth"] = bandwidth
+        self._set_status(
+            "Bandwidth updated. Use Preview DSP or Refresh preview to apply.",
+            error=False,
+        )
+        self._update_output_path_hint()
+
+    def _current_target_frequencies(self) -> list[float]:
+        freqs: list[float] = []
+        for idx, value in enumerate(self.target_entries):
+            text = value.text().strip()
+            freq = self._parse_float(text)
+            self.target_freq_values[idx] = text
+            if freq is None or freq <= 0:
+                continue
+            if any(math.isclose(freq, other, rel_tol=0.0, abs_tol=0.5) for other in freqs):
+                continue
+            freqs.append(freq)
+        return freqs[:MAX_TARGET_FREQUENCIES]
+
+    def _update_target_freq_state(self) -> list[float]:
+        freqs = self._current_target_frequencies()
+        if freqs:
+            primary = freqs[0]
+            self.base_kwargs["target_freq"] = primary
+            self.base_kwargs["target_freqs"] = freqs
+            if self.center_freq is not None and self.offset_label:
+                offset = primary - self.center_freq
+                self.offset_label.setText(f"Offset: {offset:+.0f} Hz")
+            elif self.offset_label:
+                self.offset_label.setText("Offset: —")
+        else:
+            self.base_kwargs["target_freq"] = 0.0
+            self.base_kwargs["target_freqs"] = []
+            if self.offset_label:
+                self.offset_label.setText("Offset: —")
+        return freqs
+
+    def _on_target_entry_edit(self, index: int, text: str) -> None:
+        if index < len(self.target_freq_values):
+            self.target_freq_values[index] = text.strip()
+        freqs = self._update_target_freq_state()
+        if not freqs:
+            self._set_status(
+                "Enter at least one target frequency before running DSP.",
+                error=True,
+            )
+            return
+        primary = freqs[0]
+        if self.selection is None:
+            bandwidth = self.base_kwargs.get("bandwidth", 12_500.0)
+            self.selection = SelectionResult(primary, bandwidth)
+        if self.span_controller:
+            self.span_controller.set_selection(primary, self.selection.bandwidth)
+        self._update_option_state()
+
+    def _on_center_manual(self) -> None:
+        if not self.center_entry:
+            return
+        text = self.center_entry.text().strip()
+        self.center_value = text
+        value = self._parse_float(text)
         self._set_center_source("manual")
-        value = self._parse_float(self.center_var.get())
         if value is not None and value > 0:
             self.base_kwargs["center_freq"] = value
             self.center_freq = value
+            self.center_entry.setText(f"{value:.0f}")
+            freqs = self._update_target_freq_state()
+            primary = freqs[0] if freqs else (self.selection.center_freq if self.selection else None)
+            if primary and self.span_controller:
+                self.span_controller.set_selection(primary, self.selection.bandwidth if self.selection else self.base_kwargs.get("bandwidth", 12_500.0))
+        else:
+            self._set_status("Enter a valid center frequency (Hz).", error=True)
 
-    def _load_preview(self, auto: bool = False) -> None:
-        path_text = self.file_var.get().strip()
-        if not path_text:
+    def _parse_center_from_name(self, *, silent: bool = False) -> None:
+        if not self.file_value:
+            if not silent:
+                self._set_status("Browse to a recording before parsing.", error=True)
+            return
+        path = Path(self.file_value)
+        detection = detect_center_frequency(path)
+        if detection.value is None:
+            self._set_center_source("unavailable")
+            if not silent:
+                QMessageBox.information(
+                    self,
+                    "Center frequency",
+                    "Could not derive a center frequency from WAV metadata or filename. Enter it manually.",
+                )
+                self._set_status("Enter center frequency manually.", error=True)
+            return
+        self.center_freq = detection.value
+        self.center_value = f"{detection.value:.0f}"
+        if self.center_entry:
+            self.center_entry.setText(self.center_value)
+        self.base_kwargs["center_freq"] = detection.value
+        self._set_center_source(detection.source or "filename")
+        friendly = self._describe_center_source(detection.source)
+        self._set_status(f"Center frequency populated from {friendly}.", error=False)
+        self._update_target_freq_state()
+
+    def _update_option_state(self) -> None:
+        demod = (self.demod_value or "nfm").lower()
+        self.base_kwargs["demod_mode"] = demod
+        is_ssb = demod in {"usb", "lsb", "ssb"}
+        if self.agc_check:
+            self.agc_check.blockSignals(True)
+            self.agc_check.setEnabled(is_ssb)
+            if is_ssb:
+                if not self.agc_enabled:
+                    self.agc_enabled = self._preferred_agc
+                self.agc_check.setChecked(self.agc_enabled)
+            else:
+                self.agc_enabled = False
+                self.agc_check.setChecked(False)
+            self.agc_check.blockSignals(False)
+        else:
+            self.agc_enabled = self.agc_enabled if is_ssb else False
+        if self.squelch_check:
+            self.squelch_check.blockSignals(True)
+            self.squelch_check.setChecked(self.squelch_enabled)
+            self.squelch_check.blockSignals(False)
+
+    @staticmethod
+    def _parse_float(text: str) -> Optional[float]:
+        stripped = text.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_int(text: str, *, default: int) -> int:
+        try:
+            value = int(text.strip())
+        except Exception:
+            return default
+        return max(1024, value)
+
+    @staticmethod
+    def _format_float(value: Optional[float]) -> str:
+        if value is None or value <= 0:
+            return ""
+        return f"{value:.0f}"
+
+    def _current_nfft(self) -> int:
+        text = (
+            self.spectrum_nfft_combo.currentText()
+            if self.spectrum_nfft_combo
+            else self.nfft_value
+        )
+        value = self._parse_int(text, default=262_144)
+        self.nfft_value = f"{value}"
+        return value
+
+    def _current_smoothing(self) -> int:
+        if self.spectrum_smooth_spin:
+            self.smooth_value = int(self.spectrum_smooth_spin.value())
+        return int(self.smooth_value)
+
+    def _current_dynamic_range(self) -> int:
+        if self.spectrum_range_spin:
+            self.range_value = int(self.spectrum_range_spin.value())
+        return int(self.range_value)
+
+    def _current_waterfall_slices(self) -> int:
+        if self.waterfall_slices_spin:
+            self.waterfall_slices_value = str(int(self.waterfall_slices_spin.value()))
+        return int(self.waterfall_slices_value or "400")
+
+    def _current_waterfall_floor(self) -> float:
+        if self.waterfall_floor_spin:
+            self.waterfall_floor_value = str(int(self.waterfall_floor_spin.value()))
+        return float(self.waterfall_floor_value or "110")
+
+    def _current_waterfall_cmap(self) -> str:
+        if self.waterfall_cmap_combo:
+            self.waterfall_cmap_value = self.waterfall_cmap_combo.currentText()
+        return self.waterfall_cmap_value or "magma"
+
+    def _schedule_preview(self, *, auto: bool) -> None:
+        if not self.file_value:
             if not auto:
                 self._set_status("Select an input recording first.", error=True)
             return
-        path = Path(path_text)
+        path = Path(self.file_value)
         previous_path = self.selected_path
         if not path.exists():
             self._set_status(f"File not found: {path}", error=True)
             if not auto:
-                messagebox.showerror("Preview failed", f"File not found: {path}")
+                QMessageBox.critical(
+                    self,
+                    "Preview failed",
+                    f"File not found: {path}",
+                )
             return
 
-        snapshot_seconds = self._parse_float(self.snapshot_var.get())
-        full_capture = self.full_snapshot_var.get()
+        if self.snapshot_entry:
+            entered = self.snapshot_entry.text().strip()
+        else:
+            entered = self.snapshot_text
+        if entered:
+            self.snapshot_text = entered
+        snapshot_seconds = self._parse_float(self.snapshot_text)
+        full_capture = self.full_snapshot
         if not full_capture:
             if snapshot_seconds is None or snapshot_seconds <= 0:
                 self._set_status("Snapshot duration must be a positive number.", error=True)
                 if not auto:
-                    messagebox.showerror(
+                    QMessageBox.critical(
+                        self,
                         "Invalid snapshot",
                         "Snapshot duration must be a positive number of seconds.",
                     )
-                self.snapshot_var.set(f"{self.snapshot_seconds:.2f}")
+                if self.snapshot_entry:
+                    self.snapshot_entry.setText(self.snapshot_text or f"{self.snapshot_seconds:.2f}")
                 return
         else:
-            snapshot_seconds = self.snapshot_seconds  # maintain last value for reuse
+            snapshot_seconds = self.snapshot_seconds if self.snapshot_seconds > 0 else 2.0
+        if snapshot_seconds is None or snapshot_seconds <= 0:
+            snapshot_seconds = 2.0
+        self.snapshot_seconds = snapshot_seconds
+        self.snapshot_text = f"{snapshot_seconds:.2f}"
+        if self.snapshot_entry:
+            self.snapshot_entry.setText(self.snapshot_text)
 
-        center_override = self._parse_float(self.center_var.get())
+        center_override = self._parse_float(self.center_value)
+        if center_override is None and self.center_entry:
+            center_override = self._parse_float(self.center_entry.text())
 
         try:
             configs = self._build_configs(path, center_override, require_targets=False)
@@ -1046,16 +1445,17 @@ class _InteractiveApp:
             LOG.error("Preview setup failed: %s", exc)
             self._set_status(f"Preview setup failed: {exc}", error=True)
             if not auto:
-                messagebox.showerror("Preview failed", str(exc))
+                QMessageBox.critical(self, "Preview failed", str(exc))
             return
-        nfft = self._parse_int(self.nfft_var.get(), default=131072)
+
+        nfft = self._current_nfft()
         hop = max(1, nfft // 4)
-        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
+        max_slices = self._current_waterfall_slices()
         fft_workers = self._fft_worker_count()
         status_msg = (
             "Computing full-record FFT/waterfall…"
             if full_capture
-            else f"Gathering {float(snapshot_seconds or 0.0):.2f} s FFT snapshot…"
+            else f"Gathering {snapshot_seconds:.2f} s FFT snapshot…"
         )
         self._set_status(status_msg, error=False)
         self._start_snapshot_thread(
@@ -1064,7 +1464,7 @@ class _InteractiveApp:
             previous_path=previous_path,
             auto=auto,
             full_capture=full_capture,
-            snapshot_seconds=float(snapshot_seconds or 0.0),
+            snapshot_seconds=float(snapshot_seconds),
             nfft=nfft,
             hop=hop,
             max_slices=max_slices,
@@ -1085,21 +1485,20 @@ class _InteractiveApp:
         hop: int,
         max_slices: int,
         fft_workers: Optional[int],
-        max_in_memory_samples: int = MAX_PREVIEW_SAMPLES,
+        max_in_memory_samples: int,
     ) -> None:
         if self._snapshot_thread and self._snapshot_thread.is_alive():
             self._set_status("Preview already loading; please wait.", error=False)
             return
         if self.load_preview_button:
-            self.load_preview_button.configure(state="disabled")
-
+            self.load_preview_button.setEnabled(False)
         if full_capture:
-            self._threadsafe_status(
-                "Analyzing entire recording… this may take a moment.", error=False
+            self.status_update_signal.emit(
+                "Analyzing entire recording… this may take a moment.", False
             )
         else:
-            self._threadsafe_status(
-                f"Preparing preview (~{snapshot_seconds:.2f} s)…", error=False
+            self.status_update_signal.emit(
+                f"Preparing preview (~{snapshot_seconds:.2f} s)…", False
             )
 
         def worker() -> None:
@@ -1111,7 +1510,7 @@ class _InteractiveApp:
                         hop=hop,
                         max_slices=max_slices,
                         fft_workers=fft_workers,
-                        status_cb=lambda msg: self._threadsafe_status(msg, error=False),
+                        status_cb=lambda msg: self.status_update_signal.emit(msg, False),
                     )
                 else:
                     snapshot = gather_snapshot(
@@ -1122,82 +1521,87 @@ class _InteractiveApp:
                         max_slices=max_slices,
                         fft_workers=fft_workers,
                         max_in_memory_samples=max_in_memory_samples,
-                        progress_cb=lambda seconds_done, frac: self._threadsafe_status(
+                        progress_cb=lambda seconds_done, frac: self.status_update_signal.emit(
                             f"Gathered {seconds_done:.1f} s of preview ({frac * 100:4.1f}%)…",
-                            error=False,
+                            False,
                         ),
                     )
             except Exception as exc:
                 LOG.error("Failed to gather preview: %s", exc)
-                try:
-                    self.root.after(
-                        0, lambda err=exc: self._on_snapshot_failed(err, auto=auto)
-                    )
-                except Exception:
-                    pass
+                self.snapshot_failed_signal.emit(exc, auto)
             else:
-                try:
-                    self.root.after(
-                        0,
-                        lambda snap=snapshot: self._on_snapshot_ready(
-                            snap, path=path, previous_path=previous_path
-                        ),
-                    )
-                except Exception:
-                    pass
+                self.snapshot_ready_signal.emit(snapshot, path, previous_path)
             finally:
-                try:
-                    self.root.after(0, self._on_snapshot_thread_finished)
-                except Exception:
-                    pass
+                self.snapshot_finished_signal.emit()
 
         self._snapshot_thread = threading.Thread(target=worker, daemon=True)
         self._snapshot_thread.start()
 
+    @Slot(object, object, object)
     def _on_snapshot_ready(
-        self, snapshot: SnapshotData, *, path: Path, previous_path: Optional[Path]
+        self,
+        snapshot: SnapshotData,
+        path: Path,
+        previous_path: Optional[Path],
     ) -> None:
         same_file = previous_path is not None and Path(previous_path) == path
         self.selected_path = path
-        if not same_file:
-            self.selection = None
-            if self.confirm_btn:
-                self.confirm_btn.configure(state="disabled")
-            if self.preview_btn:
-                self.preview_btn.configure(state="disabled")
+        self.snapshot_data = snapshot
         self.center_freq = snapshot.center_freq
         self.probe = snapshot.probe
         self.sample_rate = snapshot.sample_rate
         self.snapshot_seconds = snapshot.seconds
-        self.center_var.set(f"{snapshot.center_freq:.0f}")
+        self.center_value = f"{snapshot.center_freq:.0f}"
+        if self.center_entry:
+            self.center_entry.setText(self.center_value)
+        self.base_kwargs["center_freq"] = snapshot.center_freq
+        self.full_snapshot = bool(snapshot.params.get("full_capture", False))
+        if self.full_snapshot_check:
+            self.full_snapshot_check.blockSignals(True)
+            self.full_snapshot_check.setChecked(self.full_snapshot)
+            self.full_snapshot_check.blockSignals(False)
+        if self.sample_rate_label:
+            self.sample_rate_label.setText(
+                f"Sample rate: {snapshot.sample_rate:,.0f} Hz"
+            )
+        if not same_file:
+            self.selection = None
+            if self.confirm_btn:
+                self.confirm_btn.setEnabled(False)
+            if self.preview_btn:
+                self.preview_btn.setEnabled(False)
         self._update_output_path_hint()
-        precomputed = (snapshot.freqs, snapshot.psd_db)
-        waterfall = snapshot.waterfall
-        samples = snapshot.samples
-        self.snapshot_data = snapshot
-        self._render_plot(
-            samples,
-            snapshot.sample_rate,
-            snapshot.center_freq,
-            remember=True,
-            precomputed=precomputed,
-            waterfall=waterfall,
-            snapshot=snapshot,
-        )
+        self._render_snapshot(snapshot, remember=True)
         self._set_status(
-            "Drag over the channel of interest, then Confirm & Run.",
+            "Drag over the channel of interest, then Confirm && Run.",
             error=False,
         )
 
-    def _on_snapshot_failed(self, error: Exception, *, auto: bool) -> None:
+    @Slot(Exception, bool)
+    def _on_snapshot_failed(self, error: Exception, auto: bool) -> None:
         self._set_status(f"Preview failed: {error}", error=True)
-        if not auto and messagebox:
-            messagebox.showerror("Preview failed", str(error))
+        if not auto:
+            QMessageBox.critical(self, "Preview failed", str(error))
 
+    @Slot()
     def _on_snapshot_thread_finished(self) -> None:
         self._snapshot_thread = None
         if self.load_preview_button:
-            self.load_preview_button.configure(state="normal")
+            self.load_preview_button.setEnabled(True)
+        if self.snapshot_data and self.preview_btn:
+            self.preview_btn.setEnabled(True)
+
+    def _render_snapshot(self, snapshot: SnapshotData, *, remember: bool) -> None:
+        precomputed = (snapshot.freqs, snapshot.psd_db)
+        self._render_plot(
+            snapshot.samples,
+            snapshot.sample_rate,
+            snapshot.center_freq,
+            remember=remember,
+            snapshot=snapshot,
+            precomputed=precomputed,
+            waterfall=snapshot.waterfall,
+        )
 
     def _render_plot(
         self,
@@ -1206,26 +1610,27 @@ class _InteractiveApp:
         center_freq: float,
         *,
         remember: bool,
-        snapshot: Optional[SnapshotData] = None,
-        precomputed: Optional[tuple[np.ndarray, np.ndarray]] = None,
-        waterfall: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
+        snapshot: Optional[SnapshotData],
+        precomputed: Optional[tuple[np.ndarray, np.ndarray]],
+        waterfall: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]],
     ) -> None:
+        layout = self.plot_layout
+        if layout is None:
+            return
         if self.placeholder_label:
-            self.placeholder_label.destroy()
+            self.placeholder_label.deleteLater()
             self.placeholder_label = None
-        self._drop_plot_scroll_exclusions()
         if self.toolbar:
-            self.toolbar.destroy()
+            self.toolbar.setParent(None)
+            self.toolbar.deleteLater()
             self.toolbar = None
         if self.canvas:
-            self.canvas.get_tk_widget().destroy()
+            self.canvas.setParent(None)
+            self.canvas.deleteLater()
             self.canvas = None
-        if self.plot_container:
-            self.plot_container.destroy()
-            self.plot_container = None
 
-        nfft = self._parse_int(self.nfft_var.get(), default=131072)
-        smooth = max(1, int(self.smooth_var.get()))
+        nfft = self._current_nfft()
+        smooth = max(1, int(self._current_smoothing()))
         if precomputed is not None:
             freqs, psd_db = precomputed
         else:
@@ -1247,15 +1652,25 @@ class _InteractiveApp:
 
         self.figure = Figure(figsize=(9.5, 5.2))
         ax = self.figure.add_subplot(111)
-        theme = self.color_themes.get(self.theme_var.get(), self.color_themes["default"])
+        theme = self.color_themes.get(self.theme_value, self.color_themes["default"])
         line_color = theme["line"]
         ax.plot(abs_freqs, psd_db, lw=0.9, color=line_color)
-        ax.set_title("Drag to highlight a channel. Scroll or double-click to zoom. Use Preview/Confirm buttons below.")
+        ax.set_title(
+            "Drag to highlight a channel. Scroll or double-click to zoom. "
+            "Use Preview/Confirm buttons below."
+        )
         if FuncFormatter is not None:
-            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f"{x/1e6:.3f}"))
+            ax.xaxis.set_major_formatter(
+                FuncFormatter(lambda x, _pos: f"{x/1e6:.3f}")
+            )
         ax.set_xlabel("Absolute frequency (MHz)")
         ax.set_ylabel("Power (dBFS/Hz)")
-        ax.grid(True, which="both", ls=theme.get("grid", ":"), color=theme.get("grid_color", "#cccccc"))
+        ax.grid(
+            True,
+            which="both",
+            ls=theme.get("grid", ":"),
+            color=theme.get("grid_color", "#cccccc"),
+        )
         ax.set_facecolor(theme.get("bg", "white"))
         self.figure.patch.set_facecolor(theme.get("face", "white"))
         for spine in ax.spines.values():
@@ -1265,7 +1680,7 @@ class _InteractiveApp:
         ax.yaxis.label.set_color(theme.get("fg", "black"))
         ax.title.set_color(theme.get("fg", "black"))
 
-        dynamic = max(20.0, self._get_float(self.range_var, 80.0))
+        dynamic = max(20.0, float(self._current_dynamic_range()))
         if psd_db.size:
             finite_vals = psd_db[np.isfinite(psd_db)]
             peak = float(np.max(finite_vals)) if finite_vals.size else 0.0
@@ -1273,21 +1688,15 @@ class _InteractiveApp:
             peak = 0.0
         ax.set_ylim(peak - dynamic, peak + 5.0)
 
-        self.plot_container = ttk.Frame(self.plot_frame)
-        self.plot_container.pack(fill="both", expand=True)
         self.ax_main = ax
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_container)
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        if NavigationToolbar2QT is not None:
+            self.toolbar = NavigationToolbar2QT(self.canvas, self.plot_group)
+            self.toolbar.setObjectName("spectrumToolbar")
+            layout.addWidget(self.toolbar)
+        layout.addWidget(self.canvas)
         self.canvas.draw()
-        if NavigationToolbar2Tk is not None:
-            self.toolbar = NavigationToolbar2Tk(self.canvas, self.plot_container)
-            self.toolbar.update()
-            self.toolbar.pack(side="top", fill="x")
-            if self._scroll_frame:
-                self._scroll_frame.add_scroll_exclusion(self.toolbar)
-        canvas_widget = self.canvas.get_tk_widget()
-        canvas_widget.pack(fill="both", expand=True, padx=4, pady=4)
-        if self._scroll_frame:
-            self._scroll_frame.add_scroll_exclusion(canvas_widget)
+
         self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
         self.canvas.mpl_connect("key_press_event", self._on_canvas_key)
         self.canvas.mpl_connect("scroll_event", self._on_canvas_scroll)
@@ -1313,235 +1722,101 @@ class _InteractiveApp:
             on_change=self._on_span_change,
         )
         self._on_span_change(self.span_controller.selection)
-        self.sample_rate_var.set(f"Sample rate: {sample_rate:,.2f} Hz")
-        if remember and snapshot is not None:
+
+        if snapshot is not None and not remember:
             self.snapshot_data = snapshot
-        self._update_waterfall_display(sample_rate, center_freq, waterfall)
-        self._refresh_scroll_region()
-
-    def _on_span_change(self, selection: SelectionResult) -> None:
-        self.selection = selection
-        if self.target_freq_vars:
-            self.target_freq_vars[0].set(f"{selection.center_freq:.0f}")
-        freqs = self._update_target_freq_state()
-        self.bandwidth_var.set(f"{selection.bandwidth:.0f}")
-        if self.center_freq is not None and freqs:
-            offset = freqs[0] - self.center_freq
-            self.offset_var.set(f"Offset: {offset:+.0f} Hz")
-        elif self.center_freq is None and freqs:
-            self.offset_var.set("Offset: —")
-        if self.confirm_btn:
-            self.confirm_btn.configure(state="normal")
-        if self.preview_btn:
-            self.preview_btn.configure(state="normal")
-        self._update_output_path_hint()
-
-    def _on_canvas_click(self, event) -> None:
-        if self.ax_main is None or event.inaxes != self.ax_main or event.xdata is None:
-            return
-        if event.dblclick:
-            if self.selection and abs(event.xdata - self.selection.center_freq) <= self.selection.bandwidth / 2.0:
-                self._zoom_to_selection()
-            else:
-                self._zoom_at(event.xdata, factor=0.5)
-
-    def _on_canvas_key(self, event) -> None:
-        if event.key == "escape":
-            self._on_cancel()
-
-    def _on_confirm(self) -> None:
-        if not self.selection or not self.selected_path:
-            self._set_status("Select a frequency span before confirming.", error=True)
-            return
-        self.progress_sink = None
-        self.root.quit()
-
-    def _on_preview(self) -> None:
-        if self._preview_thread and self._preview_thread.is_alive():
-            self._set_status(
-                "Preview already running. Cancel it before starting a new one.",
-                error=True,
+        if self.bandwidth_entry and self.selection:
+            self.bandwidth_value = f"{self.selection.bandwidth:.0f}"
+            self.bandwidth_entry.setText(self.bandwidth_value)
+        if self.sample_rate_label:
+            self.sample_rate_label.setText(
+                f"Sample rate: {sample_rate:,.0f} Hz"
             )
-            return
-        if not self.selection or not self.selected_path:
-            self._set_status("Select a frequency span before previewing.", error=True)
-            return
-        seconds = self._parse_float(self.snapshot_var.get())
-        if seconds is None or seconds <= 0:
-            seconds = self.snapshot_seconds if self.snapshot_seconds > 0 else 2.0
-        try:
-            configs = self._build_configs(self.selected_path, self.center_freq)
-            if not configs:
-                raise ValueError("Enter at least one target frequency before previewing.")
-        except Exception as exc:  # pragma: no cover - setup validation
-            LOG.error("Preview setup failed: %s", exc)
-            self._set_status(f"Preview setup failed: {exc}", error=True)
-            messagebox.showerror("Preview failed", str(exc))
-            return
+        if waterfall is not None:
+            self._update_waterfall_display(sample_rate, center_freq, waterfall)
+        elif snapshot and snapshot.waterfall is not None:
+            self._update_waterfall_display(sample_rate, center_freq, snapshot.waterfall)
 
-        config = configs[0]
-        total = len(configs)
-        for cfg in configs:
-            self._ensure_output_directory(cfg.output_path)
-        self._preview_running = True
-        sink = StatusProgressSink(
-            lambda message, highlight: self._threadsafe_status(message, error=highlight)
+        if self.preview_btn:
+            self.preview_btn.setEnabled(True)
+        if self.confirm_btn and self.selection is not None:
+            self.confirm_btn.setEnabled(True)
+
+    def _update_waterfall_display(
+        self,
+        sample_rate: float,
+        center_freq: float,
+        waterfall: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    ) -> None:
+        if waterfall is None:
+            return
+        freqs, times, matrix = waterfall
+        if matrix.size == 0:
+            return
+        if self.waterfall_window is None or not self.waterfall_window.alive:
+            self.waterfall_window = _WaterfallWindow(
+                self,
+                on_select=self._on_waterfall_pick,
+                on_close=self._on_waterfall_closed,
+            )
+            self.waterfall_window.show()
+        floor = float(self._current_waterfall_floor())
+        cmap = self._current_waterfall_cmap()
+        self.waterfall_window.update(
+            freqs=freqs,
+            times=times,
+            matrix=matrix,
+            center_freq=center_freq,
+            sample_rate=sample_rate,
+            floor_db=floor,
+            cmap=cmap,
         )
-        self._status_sink = sink
-        if self.preview_btn:
-            self.preview_btn.configure(state="disabled")
-        if self.confirm_btn:
-            self.confirm_btn.configure(state="disabled")
-        self._set_stop_enabled(True)
-        if total > 1:
-            self._set_status(f"Previewing {seconds:.2f} s… (1/{total})", error=True)
-        else:
-            self._set_status(f"Previewing {seconds:.2f} s…", error=True)
 
-        def worker() -> None:
-            outputs: list[Path] = []
-            try:
-                for index, cfg in enumerate(configs, start=1):
-                    if total > 1:
-                        sink.status(f"Preview {index}/{total}")
-                    try:
-                        _result, preview_path = run_preview(
-                            cfg,
-                            seconds,
-                            progress_sink=sink,
-                            on_pipeline=self._register_preview_pipeline,
-                        )
-                    except ProcessingCancelled:
-                        raise
-                    except Exception as exc:
-                        LOG.error(
-                            "Preview failed for %.0f Hz: %s", cfg.target_freq, exc
-                        )
-                        raise
-                    else:
-                        outputs.append(preview_path)
-            except ProcessingCancelled:
-                LOG.info("Preview cancelled by user.")
-                try:
-                    self.root.after(0, self._handle_preview_cancelled)
-                except Exception:  # pragma: no cover - root already closed
-                    pass
-            except Exception as exc:
-                if not outputs:
-                    LOG.error("Preview failed: %s", exc)
-                try:
-                    self.root.after(0, lambda err=exc: self._handle_preview_failed(err))
-                except Exception:  # pragma: no cover - root already closed
-                    pass
-            else:
-                try:
-                    self.root.after(
-                        0,
-                        lambda paths=list(outputs): self._handle_preview_complete(paths),
-                    )
-                except Exception:  # pragma: no cover - root already closed
-                    pass
-            finally:
-                self._register_preview_pipeline(None)
-
-        self._preview_thread = threading.Thread(target=worker, daemon=True)
-        self._preview_thread.start()
-
-    def _on_cancel(self) -> None:
-        self._cancel_active_pipeline()
-        self._set_stop_enabled(False)
-        self.selection = None
-        self.root.quit()
-
-    def _register_preview_pipeline(self, pipeline) -> None:
-        with self._preview_lock:
-            self._active_pipeline = pipeline
-
-    def _cancel_active_pipeline(self) -> None:
-        with self._preview_lock:
-            pipeline = self._active_pipeline
-        if pipeline is not None:
-            try:
-                pipeline.cancel()
-            except Exception as exc:
-                LOG.debug("Failed to cancel pipeline cleanly: %s", exc)
-
-    def _preview_finished(self) -> None:
-        self._preview_running = False
-        self._preview_thread = None
-        with self._preview_lock:
-            self._active_pipeline = None
-        self._set_stop_enabled(False)
-        self._status_sink = None
-        if self.preview_btn:
-            self.preview_btn.configure(state="normal")
-        if self.confirm_btn:
-            self.confirm_btn.configure(
-                state="normal" if self.selection is not None else "disabled"
-            )
-
-    def _handle_preview_complete(self, preview_paths: list[Path]) -> None:
-        self._preview_finished()
-        if not preview_paths:
-            self._set_status("Preview complete.", error=False)
+    def _on_waterfall_pick(self, freq_hz: float) -> None:
+        if self.span_controller is None:
             return
-        if len(preview_paths) == 1:
-            summary = f"Preview complete (output: {preview_paths[0].name})"
-            detail = str(preview_paths[0])
-        else:
-            summary = f"Preview complete for {len(preview_paths)} targets."
-            detail = "\n".join(f"{idx+1}. {path}" for idx, path in enumerate(preview_paths))
-        self._set_status(summary, error=False)
-        if messagebox:
-            messagebox.showinfo("Preview complete", f"Preview audio written to:\n{detail}")
+        bandwidth = (
+            self.selection.bandwidth if self.selection is not None else 12_500.0
+        )
+        self.span_controller.set_selection(freq_hz, bandwidth)
 
-    def _handle_preview_failed(self, error: Exception) -> None:
-        self._preview_finished()
-        self._set_status(f"Preview failed: {error}", error=True)
-        if messagebox:
-            messagebox.showerror("Preview failed", str(error))
-
-    def _handle_preview_cancelled(self) -> None:
-        self._preview_finished()
-        self._set_status("Preview cancelled.", error=False)
-
-    # --- Helpers ---------------------------------------------------------
-    def _on_canvas_scroll(self, event) -> None:
-        if self.ax_main is None or event.xdata is None:
-            return
-        step = getattr(event, "step", 0)
-        if step == 0:
-            button = getattr(event, "button", None)
-            step = 1 if button == "up" else -1
-        if step > 0:
-            self._zoom_at(event.xdata, factor=0.8)
-        else:
-            self._zoom_at(event.xdata, factor=1.25)
+    def _on_waterfall_closed(self) -> None:
+        self.waterfall_window = None
 
     def _schedule_refresh(self, *, full: bool = False, waterfall_only: bool = False) -> None:
         if self.snapshot_data is None:
             self._set_status("Load an FFT snapshot before refreshing.", error=True)
             return
-        if self._refresh_job is not None:
-            try:
-                self.root.after_cancel(self._refresh_job)
-            except Exception:  # pragma: no cover - safe guard
-                pass
-        self._refresh_job = self.root.after(
-            0, lambda: self._refresh_plot(full=full, waterfall_only=waterfall_only)
-        )
+        self._refresh_pending = (full, waterfall_only)
+        if self._refresh_timer is None:
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._run_refresh)
+            self._refresh_timer = timer
+        else:
+            self._refresh_timer.stop()
+        self._refresh_timer.start(0)
+
+    def _run_refresh(self) -> None:
+        if self._refresh_timer is None:
+            return
+        full, waterfall_only = self._refresh_pending
+        self._refresh_timer.stop()
+        self._refresh_plot(full=full, waterfall_only=waterfall_only)
 
     def _refresh_preview_manual(self) -> None:
         if self.snapshot_data is None:
             self._set_status("Load an FFT snapshot before refreshing.", error=True)
             return
         full_capture = bool(self.snapshot_data.params.get("full_capture", False))
-        self.full_snapshot_var.set(full_capture)
+        if self.full_snapshot_check:
+            self.full_snapshot_check.blockSignals(True)
+            self.full_snapshot_check.setChecked(full_capture)
+            self.full_snapshot_check.blockSignals(False)
         self._set_status("Refreshing preview…", error=False)
         self._schedule_refresh(full=True)
 
     def _refresh_plot(self, *, full: bool = False, waterfall_only: bool = False) -> None:
-        self._refresh_job = None
         snapshot = self.snapshot_data
         if snapshot is None:
             return
@@ -1551,9 +1826,9 @@ class _InteractiveApp:
             )
             return
 
-        nfft = self._parse_int(self.nfft_var.get(), default=131072)
+        nfft = self._current_nfft()
         hop = max(1, nfft // 4)
-        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
+        max_slices = self._current_waterfall_slices()
         fft_workers = self._fft_worker_count()
 
         try:
@@ -1637,6 +1912,58 @@ class _InteractiveApp:
             waterfall=refreshed.waterfall,
         )
 
+    def _on_span_change(self, selection: SelectionResult) -> None:
+        self.selection = selection
+        if self.target_entries:
+            entry = self.target_entries[0]
+            entry.blockSignals(True)
+            entry.setText(f"{selection.center_freq:.0f}")
+            entry.blockSignals(False)
+        freqs = self._update_target_freq_state()
+        self.bandwidth_value = f"{selection.bandwidth:.0f}"
+        if self.bandwidth_entry:
+            self.bandwidth_entry.setText(self.bandwidth_value)
+        if self.center_freq is not None and freqs:
+            offset = freqs[0] - self.center_freq
+            if self.offset_label:
+                self.offset_label.setText(f"Offset: {offset:+.0f} Hz")
+        elif self.offset_label:
+            self.offset_label.setText("Offset: —")
+        if self.confirm_btn:
+            self.confirm_btn.setEnabled(True)
+        if self.preview_btn:
+            self.preview_btn.setEnabled(True)
+        self._update_output_path_hint()
+
+    def _on_canvas_click(self, event) -> None:
+        if self.ax_main is None or event.inaxes != self.ax_main or event.xdata is None:
+            return
+        if event.dblclick:
+            if (
+                self.selection
+                and abs(event.xdata - self.selection.center_freq)
+                <= self.selection.bandwidth / 2.0
+            ):
+                self._zoom_to_selection()
+            else:
+                self._zoom_at(event.xdata, factor=0.5)
+
+    def _on_canvas_key(self, event) -> None:
+        if event.key == "escape":
+            self._on_cancel()
+
+    def _on_canvas_scroll(self, event) -> None:
+        if self.ax_main is None or event.xdata is None:
+            return
+        step = getattr(event, "step", 0)
+        if step == 0:
+            button = getattr(event, "button", None)
+            step = 1 if button == "up" else -1
+        if step > 0:
+            self._zoom_at(event.xdata, factor=0.8)
+        else:
+            self._zoom_at(event.xdata, factor=1.25)
+
     def _zoom_to_selection(self) -> None:
         if self.ax_main is None or self.selection is None:
             return
@@ -1678,357 +2005,14 @@ class _InteractiveApp:
                 else:
                     if xmin < self._freq_min_hz:
                         xmin = self._freq_min_hz
-                        xmax = xmin + width
                     if xmax > self._freq_max_hz:
                         xmax = self._freq_max_hz
-                        xmin = xmax - width
-        if xmin >= xmax:
-            xmin, xmax = self.ax_main.get_xlim()
         self.ax_main.set_xlim(xmin, xmax)
         self.canvas.draw_idle()
 
-    def _on_toggle_squelch(self) -> None:
-        enabled = self.squelch_var.get()
-        self.base_kwargs["squelch_enabled"] = enabled
-        if not enabled:
-            self.trim_var.set(False)
-            if self.trim_check:
-                self.trim_check.state(["disabled"])
-        else:
-            if self.trim_check:
-                self.trim_check.state(["!disabled"])
-        if self.squelch_threshold_entry:
-            state = "normal" if enabled else "disabled"
-            self.squelch_threshold_entry.configure(state=state)
-        self.base_kwargs["silence_trim"] = self.trim_var.get()
-        message = (
-            "Adaptive squelch enabled. Leave threshold blank to auto-track noise."
-            if enabled
-            else "Squelch disabled; audio will remain open regardless of level."
-        )
-        self._set_status(message, error=False)
-
-    def _on_squelch_threshold_edit(self) -> None:
-        text = self.squelch_threshold_var.get().strip()
-        if not text:
-            self.base_kwargs["squelch_dbfs"] = None
-            self._set_status(
-                "Adaptive squelch will auto-track the noise floor.",
-                error=False,
-            )
-            return
-        try:
-            value = float(text)
-        except ValueError:
-            self._set_status(
-                "Squelch threshold must be a numeric dBFS value.",
-                error=True,
-            )
-            return
-        self.base_kwargs["squelch_dbfs"] = value
-        self._set_status(
-            f"Manual squelch threshold set to {value:.1f} dBFS.",
-            error=False,
-        )
-
-    def _reset_spectrum_defaults(self) -> None:
-        self.nfft_var.set("131072")
-        self.smooth_var.set(1)
-        self.range_var.set(80)
-        self.theme_var.set("default")
-        self.waterfall_slices_var.set("400")
-        self.waterfall_floor_var.set("110")
-        self.waterfall_cmap_var.set("magma")
-        self._set_status("Spectrum defaults restored. Click Refresh preview to update.", error=False)
-
-    def _on_toggle_trim(self) -> None:
-        self.base_kwargs["silence_trim"] = self.trim_var.get()
-        # No automatic refresh to avoid recompute surprises.
-        self._set_status("Updated silence trim setting. Use Preview/Refresh to apply.", error=False)
-
-    def _on_toggle_agc(self) -> None:
-        value = self.agc_var.get()
-        demod = (self.demod_var.get() or "nfm").lower()
-        if demod in {"usb", "lsb", "ssb"}:
-            self._preferred_agc = value
-        self.base_kwargs["agc_enabled"] = value
-        # No automatic refresh; manual preview needed.
-        self._set_status("Updated AGC preference. Use Preview/Refresh to apply.", error=False)
-
-    def _on_bandwidth_edit(self) -> None:
-        try:
-            bandwidth = float(self.bandwidth_var.get())
-            if bandwidth <= 0:
-                raise ValueError()
-        except ValueError:
-            self._set_status("Bandwidth must be positive.", error=True)
-            return
-        primary_targets = self._current_target_frequencies()
-        target = primary_targets[0] if primary_targets else None
-        if self.span_controller and target:
-            self.span_controller.set_selection(target, bandwidth)
-        elif target:
-            self.selection = SelectionResult(target, bandwidth)
-            if self.center_freq is not None:
-                offset = target - self.center_freq
-                self.offset_var.set(f"Offset: {offset:+.0f} Hz")
-        elif self.selection:
-            self.selection = SelectionResult(self.selection.center_freq, bandwidth)
-        self.base_kwargs["bandwidth"] = bandwidth
-        self._set_status(
-            "Bandwidth updated. Use Preview DSP or Refresh preview to apply.",
-            error=False,
-        )
-        self._update_output_path_hint()
-
-    def _current_target_frequencies(self) -> list[float]:
-        freqs: list[float] = []
-        for var in self.target_freq_vars:
-            freq = self._parse_float(var.get())
-            if freq is None or freq <= 0:
-                continue
-            if any(math.isclose(freq, other, rel_tol=0.0, abs_tol=0.5) for other in freqs):
-                continue
-            freqs.append(freq)
-        return freqs[:MAX_TARGET_FREQUENCIES]
-
-    def _update_target_freq_state(self) -> list[float]:
-        freqs = self._current_target_frequencies()
-        if freqs:
-            primary = freqs[0]
-            self.base_kwargs["target_freq"] = primary
-            self.base_kwargs["target_freqs"] = freqs
-            if self.center_freq is not None:
-                offset = primary - self.center_freq
-                self.offset_var.set(f"Offset: {offset:+.0f} Hz")
-            else:
-                self.offset_var.set("Offset: —")
-        else:
-            self.base_kwargs["target_freq"] = 0.0
-            self.base_kwargs["target_freqs"] = []
-            self.offset_var.set("Offset: —")
-        return freqs
-
-    def _on_target_entry_edit(self, index: int) -> None:
-        freqs = self._update_target_freq_state()
-        if not freqs:
-            self._set_status(
-                "Enter at least one target frequency before running DSP.",
-                error=True,
-            )
-            return
-        primary = freqs[0]
-        if index == 0:
-            bandwidth = self._parse_float(self.bandwidth_var.get()) or self.base_kwargs.get("bandwidth", 12_500.0)
-            if self.span_controller:
-                self.span_controller.set_selection(primary, bandwidth)
-            else:
-                self.selection = SelectionResult(primary, bandwidth)
-            if self.center_freq is not None:
-                offset = primary - self.center_freq
-                self.offset_var.set(f"Offset: {offset:+.0f} Hz")
-        self._set_status(f"Tracking {len(freqs)} target(s).", error=False)
-        self._update_output_path_hint()
-
-    def _update_option_state(self) -> None:
-        demod = (self.demod_var.get() or "nfm").lower()
-        self.base_kwargs["demod_mode"] = demod
-        is_ssb = demod in {"usb", "lsb", "ssb"}
-        if self.agc_check:
-            if is_ssb:
-                self.agc_check.state(["!disabled"])
-            else:
-                self.agc_check.state(["disabled"])
-        if is_ssb:
-            self.agc_var.set(self._preferred_agc)
-            self._on_toggle_agc()
-        else:
-            self.agc_var.set(False)
-            self._on_toggle_agc()
-        self._on_toggle_squelch()
-
-    @staticmethod
-    def _parse_int(text: str, default: int) -> int:
-        try:
-            value = int(text)
-        except (TypeError, ValueError):
-            return default
-        return max(1024, value)
-
-    def _get_float(self, var: tk.Variable, default: float) -> float:
-        try:
-            value = float(var.get())
-        except (TypeError, ValueError):
-            var.set(f"{default}")
-            return default
-        return value
-
-    def _update_waterfall_display(
-        self,
-        sample_rate: float,
-        center_freq: float,
-        waterfall: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]],
-    ) -> None:
-        if waterfall is None:
-            return
-        freqs, times, matrix = waterfall
-        if matrix.size == 0:
-            return
-        if self.waterfall_window is None or not self.waterfall_window.alive:
-            self.waterfall_window = _WaterfallWindow(
-                self.root,
-                on_select=self._on_waterfall_pick,
-                on_close=self._on_waterfall_closed,
-            )
-        floor = self._get_float(self.waterfall_floor_var, 90.0)
-        cmap = self.waterfall_cmap_var.get() or "viridis"
-        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
-        freq_arr, times_arr, matrix_arr = waterfall
-        times_arr = np.asarray(times_arr, dtype=np.float32)
-        matrix_arr = np.asarray(matrix_arr, dtype=np.float64)
-        if matrix_arr.shape[0] > max_slices:
-            step = math.ceil(matrix_arr.shape[0] / max_slices)
-            reduced = []
-            reduced_times = []
-            for idx in range(0, matrix_arr.shape[0], step):
-                reduced.append(np.mean(matrix_arr[idx : idx + step], axis=0))
-                reduced_times.append(times_arr[idx])
-            matrix_arr = np.array(reduced)
-            times_arr = np.array(reduced_times, dtype=np.float32)
-        self.waterfall_window.update(
-            freqs=freq_arr,
-            times=times_arr,
-            matrix=matrix_arr,
-            center_freq=center_freq,
-            sample_rate=sample_rate,
-            floor_db=floor,
-            cmap=cmap,
-        )
-
-    def _set_center_source(self, source: Optional[str]) -> None:
-        resolved = source or "unavailable"
-        self.center_source = resolved
-        self.base_kwargs["center_freq_source"] = resolved
-        if resolved == "unavailable":
-            label = "—"
-        else:
-            label = self._describe_center_source(resolved)
-        self.center_source_var.set(f"Center source: {label}")
-
-    def _describe_center_source(self, source: Optional[str]) -> str:
-        resolved = source or "unavailable"
-        if resolved == "unavailable":
-            return "manual entry"
-        if resolved == "manual":
-            return "manual entry"
-        if resolved.startswith("metadata:"):
-            detail = resolved.split(":", 1)[1] or "metadata"
-            return f"WAV metadata ({detail})"
-        if resolved.startswith("filename"):
-            return "filename pattern"
-        if resolved == "config":
-            return "configuration"
-        return resolved
-
-    def _on_output_dir_browse(self) -> None:
-        current = self._current_output_dir()
-        if current is None and self.selected_path:
-            current = self.selected_path.parent
-        try:
-            chosen = filedialog.askdirectory(
-                parent=self.root,
-                initialdir=str(current) if current else None,
-                title="Select output directory",
-            )
-        except Exception:  # pragma: no cover - Tk dialog failure
-            chosen = ""
-        if chosen:
-            self.output_dir_var.set(chosen)
-            self._on_output_dir_changed()
-
-    def _on_output_dir_changed(self) -> None:
-        directory = self._current_output_dir()
-        if directory:
-            self._set_status(f"Output directory set to {directory}", error=False)
-        else:
-            self._set_status(
-                "Output directory cleared; previews and outputs will default next to the recording.",
-                error=False,
-            )
-        self._update_output_path_hint()
-
-    def _current_output_dir(self) -> Optional[Path]:
-        text = self.output_dir_var.get().strip()
-        if not text:
-            return None
-        return Path(text).expanduser()
-
-    def _default_output_filename(self, target_freq: float) -> str:
-        finest = int(round(target_freq)) if target_freq else 0
-        return f"audio_{finest}_48k.wav"
-
-    def _resolve_output_path(self, input_path: Path, target_freq: float) -> Optional[Path]:
-        directory = self._current_output_dir()
-        if directory:
-            return directory / self._default_output_filename(target_freq)
-        if self._cli_output_path is not None:
-            return self._cli_output_path
-        existing = self.base_kwargs.get("output_path")
-        if existing:
-            return Path(existing)
-        return None
-
-    def _ensure_output_directory(self, output_path: Optional[Path]) -> None:
-        if output_path is None:
-            return
-        try:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            LOG.warning("Failed to create output directory %s: %s", output_path.parent, exc)
-
-    def _update_output_path_hint(self) -> None:
-        targets = self.base_kwargs.get("target_freqs") or []
-        if targets:
-            target = float(targets[0])
-        elif self.selection is not None:
-            target = float(self.selection.center_freq)
-        else:
-            target = float(self.base_kwargs.get("target_freq", 0.0))
-        input_path_text = self.file_var.get().strip()
-        input_path = Path(input_path_text) if input_path_text else None
-        resolved: Optional[Path] = None
-        if input_path:
-            try:
-                resolved = self._resolve_output_path(input_path, target)
-            except Exception:
-                resolved = None
-        if resolved is None and not input_path and self._cli_output_path is not None:
-            resolved = self._cli_output_path
-        if resolved is None and input_path:
-            resolved = input_path.with_name(self._default_output_filename(target))
-        if resolved is not None:
-            self.output_path_var.set(f"Preview/output files: {resolved}")
-        else:
-            filename = self._default_output_filename(target)
-            self.output_path_var.set(f"Preview/output files: {filename} (default)")
-
-    def _threadsafe_status(self, message: str, *, error: bool = False) -> None:
-        try:
-            self.root.after(0, lambda: self._set_status(message, error=error))
-        except Exception:  # pragma: no cover - root may be shutting down
-            pass
-
-    def _set_status(self, message: str, *, error: bool) -> None:
-        self.status_var.set(message)
-        if self.status_label:
-            self.status_label.configure(
-                foreground="Firebrick" if error else "SlateGray"
-            )
-
     def _set_stop_enabled(self, enabled: bool) -> None:
         if self.stop_btn:
-            state = "normal" if enabled else "disabled"
-            self.stop_btn.configure(state=state)
+            self.stop_btn.setEnabled(enabled)
 
     def _on_stop_processing(self) -> None:
         if not self._preview_running:
@@ -2042,28 +2026,183 @@ class _InteractiveApp:
         self._set_stop_enabled(False)
         self._cancel_active_pipeline()
 
+    def _register_preview_pipeline(self, pipeline) -> None:
+        with self._preview_lock:
+            self._active_pipeline = pipeline
+
+    def _ensure_output_directory(self, output_path: Optional[Path]) -> None:
+        if output_path is None:
+            return
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            LOG.warning(
+                "Failed to create output directory %s: %s",
+                output_path.parent,
+                exc,
+            )
+
+    def _on_preview(self) -> None:
+        if self._preview_thread and self._preview_thread.is_alive():
+            self._set_status(
+                "Preview already running. Cancel it before starting a new one.",
+                error=True,
+            )
+            return
+        if not self.selection or not self.selected_path:
+            self._set_status("Select a frequency span before previewing.", error=True)
+            return
+        seconds = self.snapshot_seconds if self.snapshot_seconds > 0 else 2.0
+        try:
+            configs = self._build_configs(self.selected_path, self.center_freq)
+            if not configs:
+                raise ValueError("Enter at least one target frequency before previewing.")
+        except Exception as exc:
+            LOG.error("Preview setup failed: %s", exc)
+            self._set_status(f"Preview setup failed: {exc}", error=True)
+            QMessageBox.critical(self, "Preview failed", str(exc))
+            return
+
+        config = configs[0]
+        total = len(configs)
+        for cfg in configs:
+            self._ensure_output_directory(cfg.output_path)
+        self._preview_running = True
+        sink = StatusProgressSink(
+            lambda message, highlight: self.status_update_signal.emit(
+                message, highlight
+            )
+        )
+        self._status_sink = sink
+        if self.preview_btn:
+            self.preview_btn.setEnabled(False)
+        if self.confirm_btn:
+            self.confirm_btn.setEnabled(False)
+        self._set_stop_enabled(True)
+        if total > 1:
+            self._set_status(f"Previewing {seconds:.2f} s… (1/{total})", error=True)
+        else:
+            self._set_status(f"Previewing {seconds:.2f} s…", error=True)
+
+        def worker() -> None:
+            outputs: list[Path] = []
+            try:
+                for index, cfg in enumerate(configs, start=1):
+                    if total > 1:
+                        sink.status(f"Preview {index}/{total}")
+                    try:
+                        _result, preview_path = run_preview(
+                            cfg,
+                            seconds,
+                            progress_sink=sink,
+                            on_pipeline=self._register_preview_pipeline,
+                        )
+                    except ProcessingCancelled:
+                        raise
+                    except Exception as exc:
+                        LOG.error(
+                            "Preview failed for %.0f Hz: %s", cfg.target_freq, exc
+                        )
+                        raise
+                    else:
+                        outputs.append(preview_path)
+            except ProcessingCancelled:
+                LOG.info("Preview cancelled by user.")
+                self.preview_complete_signal.emit(None, True)
+            except Exception as exc:
+                if not outputs:
+                    LOG.error("Preview failed: %s", exc)
+                self.preview_complete_signal.emit(exc, True)
+            else:
+                self.preview_complete_signal.emit(outputs, False)
+            finally:
+                self._register_preview_pipeline(None)
+
+        self._preview_thread = threading.Thread(target=worker, daemon=True)
+        self._preview_thread.start()
+
+    @Slot(object, bool)
+    def _on_preview_completed(self, payload, is_error: bool) -> None:
+        if isinstance(payload, Exception):
+            self._handle_preview_failed(payload)
+            return
+        if is_error:
+            if payload is None:
+                self._handle_preview_cancelled()
+            elif isinstance(payload, Exception):
+                self._handle_preview_failed(payload)
+            else:
+                self._handle_preview_failed(Exception("Preview failed"))
+            return
+        if isinstance(payload, list):
+            self._handle_preview_complete(payload)
+        else:
+            self._handle_preview_cancelled()
+
+    def _preview_finished(self) -> None:
+        self._preview_running = False
+        self._preview_thread = None
+        with self._preview_lock:
+            self._active_pipeline = None
+        self._set_stop_enabled(False)
+        self._status_sink = None
+        if self.preview_btn:
+            self.preview_btn.setEnabled(True)
+        if self.confirm_btn:
+            self.confirm_btn.setEnabled(self.selection is not None)
+
+    def _handle_preview_complete(self, preview_paths: list[Path]) -> None:
+        self._preview_finished()
+        if not preview_paths:
+            self._set_status("Preview complete.", error=False)
+            return
+        if len(preview_paths) == 1:
+            summary = f"Preview complete (output: {preview_paths[0].name})"
+            detail = str(preview_paths[0])
+        else:
+            summary = f"Preview complete for {len(preview_paths)} targets."
+            detail = "\n".join(
+                f"{idx + 1}. {path}" for idx, path in enumerate(preview_paths)
+            )
+        self._set_status(summary, error=False)
+        QMessageBox.information(
+            self,
+            "Preview complete",
+            f"Preview audio written to:\n{detail}",
+        )
+
+    def _handle_preview_failed(self, error: Exception) -> None:
+        self._preview_finished()
+        self._set_status(f"Preview failed: {error}", error=True)
+        QMessageBox.critical(self, "Preview failed", str(error))
+
+    def _handle_preview_cancelled(self) -> None:
+        self._preview_finished()
+        self._set_status("Preview cancelled.", error=False)
+
+    def _on_cancel(self) -> None:
+        self._cancel_active_pipeline()
+        self._set_stop_enabled(False)
+        self.selection = None
+        app = QApplication.instance()
+        if app:
+            app.quit()
+
+    def _on_confirm(self) -> None:
+        if not self.selection or not self.selected_path:
+            self._set_status("Select a frequency span before confirming.", error=True)
+            return
+        self.progress_sink = None
+        app = QApplication.instance()
+        if app:
+            app.quit()
+
     @staticmethod
     def _fft_worker_count() -> Optional[int]:
         cpu_count = os.cpu_count() or 1
         if cpu_count <= 1:
             return None
         return min(4, cpu_count)
-
-    @staticmethod
-    def _format_float(value: Optional[float]) -> str:
-        if value is None or value <= 0:
-            return ""
-        return f"{value:.0f}"
-
-    @staticmethod
-    def _parse_float(text: str) -> Optional[float]:
-        stripped = text.strip()
-        if not stripped:
-            return None
-        try:
-            return float(stripped)
-        except ValueError:
-            return None
 
     @staticmethod
     def _augment_path(path: Optional[Path], freq: float, total: int) -> Optional[Path]:
@@ -2097,24 +2236,29 @@ class _InteractiveApp:
             kwargs.pop(deprecated_key, None)
         center_value = center_override
         if center_value is None or center_value <= 0:
-            parsed = self._parse_float(self.center_var.get())
+            source_text = (
+                self.center_entry.text() if self.center_entry else self.center_value
+            )
+            parsed = self._parse_float(source_text or "")
             if parsed is not None and parsed > 0:
                 center_value = parsed
         kwargs["center_freq"] = center_value
         kwargs["center_freq_source"] = self.center_source
-        demod = (self.demod_var.get() or kwargs.get("demod_mode", "nfm")).lower()
+        demod = (self.demod_value or kwargs.get("demod_mode", "nfm")).lower()
         kwargs["demod_mode"] = demod
-        silence_trim = self.trim_var.get()
-        squelch_enabled = self.squelch_var.get()
-        kwargs["agc_enabled"] = self.agc_var.get()
+        silence_trim = self.trim_enabled
+        squelch_enabled = self.squelch_enabled
+        kwargs["agc_enabled"] = self.agc_enabled
+        kwargs["silence_trim"] = silence_trim
+        kwargs["squelch_enabled"] = squelch_enabled
         self.base_kwargs.update(
             {
                 "center_freq": center_value,
                 "demod_mode": demod,
                 "silence_trim": silence_trim,
                 "squelch_enabled": squelch_enabled,
-            "agc_enabled": kwargs["agc_enabled"],
-        }
+                "agc_enabled": kwargs["agc_enabled"],
+            }
         )
         if center_value is not None and center_value > 0:
             self.center_freq = center_value
@@ -2135,8 +2279,11 @@ class _InteractiveApp:
             )
             if fallback and fallback > 0:
                 frequencies = [float(fallback)]
-                if self.target_freq_vars:
-                    self.target_freq_vars[0].set(f"{float(fallback):.0f}")
+                if self.target_entries:
+                    entry = self.target_entries[0]
+                    entry.blockSignals(True)
+                    entry.setText(f"{float(fallback):.0f}")
+                    entry.blockSignals(False)
                 self._update_target_freq_state()
             elif require_targets:
                 raise ValueError("Enter at least one target frequency before running DSP.")
@@ -2206,10 +2353,7 @@ class _InteractiveApp:
         )
         status_stride = max(1, estimated_chunks // 25) if estimated_chunks else 4
 
-        try:
-            from .processing import IQReader
-        except ImportError as exc:  # pragma: no cover - safety
-            raise RuntimeError(f"Interactive mode missing IQReader: {exc}") from exc
+        from .processing import IQReader
 
         if status_cb:
             try:
@@ -2283,187 +2427,74 @@ class _InteractiveApp:
             params=params,
             fft_frames=frames,
         )
-        LOG.info(
-            "Full-record spectrum gathered: %.2f s analysed (%d FFT frames).",
-            snapshot.seconds,
-            frames,
-        )
-        if status_cb:
-            try:
-                status_cb("Full-record spectrum ready.")
-            except Exception:
-                pass
         return snapshot
 
-    def _on_waterfall_pick(self, freq_hz: float) -> None:
-        bandwidth = (
-            self.selection.bandwidth
-            if self.selection is not None
-            else self.base_kwargs.get("bandwidth", 12_500.0)
+    def _build_demod_options_section(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Demod options")
+        layout = QVBoxLayout()
+
+        checks_row = QHBoxLayout()
+        self.squelch_check = QCheckBox("Adaptive squelch")
+        self.squelch_check.setChecked(self.squelch_enabled)
+        self.squelch_check.stateChanged.connect(self._on_toggle_squelch)
+        checks_row.addWidget(self.squelch_check)
+
+        self.trim_check = QCheckBox("Trim silences")
+        self.trim_check.setChecked(self.trim_enabled)
+        self.trim_check.stateChanged.connect(self._on_toggle_trim)
+        checks_row.addWidget(self.trim_check)
+
+        self.agc_check = QCheckBox("Automatic gain control")
+        self.agc_check.setChecked(self.agc_enabled)
+        self.agc_check.stateChanged.connect(self._on_toggle_agc)
+        checks_row.addWidget(self.agc_check)
+        checks_row.addStretch()
+        layout.addLayout(checks_row)
+
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(QLabel("Manual threshold (dBFS):"))
+        self.squelch_threshold_entry = QLineEdit(self.squelch_threshold_value)
+        self.squelch_threshold_entry.setMaximumWidth(110)
+        self.squelch_threshold_entry.editingFinished.connect(self._on_squelch_threshold_edit)
+        threshold_row.addWidget(self.squelch_threshold_entry)
+        threshold_row.addStretch()
+        layout.addLayout(threshold_row)
+
+        help_label = QLabel(
+            "Adaptive squelch tracks the noise floor, opening when the signal rises ~4 dB above it.\n"
+            "Leave the threshold blank to auto-track, or enter a negative dBFS value to pin the gate."
         )
-        if self.span_controller:
-            self.span_controller.set_selection(freq_hz, bandwidth)
-        self.selection = SelectionResult(freq_hz, bandwidth)
-        self._on_span_change(self.selection)
+        help_label.setStyleSheet("color: #708090;")
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
 
-    def _on_waterfall_closed(self) -> None:
-        self.waterfall_window = None
-
-
-class _SpanController:
-    """Track matplotlib SpanSelector selections and update overlays."""
-
-    def __init__(
-        self,
-        *,
-        ax,
-        canvas: FigureCanvasTkAgg,
-        initial: SelectionResult,
-        on_change,
-    ):
-        self.ax = ax
-        self.canvas = canvas
-        self.on_change = on_change
-        self.selection = SelectionResult(initial.center_freq, initial.bandwidth)
-
-        half_bw = max(self.selection.bandwidth / 2.0, 1.0)
-        self.center_line = self.ax.axvline(
-            self.selection.center_freq, color="C3", ls="--", lw=1.2, label="Center"
-        )
-        self.low_line = self.ax.axvline(
-            self.selection.center_freq - half_bw, color="C2", ls=":", lw=1.0
-        )
-        self.high_line = self.ax.axvline(
-            self.selection.center_freq + half_bw, color="C2", ls=":", lw=1.0
-        )
-        self.ax.legend(loc="upper right")
-
-        self.selector = SpanSelector(
-            self.ax,
-            onselect=self._on_select,
-            direction="horizontal",
-            useblit=True,
-        )
-        self._emit()
-
-    def _on_select(self, xmin: float, xmax: float) -> None:
-        if xmin == xmax:
-            return
-        lo, hi = sorted((xmin, xmax))
-        center = 0.5 * (lo + hi)
-        bw = max(hi - lo, 10.0)
-        self.selection = SelectionResult(center, bw)
-        self._update_lines()
-        self._emit()
-
-    def _update_lines(self) -> None:
-        half_bw = max(self.selection.bandwidth / 2.0, 1.0)
-        self.center_line.set_xdata(
-            [self.selection.center_freq, self.selection.center_freq]
-        )
-        self.low_line.set_xdata(
-            [self.selection.center_freq - half_bw] * 2
-        )
-        self.high_line.set_xdata(
-            [self.selection.center_freq + half_bw] * 2
-        )
-        self.canvas.draw_idle()
-
-    def _emit(self) -> None:
-        if self.on_change:
-            self.on_change(self.selection)
-
-    def set_selection(self, center: float, bandwidth: float) -> None:
-        self.selection = SelectionResult(center, max(bandwidth, 10.0))
-        self._update_lines()
-        self._emit()
+        group.setLayout(layout)
+        parent_layout.addWidget(group)
 
 
-class _WaterfallWindow:
-    def __init__(self, root: tk.Tk, on_select, on_close) -> None:
-        self.root = root
-        self._on_select = on_select
-        self._on_close = on_close
-        self.window = tk.Toplevel(root)
-        self.window.title("Waterfall (time vs frequency)")
-        self.window.geometry("900x700")
-        self.window.protocol("WM_DELETE_WINDOW", self._handle_close)
-        self.figure = Figure(figsize=(8.5, 5.5))
-        self.ax = self.figure.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self.window)
-        self.canvas.draw()
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
-        self.cid = self.figure.canvas.mpl_connect("button_press_event", self._on_click)
-        self.freqs_hz: Optional[np.ndarray] = None
-        self.center_freq = 0.0
-        self.sample_rate = 0.0
-        self.image = None
-        self.alive = True
-        self._colorbar = None
+def launch_interactive_session(
+    *,
+    input_path: Optional[Path],
+    base_kwargs: dict,
+    snapshot_seconds: float,
+) -> InteractiveSessionResult:
+    """Launch the PySide6-based interactive GUI for full-session control."""
+    ensure_matplotlib()
+    if QtWidgets is None:
+        raise RuntimeError(QT_DEPENDENCY_HINT)
+    if FigureCanvasQTAgg is None or Figure is None or SpanSelector is None:
+        raise RuntimeError("matplotlib QtAgg backend is required for --interactive.")
 
-    def update(
-        self,
-        *,
-        freqs: np.ndarray,
-        times: np.ndarray,
-        matrix: np.ndarray,
-        center_freq: float,
-        sample_rate: float,
-        floor_db: float,
-        cmap: str,
-    ) -> None:
-        if freqs.size == 0 or matrix.size == 0:
-            return
-        self.freqs_hz = center_freq + freqs
-        self.center_freq = center_freq
-        self.sample_rate = sample_rate
-        if self._colorbar is not None:
-            try:
-                self._colorbar.remove()
-            except Exception:
-                pass
-            self._colorbar = None
-        self.ax.clear()
-        peak = float(np.max(matrix[np.isfinite(matrix)])) if np.isfinite(matrix).any() else 0.0
-        vmin = peak - max(20.0, floor_db)
-        vmax = peak
-        freq_mhz = self.freqs_hz / 1e6
-        extent = [freq_mhz.min(), freq_mhz.max(), times.max(), times.min()]
-        self.image = self.ax.imshow(
-            matrix,
-            aspect="auto",
-            origin="upper",
-            extent=extent,
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-        )
-        self.ax.set_xlabel("Frequency (MHz)")
-        self.ax.set_ylabel("Time (s)")
-        self.ax.set_title("Waterfall (newest at bottom)")
-        self._colorbar = self.figure.colorbar(
-            self.image, ax=self.ax, orientation="vertical", label="Power (dB)"
-        )
-        self.canvas.draw_idle()
+    qapp = QApplication.instance()
+    if qapp is None:
+        qapp = QApplication(sys.argv)
 
-    def _on_click(self, event) -> None:
-        if event.inaxes != self.ax or event.xdata is None:
-            return
-        freq_mhz = float(event.xdata)
-        freq_hz = freq_mhz * 1e6
-        if self._on_select:
-            self._on_select(freq_hz)
-
-    def _handle_close(self) -> None:
-        self.alive = False
-        try:
-            if self.cid is not None:
-                self.figure.canvas.mpl_disconnect(self.cid)
-        except Exception:  # pragma: no cover - defensive
-            pass
-        self.window.destroy()
-        if self._on_close:
-            self._on_close()
+    app = _InteractiveApp(
+        base_kwargs=base_kwargs,
+        initial_path=input_path,
+        snapshot_seconds=snapshot_seconds,
+    )
+    return app.run()
 
 
 def interactive_select(

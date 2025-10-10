@@ -7,7 +7,7 @@ Python CLI for extracting a narrowband FM (NFM) channel from large SDR++ baseban
 - Streams multi‑gigabyte SDR++ recordings without loading them into memory.
 - Auto-recovers center frequency from filenames (override with `--fc`) and probes true sample rate via `ffprobe`.
 - Modular decoding pipeline with pluggable stages supporting NFM, AM, USB, and LSB demodulation.
-- Interactive Tk/Matplotlib workspace that covers file discovery, spectrum preview (with adjustable FFT size, theme, smoothing, dynamic range) and a companion waterfall view for time-varying activity, plus selection and run-time monitoring.
+- Interactive PySide6/Matplotlib workspace that covers file discovery, spectrum preview (with adjustable FFT size, theme, smoothing, dynamic range) and a companion waterfall view for time-varying activity, plus selection and run-time monitoring.
 - Live progress bars for each DSP stage plus overall completion in both CLI and interactive flows.
 - Optional PSD snapshots, channelized IQ dumps, and probe-only mode for diagnostics.
 - Built-in synthetic benchmarking harness (`--benchmark`) for repeatable throughput measurements.
@@ -28,11 +28,11 @@ source .venv/bin/activate  # or uv run --project .
 uv pip install -e .
 ```
 
-FFmpeg must be on your `PATH` for ingestion and WAV output. Install the optional extras when needed:
+FFmpeg must be on your `PATH` for ingestion and WAV output. PySide6 ships with the package so the Qt-based interactive UI works out of the box—on Linux, make sure the appropriate Qt platform plugins (e.g., `qtwayland` or `qt5-qtbase-x11`) are installed. Helpful commands:
 
-- `uv run --extra interactive iq-to-audio --interactive`: pulls in Matplotlib for the GUI/plotting workflow.
+- `uv pip install PySide6 PySide6-Addons`: install/upgrade the Qt bindings manually if needed.
+- `uv run python -c "from PySide6 import QtWidgets; print(QtWidgets.__version__)"`: confirm the Qt bindings import correctly.
 - `uv run --group dev pytest`: installs development tooling (pytest) for local testing.
-- System Tk packages (`python3-tk`, `python-tk@3.14`, etc.) are required for the interactive GUI; see your OS package manager.
 
 ## Usage
 
@@ -72,7 +72,7 @@ Toggle “Analyze entire recording” in the GUI to average the full capture int
 - `--iq-order {iq,qi,iq_inv,qi_inv}`: interpret stereo order and polarity.
 - `--mix-sign {-1,1}`: manually override automatic mixer sign selection.
 - `--probe-only`: inspect derived parameters and exit without demodulating.
-- `--interactive`: launch the Tk/Matplotlib UI (no other args required).
+- `--interactive`: launch the PySide6/Matplotlib UI (no other args required).
 - `--interactive-seconds SEC`: snapshot duration for the interactive spectrum (default 2.0).
 - `--benchmark`: generate a synthetic capture, run the full pipeline, and report throughput; exits afterward.
 - `--benchmark-seconds SEC`: duration of the synthetic capture used for benchmarking (default 5).
@@ -108,8 +108,8 @@ uv run iq-to-audio --benchmark --demod am --benchmark-sample-rate 2000000 --benc
 # LSB voice monitoring with AGC disabled
 uv run iq-to-audio --in hf_voice.wav --fc 7105000 --ft 7090000 --demod lsb --no-agc
 
-# Interactive GUI workflow (requires matplotlib extra + Tk)
-uv run --extra interactive iq-to-audio --interactive
+# Interactive GUI workflow (PySide6 + Matplotlib)
+uv run iq-to-audio --interactive
 ```
 
 ## Testing
@@ -127,4 +127,4 @@ uv run --group dev pytest
 - Progress bars never exceed 100 %: totals are estimated from file size, decimation, and audio duration, then clamped.
 - The decoder stack is modular—new demodulators can be added under `iq_to_audio/decoders` with minimal pipeline changes.
 - Interactive spectrum controls (FFT size, smoothing, theme, dynamic range) mirror SDR-style UX; use the toolbar to pan/zoom and highlight weak signals. Remember to hit “Refresh preview” after changing spectrum/waterfall/decoder options so plots stay in sync.
-- Ensure system Tk libraries are installed before launching `--interactive`; missing dependencies trigger a helpful installation hint.
+- Ensure a Qt platform plugin is available before launching `--interactive`; PySide6 emits a descriptive error if the plugin cannot be found (e.g., install `qtwayland` or `qtbase-x11` packages on Linux).
