@@ -3,6 +3,7 @@
 baseband*
 testfiles/*preview.wav
 !testfiles/fc*.wav
+testreports/
 
 
 # Byte-compiled / optimized / DLL files

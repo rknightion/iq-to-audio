@@ -45,3 +45,17 @@ def test_detect_center_frequency_ignores_non_frequency_metadata(monkeypatch, tmp
     result = detect_center_frequency(target)
     assert result.value == pytest.approx(456_834_049.0)
     assert result.source == "filename:sdrpp"
+
+
+def test_detect_center_frequency_handles_uppercase_units():
+    path = Path("capture_460MHZ.wav")
+    result = detect_center_frequency(path)
+    assert result.value == pytest.approx(460_000_000.0)
+    assert result.source.startswith("filename")
+
+
+def test_detect_center_frequency_multiple_candidates_picks_largest():
+    path = Path("notes_125.5MHz_462.612MHz.wav")
+    result = detect_center_frequency(path)
+    assert result.value == pytest.approx(462_612_000.0)
+    assert result.source.startswith("filename")

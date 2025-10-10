@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 import numpy as np
 import pytest
 
@@ -6,11 +7,18 @@ from iq_to_audio.decoders.common import SquelchGate
 from iq_to_audio.decoders.nfm import DeemphasisFilter, QuadratureDemod
 from iq_to_audio.processing import (
     Decimator,
+    ProcessingCancelled,
+    ProcessingConfig,
+    ProcessingPipeline,
     choose_mix_sign,
     design_channel_filter,
 )
+from iq_to_audio.progress import ProgressSink
 from iq_to_audio.probe import SampleRateProbe
 from iq_to_audio.visualize import compute_psd
+
+TESTFILES = Path(__file__).resolve().parent.parent / "testfiles"
+NFM_FIXTURE = TESTFILES / "fc-456834049Hz-ft-455837500-ft2-456872500-NFM.wav"
 
 
 def test_decimator_preserves_sequence():
@@ -105,3 +113,62 @@ def test_squelch_gate_trims_when_closed():
     assert not gate.open
     assert dropped
     assert audio.size == 0
+
+
+class _AutoCancelSink(ProgressSink):
+    def __init__(self, pipeline: ProcessingPipeline):
+        self.pipeline = pipeline
+        self._triggered = False
+
+    def start(self, phases, *, overall_total: float) -> None:
+        return
+
+    def advance(
+        self,
+        phase,
+        delta: float,
+        *,
+        overall_completed: float,
+        overall_total: float,
+    ) -> None:
+        if not self._triggered and delta > 0:
+            self._triggered = True
+            self.pipeline.cancel()
+
+    def status(self, message: str) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+
+def test_processing_pipeline_cancellation_cleans_outputs(tmp_path):
+    output_path = tmp_path / "cancel.wav"
+    config = ProcessingConfig(
+        in_path=NFM_FIXTURE,
+        target_freq=455_837_500.0,
+        bandwidth=12_500.0,
+        center_freq=None,
+        center_freq_source=None,
+        demod_mode="nfm",
+        fs_ch_target=96_000.0,
+        deemph_us=300.0,
+        squelch_dbfs=None,
+        silence_trim=False,
+        squelch_enabled=True,
+        agc_enabled=True,
+        output_path=output_path,
+        dump_iq_path=None,
+        chunk_size=262_144,
+        filter_block=65_536,
+        iq_order="iq",
+        probe_only=False,
+        mix_sign_override=None,
+        plot_stages_path=None,
+        fft_workers=None,
+    )
+    pipeline = ProcessingPipeline(config)
+    sink = _AutoCancelSink(pipeline)
+    with pytest.raises(ProcessingCancelled):
+        pipeline.run(progress_sink=sink)
+    assert not output_path.exists()
