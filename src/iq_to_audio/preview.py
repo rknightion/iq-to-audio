@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from .processing import FFMPEG_HINT, ProcessingConfig, ProcessingPipeline, ProcessingResult
 from .progress import ProgressSink
@@ -58,11 +58,17 @@ def run_preview(
     seconds: float,
     *,
     progress_sink: Optional[ProgressSink] = None,
+    on_pipeline: Optional[Callable[[ProcessingPipeline], None]] = None,
 ) -> Tuple[ProcessingResult, Path]:
     preview_input = _trim_input_file(config.in_path, seconds)
     preview_output = _preview_output_path(config)
     preview_config = replace(config, in_path=preview_input, output_path=preview_output)
     pipeline = ProcessingPipeline(preview_config)
+    if on_pipeline is not None:
+        try:
+            on_pipeline(pipeline)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise RuntimeError(f"Failed to initialize preview pipeline: {exc}") from exc
     try:
         result = pipeline.run(progress_sink=progress_sink)
     finally:

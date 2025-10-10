@@ -45,9 +45,11 @@ uv run iq-to-audio \
   --squelch -45
 ```
 
+Running `uv run iq-to-audio` with no extra flags launches the interactive GUI; add `--cli` to stay entirely in terminal mode.
+
 The CLI prints per-stage progress bars (ingest, channelize, demodulate, encode) and an overall percentage. The interactive GUI shows matching progress in a dedicated window once processing begins.
 
-Interactive mode now exposes demod selection, squelch/silence trimming toggles, AGC control (for SSB modes), spectrum tools (FFT size, smoothing, dynamic range, color themes, pan/zoom toolbar), and an auto-launched waterfall so you can dial in weak signals just like an SDR waterfall. Double-click the spectrum (or press “Preview DSP”) to demodulate only the current preview window; press Enter or “Confirm & Run” to process the full capture.
+Interactive mode now exposes demod selection, squelch/silence trimming toggles, AGC control (for SSB modes), spectrum tools (FFT size, smoothing, dynamic range, color themes, pan/zoom toolbar), and an auto-launched waterfall so you can dial in weak signals just like an SDR waterfall. Drag to highlight a channel, use the mouse wheel or double-click to zoom, then click “Preview DSP” to demodulate the current preview window or “Confirm & Run” to process the full capture. Adjust options as needed, then hit “Refresh preview” to regenerate the plots.
 Toggle “Analyze entire recording” in the GUI to average the full capture into the preview spectrum when you need maximum frequency resolution.
 
 ## CLI Arguments
@@ -64,6 +66,7 @@ Toggle “Analyze entire recording” in the GUI to average the full capture int
 - `--no-squelch`: disable gating entirely (always keep audio, including static).
 - `--no-agc`: disable automatic gain control in supported demodulators.
 - `--preview SECONDS`: process only the first `SECONDS` of the recording and exit (preview mode).
+- `--cli`: force CLI mode (default with no flag launches the interactive GUI).
 - `--out PATH`: override output WAV (default `audio_<FT>_48k.wav` beside input).
 - `--dump-iq PATH`: write channelized complex float32 IQ stream for debugging.
 - `--plot-stages PATH`: save PSD snapshots for key DSP stages to a PNG.
@@ -116,5 +119,5 @@ uv run --group dev pytest
 - Preview runs (`--preview` or the GUI "Preview DSP" button) emit an audio file with a `_preview` suffix so you can confirm settings before processing the full capture.
 - Progress bars never exceed 100 %: totals are estimated from file size, decimation, and audio duration, then clamped.
 - The decoder stack is modular—new demodulators can be added under `iq_to_audio/decoders` with minimal pipeline changes.
-- Interactive spectrum controls (FFT size, smoothing, theme, dynamic range) mirror SDR-style UX; use the toolbar to pan/zoom and highlight weak signals.
+- Interactive spectrum controls (FFT size, smoothing, theme, dynamic range) mirror SDR-style UX; use the toolbar to pan/zoom and highlight weak signals. Remember to hit “Refresh preview” after changing spectrum/waterfall/decoder options so plots stay in sync.
 - Ensure system Tk libraries are installed before launching `--interactive`; missing dependencies trigger a helpful installation hint.

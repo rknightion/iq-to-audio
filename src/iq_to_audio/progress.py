@@ -1,8 +1,6 @@
 from __future__ import annotations
-
-import math
-from dataclasses import dataclass, field
-from typing import Dict, Iterable, Optional
+from dataclasses import dataclass
+from typing import Callable, Dict, Iterable, Optional
 
 try:  # pragma: no cover - tqdm is optional for programmatic use
     from tqdm import tqdm
@@ -46,6 +44,12 @@ class ProgressSink:
     def close(self) -> None:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def set_cancel_callback(self, callback: Callable[[], None]) -> None:  # pragma: no cover - optional hook
+        return
+
+    def cancel(self) -> None:  # pragma: no cover - optional hook
+        raise NotImplementedError
+
 
 class NullProgressSink(ProgressSink):
     """Sink that ignores all progress events."""
@@ -69,6 +73,9 @@ class NullProgressSink(ProgressSink):
     def close(self) -> None:
         return
 
+    def cancel(self) -> None:
+        return
+
 
 class TqdmProgressSink(ProgressSink):
     """Render per-phase and aggregate progress using tqdm progress bars."""
@@ -81,6 +88,7 @@ class TqdmProgressSink(ProgressSink):
         self._overall: Optional[tqdm] = None
         self._bars: Dict[str, tqdm] = {}
         self._status: Optional[str] = None
+        self._cancel_callback: Optional[Callable[[], None]] = None
 
     def start(self, phases: Iterable[PhaseState], *, overall_total: float) -> None:
         phases_list = list(phases)
@@ -102,6 +110,9 @@ class TqdmProgressSink(ProgressSink):
                 leave=True,
             )
             self._bars[phase.key] = bar
+
+    def set_cancel_callback(self, callback: Callable[[], None]) -> None:
+        self._cancel_callback = callback
 
     def advance(
         self,
@@ -137,6 +148,11 @@ class TqdmProgressSink(ProgressSink):
         for bar in self._bars.values():
             bar.close()
         self._bars.clear()
+        self._cancel_callback = None
+
+    def cancel(self) -> None:
+        if self._overall is not None:
+            self._overall.set_postfix_str("Cancelled")
 
 
 class ProgressTracker:
@@ -148,6 +164,8 @@ class ProgressTracker:
         self._overall_total = 0.0
         self._overall_completed = 0.0
         self._started = False
+        self._cancelled = False
+        self._cancel_notified = False
 
     def start(self, phases: Iterable[PhaseState]) -> None:
         if self._started:
@@ -160,9 +178,16 @@ class ProgressTracker:
             overall_total=self._overall_total,
         )
         self._started = True
+        self._cancelled = False
+        self._cancel_notified = False
 
     def advance(self, key: str, amount: float) -> None:
-        if not self._started or key not in self._phases or amount <= 0:
+        if (
+            not self._started
+            or self._cancelled
+            or key not in self._phases
+            or amount <= 0
+        ):
             return
         phase = self._phases[key]
         previous = phase.completed
@@ -188,6 +213,24 @@ class ProgressTracker:
     def close(self) -> None:
         self._sink.close()
         self._started = False
+        self._cancelled = False
+        self._cancel_notified = False
+
+    def cancel(self) -> None:
+        if self._cancelled:
+            return
+        self._cancelled = True
+        if not self._cancel_notified and hasattr(self._sink, "cancel"):
+            try:
+                self._sink.cancel()
+            except NotImplementedError:
+                pass
+            finally:
+                self._cancel_notified = True
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
 
 
 def clamp(amount: float, upper: float) -> float:

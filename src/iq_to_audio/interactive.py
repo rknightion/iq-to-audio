@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import logging
 import math
+import queue
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import numpy as np
 
-from .processing import ProcessingConfig
+from .processing import ProcessingCancelled, ProcessingConfig
 from .preview import run_preview
 from .probe import SampleRateProbe, probe_sample_rate
-from .utils import parse_center_frequency
+from .utils import detect_center_frequency
 from .visualize import SelectionResult, compute_psd, ensure_matplotlib
-from .progress import ProgressSink
+from .progress import PhaseState, ProgressSink
 
 LOG = logging.getLogger(__name__)
 
@@ -65,13 +67,13 @@ def gather_snapshot(
 
     center_freq = config.center_freq
     if center_freq is None:
-        parsed = parse_center_frequency(config.in_path)
-        if parsed is None:
+        detection = detect_center_frequency(config.in_path)
+        if detection.value is None:
             raise ValueError(
-                "Center frequency not provided and filename parsing failed. "
+                "Center frequency not provided and could not be inferred from WAV metadata or filename. "
                 "Provide --fc or enter a value before previewing."
             )
-        center_freq = parsed
+        center_freq = detection.value
 
     block_samples = int(sample_rate * seconds)
     LOG.info(
@@ -155,6 +157,9 @@ class _InteractiveApp:
             "contrast": {"bg": "#101010", "face": "#101010", "line": "#ff7600", "fg": "white", "grid": "--", "grid_color": "#444444"},
             "night": {"bg": "#0b1a2a", "face": "#0b1a2a", "line": "#7fffd4", "fg": "#f0f4ff", "grid": ":", "grid_color": "#223347"},
         }
+        self.ax_main = None
+        self._freq_min_hz: Optional[float] = None
+        self._freq_max_hz: Optional[float] = None
 
         self.file_var = tk.StringVar(
             value=str(initial_path) if initial_path else ""
@@ -162,6 +167,8 @@ class _InteractiveApp:
         self.center_var = tk.StringVar(
             value=self._format_float(self.base_kwargs.get("center_freq"))
         )
+        self.center_source_var = tk.StringVar(value="Center source: —")
+        self.center_source: str = "unavailable"
         self.snapshot_var = tk.StringVar(
             value=f"{self.snapshot_seconds:.2f}"
         )
@@ -178,6 +185,11 @@ class _InteractiveApp:
             value=self.base_kwargs.get("agc_enabled", True)
         )
         self._preferred_agc = self.agc_var.get()
+        threshold = self.base_kwargs.get("squelch_dbfs")
+        self.squelch_threshold_var = tk.StringVar(
+            value="" if threshold is None else f"{threshold:.1f}"
+        )
+        self.squelch_threshold_entry: Optional[ttk.Entry] = None
         self.full_snapshot_var = tk.BooleanVar(value=False)
         self.nfft_var = tk.StringVar(value="262144")
         self.smooth_var = tk.IntVar(value=3)
@@ -202,21 +214,33 @@ class _InteractiveApp:
         self.squelch_check: Optional[ttk.Checkbutton] = None
 
         self.waterfall_window: Optional[_WaterfallWindow] = None
+        self._preview_thread: Optional[threading.Thread] = None
+        self._preview_lock = threading.Lock()
+        self._active_pipeline = None
+        self._preview_running = False
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
         if self.initial_path and self.initial_path.exists():
-            # Attempt to auto-populate center frequency from filename and preload snapshot.
-            parsed = parse_center_frequency(self.initial_path)
-            if parsed is not None:
-                self.center_var.set(f"{parsed:.0f}")
+            # Attempt to auto-populate center frequency from metadata/filename and preload snapshot.
+            detection = detect_center_frequency(self.initial_path)
+            if detection.value is not None:
+                self.center_var.set(f"{detection.value:.0f}")
+                self._set_center_source(detection.source)
+                self.base_kwargs["center_freq"] = detection.value
+            else:
+                self._set_center_source("unavailable")
             self.root.after(150, lambda: self._load_preview(auto=True))
 
     def run(self) -> InteractiveSessionResult:
         try:
             self.root.mainloop()
         finally:
+            self._cancel_active_pipeline()
+            if self._preview_thread and self._preview_thread.is_alive():
+                self._preview_thread.join(timeout=5.0)
+            self._preview_thread = None
             try:
                 self.root.destroy()
             except Exception:  # pragma: no cover - safe cleanup
@@ -252,6 +276,7 @@ class _InteractiveApp:
         file_frame = ttk.LabelFrame(main, text="Recording")
         file_frame.pack(fill="x", expand=False)
         file_frame.columnconfigure(1, weight=1)
+        file_frame.columnconfigure(3, weight=0)
 
         ttk.Label(file_frame, text="Input WAV:").grid(
             row=0, column=0, sticky="w", pady=4
@@ -271,16 +296,24 @@ class _InteractiveApp:
         ttk.Label(file_frame, text="Center freq (Hz):").grid(
             row=1, column=0, sticky="w", pady=4
         )
-        ttk.Entry(
+        center_entry = ttk.Entry(
             file_frame,
             textvariable=self.center_var,
             width=24,
-        ).grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        )
+        center_entry.grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        center_entry.bind("<FocusOut>", self._on_center_manual)
+        center_entry.bind("<Return>", self._on_center_manual)
         ttk.Button(
             file_frame,
-            text="Parse from name",
+            text="Detect from file",
             command=self._parse_center_from_name,
         ).grid(row=1, column=2, sticky="w", padx=4, pady=4)
+        ttk.Label(
+            file_frame,
+            textvariable=self.center_source_var,
+            foreground="SlateGray",
+        ).grid(row=1, column=3, sticky="w", padx=4, pady=4)
 
         ttk.Label(file_frame, text="Snapshot (seconds):").grid(
             row=2, column=0, sticky="w", pady=4
@@ -328,23 +361,46 @@ class _InteractiveApp:
             options_frame,
             text="Adaptive squelch",
             variable=self.squelch_var,
-            command=lambda: None,
+            command=self._on_toggle_squelch,
         )
         self.squelch_check.grid(row=0, column=0, sticky="w", padx=4, pady=2)
         self.trim_check = ttk.Checkbutton(
             options_frame,
             text="Trim silences",
             variable=self.trim_var,
-            command=lambda: None,
+            command=self._on_toggle_trim,
         )
         self.trim_check.grid(row=0, column=1, sticky="w", padx=4, pady=2)
         self.agc_check = ttk.Checkbutton(
             options_frame,
             text="Automatic gain control",
             variable=self.agc_var,
-            command=lambda: None,
+            command=self._on_toggle_agc,
         )
         self.agc_check.grid(row=0, column=2, sticky="w", padx=4, pady=2)
+        ttk.Label(
+            options_frame,
+            text="Manual threshold (dBFS):",
+        ).grid(row=1, column=0, sticky="w", padx=4, pady=(0, 2))
+        self.squelch_threshold_entry = ttk.Entry(
+            options_frame,
+            textvariable=self.squelch_threshold_var,
+            width=10,
+        )
+        self.squelch_threshold_entry.grid(row=1, column=1, sticky="w", padx=4, pady=(0, 2))
+        self.squelch_threshold_entry.bind(
+            "<FocusOut>", lambda _e: self._on_squelch_threshold_edit()
+        )
+        self.squelch_threshold_entry.bind(
+            "<Return>", lambda _e: self._on_squelch_threshold_edit()
+        )
+        ttk.Label(
+            options_frame,
+            text="Adaptive squelch tracks the noise floor and opens when the signal rises ~6 dB above it.\nLeave the threshold blank to auto-track, or enter a negative dBFS value to pin the gate.",
+            foreground="SlateGray",
+            wraplength=580,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 4))
 
         self.plot_frame = ttk.LabelFrame(main, text="Spectrum preview")
         self.plot_frame.pack(fill="both", expand=True, pady=(12, 8))
@@ -460,21 +516,25 @@ class _InteractiveApp:
         ttk.Label(selection_frame, text="Target freq (Hz):").grid(
             row=1, column=0, sticky="w", pady=4
         )
-        ttk.Entry(
+        target_entry = ttk.Entry(
             selection_frame,
             textvariable=self.target_var,
             width=24,
-            state="readonly",
-        ).grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        )
+        target_entry.grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        target_entry.bind("<FocusOut>", lambda _e: self._on_target_bandwidth_edit())
+        target_entry.bind("<Return>", lambda _e: self._on_target_bandwidth_edit())
         ttk.Label(selection_frame, text="Bandwidth (Hz):").grid(
             row=2, column=0, sticky="w", pady=4
         )
-        ttk.Entry(
+        bandwidth_entry = ttk.Entry(
             selection_frame,
             textvariable=self.bandwidth_var,
             width=24,
-            state="readonly",
-        ).grid(row=2, column=1, sticky="w", padx=4, pady=4)
+        )
+        bandwidth_entry.grid(row=2, column=1, sticky="w", padx=4, pady=4)
+        bandwidth_entry.bind("<FocusOut>", lambda _e: self._on_target_bandwidth_edit())
+        bandwidth_entry.bind("<Return>", lambda _e: self._on_target_bandwidth_edit())
         ttk.Label(selection_frame, textvariable=self.offset_var).grid(
             row=3, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
@@ -527,16 +587,27 @@ class _InteractiveApp:
         if not path_text:
             self._set_status("Browse to a recording before parsing.", error=True)
             return
-        parsed = parse_center_frequency(Path(path_text))
-        if parsed is None:
+        path = Path(path_text)
+        detection = detect_center_frequency(path)
+        if detection.value is None:
             messagebox.showinfo(
                 "Center frequency",
-                "Could not derive center frequency from filename. Enter it manually.",
+                "Could not derive a center frequency from WAV metadata or filename. Enter it manually.",
             )
+            self._set_center_source("unavailable")
             self._set_status("Enter center frequency manually.", error=True)
             return
-        self.center_var.set(f"{parsed:.0f}")
-        self._set_status("Center frequency populated from filename.", error=False)
+        self.center_var.set(f"{detection.value:.0f}")
+        self._set_center_source(detection.source or "filename")
+        self.base_kwargs["center_freq"] = detection.value
+        friendly = self._describe_center_source(detection.source)
+        self._set_status(f"Center frequency populated from {friendly}.", error=False)
+
+    def _on_center_manual(self, _event=None) -> None:
+        self._set_center_source("manual")
+        value = self._parse_float(self.center_var.get())
+        if value is not None and value > 0:
+            self.base_kwargs["center_freq"] = value
 
     def _load_preview(self, auto: bool = False) -> None:
         path_text = self.file_var.get().strip()
@@ -651,13 +722,15 @@ class _InteractiveApp:
             kernel = np.ones(smooth) / smooth
             psd_db = np.convolve(psd_db, kernel, mode="same")
         abs_freqs = center_freq + freqs
+        self._freq_min_hz = float(np.min(abs_freqs))
+        self._freq_max_hz = float(np.max(abs_freqs))
 
         self.figure = Figure(figsize=(9.5, 5.2))
         ax = self.figure.add_subplot(111)
         theme = self.color_themes.get(self.theme_var.get(), self.color_themes["default"])
         line_color = theme["line"]
         ax.plot(abs_freqs, psd_db, lw=0.9, color=line_color)
-        ax.set_title("Highlight the desired RF channel. Double-click or press Enter to confirm.")
+        ax.set_title("Drag to highlight a channel. Scroll or double-click to zoom. Use Preview/Confirm buttons below.")
         if FuncFormatter is not None:
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f"{x/1e6:.3f}"))
         ax.set_xlabel("Absolute frequency (MHz)")
@@ -682,6 +755,7 @@ class _InteractiveApp:
 
         self.plot_container = ttk.Frame(self.plot_frame)
         self.plot_container.pack(fill="both", expand=True)
+        self.ax_main = ax
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_container)
         self.canvas.draw()
         if NavigationToolbar2Tk is not None:
@@ -691,6 +765,7 @@ class _InteractiveApp:
         self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
         self.canvas.mpl_connect("key_press_event", self._on_canvas_key)
+        self.canvas.mpl_connect("scroll_event", self._on_canvas_scroll)
 
         initial_center = (
             self.selection.center_freq
@@ -749,67 +824,163 @@ class _InteractiveApp:
             self.preview_btn.configure(state="normal")
 
     def _on_canvas_click(self, event) -> None:
-        if event.dblclick and self.selection:
-            self._on_preview()
+        if self.ax_main is None or event.inaxes != self.ax_main or event.xdata is None:
+            return
+        if event.dblclick:
+            if self.selection and abs(event.xdata - self.selection.center_freq) <= self.selection.bandwidth / 2.0:
+                self._zoom_to_selection()
+            else:
+                self._zoom_at(event.xdata, factor=0.5)
 
     def _on_canvas_key(self, event) -> None:
-        if event.key == "enter" and self.selection:
-            self._on_confirm()
-        elif event.key == "escape":
+        if event.key == "escape":
             self._on_cancel()
 
     def _on_confirm(self) -> None:
         if not self.selection or not self.selected_path:
             self._set_status("Select a frequency span before confirming.", error=True)
             return
-        try:
-            self.progress_sink = TkProgressSink()
-        except RuntimeError as exc:
-            LOG.warning("Progress UI unavailable: %s", exc)
-            self.progress_sink = None
+        self.progress_sink = None
         self.root.quit()
 
     def _on_preview(self) -> None:
+        if self._preview_thread and self._preview_thread.is_alive():
+            self._set_status(
+                "Preview already running. Cancel it before starting a new one.",
+                error=True,
+            )
+            return
         if not self.selection or not self.selected_path:
             self._set_status("Select a frequency span before previewing.", error=True)
             return
         seconds = self._parse_float(self.snapshot_var.get())
         if seconds is None or seconds <= 0:
             seconds = self.snapshot_seconds if self.snapshot_seconds > 0 else 2.0
-        center_override = self.center_freq
         try:
-            config = self._build_config(self.selected_path, center_override)
+            config = self._build_config(self.selected_path, self.center_freq)
             config = replace(
                 config,
                 target_freq=self.selection.center_freq,
                 bandwidth=self.selection.bandwidth,
             )
-            self._set_status(f"Previewing {seconds:.2f} s…", error=False)
+        except Exception as exc:  # pragma: no cover - setup validation
+            LOG.error("Preview setup failed: %s", exc)
+            self._set_status(f"Preview setup failed: {exc}", error=True)
+            messagebox.showerror("Preview failed", str(exc))
+            return
+
+        self._preview_running = True
+        try:
+            sink: Optional[ProgressSink] = TkProgressSink(self.root)
+        except RuntimeError as exc:
+            LOG.warning("Progress UI unavailable: %s", exc)
+            sink = None
+        if self.preview_btn:
+            self.preview_btn.configure(state="disabled")
+        if self.confirm_btn:
+            self.confirm_btn.configure(state="disabled")
+        self._set_status(f"Previewing {seconds:.2f} s…", error=False)
+
+        def worker() -> None:
             try:
-                sink = TkProgressSink()
-            except RuntimeError as exc:
-                LOG.warning("Progress UI unavailable: %s", exc)
-                sink = None
-            result, preview_path = run_preview(config, seconds, progress_sink=sink)
-            self._set_status(
-                f"Preview complete (output: {preview_path.name})", error=False
+                result, preview_path = run_preview(
+                    config,
+                    seconds,
+                    progress_sink=sink,
+                    on_pipeline=self._register_preview_pipeline,
+                )
+            except ProcessingCancelled:
+                LOG.info("Preview cancelled by user.")
+                try:
+                    self.root.after(0, self._handle_preview_cancelled)
+                except Exception:  # pragma: no cover - root already closed
+                    pass
+            except Exception as exc:
+                LOG.error("Preview failed: %s", exc)
+                try:
+                    self.root.after(0, lambda err=exc: self._handle_preview_failed(err))
+                except Exception:  # pragma: no cover - root already closed
+                    pass
+            else:
+                try:
+                    self.root.after(
+                        0,
+                        lambda res=result, path=preview_path: self._handle_preview_complete(
+                            res, path
+                        ),
+                    )
+                except Exception:  # pragma: no cover - root already closed
+                    pass
+            finally:
+                self._register_preview_pipeline(None)
+
+        self._preview_thread = threading.Thread(target=worker, daemon=True)
+        self._preview_thread.start()
+
+    def _on_cancel(self) -> None:
+        self._cancel_active_pipeline()
+        self.selection = None
+        self.root.quit()
+
+    def _register_preview_pipeline(self, pipeline) -> None:
+        with self._preview_lock:
+            self._active_pipeline = pipeline
+
+    def _cancel_active_pipeline(self) -> None:
+        with self._preview_lock:
+            pipeline = self._active_pipeline
+        if pipeline is not None:
+            try:
+                pipeline.cancel()
+            except Exception as exc:
+                LOG.debug("Failed to cancel pipeline cleanly: %s", exc)
+
+    def _preview_finished(self) -> None:
+        self._preview_running = False
+        self._preview_thread = None
+        with self._preview_lock:
+            self._active_pipeline = None
+        if self.preview_btn:
+            self.preview_btn.configure(state="normal")
+        if self.confirm_btn:
+            self.confirm_btn.configure(
+                state="normal" if self.selection is not None else "disabled"
             )
+
+    def _handle_preview_complete(self, _result, preview_path: Path) -> None:
+        self._preview_finished()
+        self._set_status(
+            f"Preview complete (output: {preview_path.name})", error=False
+        )
+        if messagebox:
             messagebox.showinfo(
                 "Preview complete",
                 f"Preview audio written to:\n{preview_path}",
             )
-            return result
-        except Exception as exc:  # pragma: no cover - user feedback
-            LOG.error("Preview failed: %s", exc)
-            self._set_status(f"Preview failed: {exc}", error=True)
-            messagebox.showerror("Preview failed", str(exc))
-        return None
 
-    def _on_cancel(self) -> None:
-        self.selection = None
-        self.root.quit()
+    def _handle_preview_failed(self, error: Exception) -> None:
+        self._preview_finished()
+        self._set_status(f"Preview failed: {error}", error=True)
+        if messagebox:
+            messagebox.showerror("Preview failed", str(error))
+
+    def _handle_preview_cancelled(self) -> None:
+        self._preview_finished()
+        self._set_status("Preview cancelled.", error=False)
 
     # --- Helpers ---------------------------------------------------------
+    def _on_canvas_scroll(self, event) -> None:
+        if self.ax_main is None or event.xdata is None:
+            return
+        step = getattr(event, "step", 0)
+        if step == 0:
+            button = getattr(event, "button", None)
+            step = 1 if button == "up" else -1
+        if step > 0:
+            self._zoom_at(event.xdata, factor=0.8)
+        else:
+            self._zoom_at(event.xdata, factor=1.25)
+
     def _schedule_refresh(self, *, full: bool = False, waterfall_only: bool = False) -> None:
         if self.snapshot_data is None:
             self._set_status("Load a preview before refreshing.", error=True)
@@ -830,9 +1001,11 @@ class _InteractiveApp:
         mode = self.snapshot_data.get("mode")
         if mode == "samples":
             # For snapshot mode, recompute with current settings.
+            self._set_status("Refreshing preview (snapshot)…", error=False)
             self._schedule_refresh(full=True)
         else:
             # For precomputed mode, recompute waterfall but reuse PSD.
+            self._set_status("Refreshing waterfall…", error=False)
             self._schedule_refresh(full=False, waterfall_only=True)
 
     def _refresh_plot(self, *, full: bool = False, waterfall_only: bool = False) -> None:
@@ -886,6 +1059,56 @@ class _InteractiveApp:
                 waterfall=waterfall,
             )
 
+    def _zoom_to_selection(self) -> None:
+        if self.ax_main is None or self.selection is None:
+            return
+        bandwidth = max(self.selection.bandwidth, 100.0)
+        center = self.selection.center_freq
+        self._set_xlim(center - bandwidth / 2.0, center + bandwidth / 2.0)
+
+    def _zoom_at(self, center_hz: float, factor: float) -> None:
+        if self.ax_main is None:
+            return
+        xmin, xmax = self.ax_main.get_xlim()
+        width = xmax - xmin
+        if factor <= 0:
+            factor = 1.0
+        new_width = width * factor
+        total = None
+        if self._freq_min_hz is not None and self._freq_max_hz is not None:
+            total = self._freq_max_hz - self._freq_min_hz
+        if total is not None:
+            new_width = min(new_width, total)
+        min_width = max(100.0, self.selection.bandwidth if self.selection else 100.0)
+        if new_width < min_width:
+            new_width = min_width
+        new_min = center_hz - new_width / 2.0
+        new_max = center_hz + new_width / 2.0
+        self._set_xlim(new_min, new_max)
+
+    def _set_xlim(self, xmin: float, xmax: float) -> None:
+        if self.ax_main is None or self.canvas is None:
+            return
+        if self._freq_min_hz is not None and self._freq_max_hz is not None:
+            total = self._freq_max_hz - self._freq_min_hz
+            if total <= 0:
+                xmin, xmax = self._freq_min_hz, self._freq_max_hz
+            else:
+                width = xmax - xmin
+                if width >= total:
+                    xmin, xmax = self._freq_min_hz, self._freq_max_hz
+                else:
+                    if xmin < self._freq_min_hz:
+                        xmin = self._freq_min_hz
+                        xmax = xmin + width
+                    if xmax > self._freq_max_hz:
+                        xmax = self._freq_max_hz
+                        xmin = xmax - width
+        if xmin >= xmax:
+            xmin, xmax = self.ax_main.get_xlim()
+        self.ax_main.set_xlim(xmin, xmax)
+        self.canvas.draw_idle()
+
     def _on_toggle_squelch(self) -> None:
         enabled = self.squelch_var.get()
         self.base_kwargs["squelch_enabled"] = enabled
@@ -896,9 +1119,39 @@ class _InteractiveApp:
         else:
             if self.trim_check:
                 self.trim_check.state(["!disabled"])
+        if self.squelch_threshold_entry:
+            state = "normal" if enabled else "disabled"
+            self.squelch_threshold_entry.configure(state=state)
         self.base_kwargs["silence_trim"] = self.trim_var.get()
-        if full and self.snapshot_data:
-            self._schedule_refresh(full=True)
+        message = (
+            "Adaptive squelch enabled. Leave threshold blank to auto-track noise."
+            if enabled
+            else "Squelch disabled; audio will remain open regardless of level."
+        )
+        self._set_status(message, error=False)
+
+    def _on_squelch_threshold_edit(self) -> None:
+        text = self.squelch_threshold_var.get().strip()
+        if not text:
+            self.base_kwargs["squelch_dbfs"] = None
+            self._set_status(
+                "Adaptive squelch will auto-track the noise floor.",
+                error=False,
+            )
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            self._set_status(
+                "Squelch threshold must be a numeric dBFS value.",
+                error=True,
+            )
+            return
+        self.base_kwargs["squelch_dbfs"] = value
+        self._set_status(
+            f"Manual squelch threshold set to {value:.1f} dBFS.",
+            error=False,
+        )
 
     def _reset_spectrum_defaults(self) -> None:
         self.nfft_var.set("131072")
@@ -908,11 +1161,12 @@ class _InteractiveApp:
         self.waterfall_slices_var.set("400")
         self.waterfall_floor_var.set("110")
         self.waterfall_cmap_var.set("magma")
-        self._schedule_refresh()
+        self._set_status("Spectrum defaults restored. Click Refresh preview to update.", error=False)
 
     def _on_toggle_trim(self) -> None:
         self.base_kwargs["silence_trim"] = self.trim_var.get()
         # No automatic refresh to avoid recompute surprises.
+        self._set_status("Updated silence trim setting. Use Preview/Refresh to apply.", error=False)
 
     def _on_toggle_agc(self) -> None:
         value = self.agc_var.get()
@@ -921,6 +1175,37 @@ class _InteractiveApp:
             self._preferred_agc = value
         self.base_kwargs["agc_enabled"] = value
         # No automatic refresh; manual preview needed.
+        self._set_status("Updated AGC preference. Use Preview/Refresh to apply.", error=False)
+
+    def _on_target_bandwidth_edit(self) -> None:
+        try:
+            target = float(self.target_var.get())
+            if target <= 0:
+                raise ValueError()
+        except ValueError:
+            self._set_status("Target frequency must be positive.", error=True)
+            return
+        try:
+            bandwidth = float(self.bandwidth_var.get())
+            if bandwidth <= 0:
+                raise ValueError()
+        except ValueError:
+            self._set_status("Bandwidth must be positive.", error=True)
+            return
+        if self.span_controller:
+            self.span_controller.set_selection(target, bandwidth)
+        else:
+            self.selection = SelectionResult(target, bandwidth)
+            if self.center_freq is not None:
+                offset = target - self.center_freq
+                self.offset_var.set(f"Offset: {offset:+.0f} Hz")
+        self.base_kwargs["target_freq"] = target
+        self.base_kwargs["bandwidth"] = bandwidth
+        if self.confirm_btn:
+            self.confirm_btn.configure(state="normal")
+        if self.preview_btn:
+            self.preview_btn.configure(state="normal")
+        self._set_status("Edited target/bandwidth applied. Use Preview DSP or Refresh preview to update outputs.", error=False)
 
     def _update_option_state(self) -> None:
         demod = (self.demod_var.get() or "nfm").lower()
@@ -1034,6 +1319,30 @@ class _InteractiveApp:
             cmap=cmap,
         )
 
+    def _set_center_source(self, source: Optional[str]) -> None:
+        resolved = source or "unavailable"
+        self.center_source = resolved
+        if resolved == "unavailable":
+            label = "—"
+        else:
+            label = self._describe_center_source(resolved)
+        self.center_source_var.set(f"Center source: {label}")
+
+    def _describe_center_source(self, source: Optional[str]) -> str:
+        resolved = source or "unavailable"
+        if resolved == "unavailable":
+            return "manual entry"
+        if resolved == "manual":
+            return "manual entry"
+        if resolved.startswith("metadata:"):
+            detail = resolved.split(":", 1)[1] or "metadata"
+            return f"WAV metadata ({detail})"
+        if resolved.startswith("filename"):
+            return "filename pattern"
+        if resolved == "config":
+            return "configuration"
+        return resolved
+
     def _set_status(self, message: str, *, error: bool) -> None:
         self.status_var.set(message)
         if self.status_label:
@@ -1105,12 +1414,12 @@ class _InteractiveApp:
         sample_rate = probe.value
         center_freq = config.center_freq
         if center_freq is None:
-            parsed = parse_center_frequency(config.in_path)
-            if parsed is None:
+            detection = detect_center_frequency(config.in_path)
+            if detection.value is None:
                 raise ValueError(
-                    "Center frequency not provided and filename parsing failed. Enter a value before using full-record preview."
+                    "Center frequency not provided and could not be inferred from WAV metadata or filename. Enter a value before using full-record preview."
                 )
-            center_freq = parsed
+            center_freq = detection.value
 
         nfft = self._parse_int(self.nfft_var.get(), default=131072)
         chunk_samples = max(config.chunk_size, nfft)
@@ -1337,68 +1646,31 @@ class _WaterfallWindow:
 
 
 class TkProgressSink(ProgressSink):
-    """Tk-backed progress sink that mirrors CLI progress bars."""
+    """Thread-aware Tk progress renderer usable from worker threads."""
 
-    def __init__(self):
+    def __init__(self, master: tk.Misc):
         if tk is None or ttk is None:
             raise RuntimeError(TK_DEPENDENCY_HINT)
-        self.root: Optional[tk.Tk] = None
-        self._bars: Dict[str, Dict[str, object]] = {}
+        if master is None:
+            raise RuntimeError("Tk root unavailable for progress dialog.")
+        self.master = master
+        self._queue: queue.Queue[tuple[str, tuple, dict]] = queue.Queue()
+        self._after_id: Optional[str] = None
+        self._window: Optional[tk.Toplevel] = None
         self._overall_total = 0.0
-        self._overall_completed = 0.0
         self._overall_var: Optional[tk.DoubleVar] = None
-        self._status_var: Optional[tk.StringVar] = None
-
-    def start(self, phases, *, overall_total: float) -> None:
-        self.root = tk.Tk()
-        self.root.title("IQ to Audio — Processing")
-        self.root.geometry("520x320")
-        wrapper = ttk.Frame(self.root, padding=16)
-        wrapper.pack(fill="both", expand=True)
-        ttk.Label(wrapper, text="Processing status", font=("TkDefaultFont", 12, "bold")).pack(anchor="w")
-
-        self._overall_total = max(overall_total, 1.0)
         self._overall_completed = 0.0
-        self._overall_var = tk.DoubleVar(value=0.0)
-        overall_bar = ttk.Progressbar(
-            wrapper,
-            mode="determinate",
-            maximum=self._overall_total,
-            variable=self._overall_var,
-        )
-        overall_bar.pack(fill="x", pady=(6, 12))
+        self._status_var: Optional[tk.StringVar] = None
+        self._bars: Dict[str, Dict[str, object]] = {}
+        self._cancel_callback: Optional[Callable[[], None]] = None
+        self._stop_button: Optional[ttk.Button] = None
+        self._cancelled = False
+        self._closed = False
 
-        self._bars = {}
-        for phase in phases:
-            phase_frame = ttk.Frame(wrapper)
-            phase_frame.pack(fill="x", pady=4)
-            ttk.Label(phase_frame, text=phase.label).pack(anchor="w")
-            maximum = max(phase.total, 1.0)
-            var = tk.DoubleVar(value=0.0)
-            bar = ttk.Progressbar(
-                phase_frame,
-                mode="determinate",
-                maximum=maximum,
-                variable=var,
-            )
-            bar.pack(fill="x", padx=(12, 0))
-            pct_var = tk.StringVar(value="0.0%")
-            ttk.Label(
-                phase_frame,
-                textvariable=pct_var,
-                foreground="SlateGray",
-                font=("TkDefaultFont", 9),
-            ).pack(anchor="e")
-            self._bars[phase.key] = {
-                "var": var,
-                "total": maximum,
-                "completed": 0.0,
-                "percent": pct_var,
-            }
-
-        self._status_var = tk.StringVar(value="Starting…")
-        ttk.Label(wrapper, textvariable=self._status_var, foreground="SlateGray").pack(anchor="w", pady=(12, 0))
-        self._pump()
+    # -- ProgressSink interface -----------------------------------------
+    def start(self, phases, *, overall_total: float) -> None:
+        copied = [PhaseState(**phase.__dict__) for phase in phases]
+        self._enqueue("start", copied, overall_total)
 
     def advance(
         self,
@@ -1408,49 +1680,199 @@ class TkProgressSink(ProgressSink):
         overall_completed: float,
         overall_total: float,
     ) -> None:
-        if self.root is None or delta <= 0:
+        if delta <= 0:
             return
-        data = self._bars.get(phase.key)
-        if not data:
-            return
-        completed = min(data["completed"] + delta, data["total"])
-        data["completed"] = completed
-        data["var"].set(completed)
-        pct = 100.0 * min(completed / data["total"], 1.0)
-        data["percent"].set(f"{pct:5.1f}%")
-
-        if self._overall_var is not None:
-            overall = min(overall_completed, self._overall_total)
-            self._overall_var.set(overall)
-        self._pump()
+        self._enqueue(
+            "advance",
+            phase.key,
+            phase.completed,
+            overall_completed,
+            overall_total,
+        )
 
     def status(self, message: str) -> None:
-        if self.root is None:
-            return
-        if self._status_var is not None:
-            self._status_var.set(message)
-        self._pump()
+        self._enqueue("status", message)
 
     def close(self) -> None:
-        if self.root is None:
+        self._enqueue("close")
+
+    def cancel(self) -> None:
+        self._enqueue("cancel")
+
+    def set_cancel_callback(self, callback: Callable[[], None]) -> None:
+        self._enqueue("set_callback", callback)
+
+    # -- Event routing ---------------------------------------------------
+    def _enqueue(self, event: str, *args, **kwargs) -> None:
+        if self._closed:
+            return
+        self._queue.put((event, args, kwargs))
+        self._schedule()
+
+    def _schedule(self) -> None:
+        if self._after_id is not None:
             return
         try:
-            self._pump()
-        finally:
+            self._after_id = self.master.after(0, self._drain_queue)
+        except tk.TclError:
+            self._after_id = None
+
+    def _drain_queue(self) -> None:
+        self._after_id = None
+        while not self._queue.empty():
+            event, args, kwargs = self._queue.get()
+            handler = getattr(self, f"_handle_{event}", None)
+            if handler is None:
+                continue
             try:
-                self.root.destroy()
+                handler(*args, **kwargs)
+            except tk.TclError:
+                self._closed = True
+                break
+
+    # -- Handlers --------------------------------------------------------
+    def _handle_start(self, phases, overall_total: float) -> None:
+        if self._closed:
+            return
+        if self._window is None or not bool(self._window.winfo_exists()):
+            self._window = tk.Toplevel(self.master)
+            self._window.title("IQ to Audio — Processing")
+            self._window.geometry("520x540")
+            self._window.transient(self.master)
+            self._window.grab_set()
+            self._window.protocol("WM_DELETE_WINDOW", self._trigger_cancel)
+            wrapper = ttk.Frame(self._window, padding=16)
+            wrapper.pack(fill="both", expand=True)
+            ttk.Label(
+                wrapper,
+                text="Processing status",
+                font=("TkDefaultFont", 12, "bold"),
+            ).pack(anchor="w")
+
+            self._overall_total = max(overall_total, 1.0)
+            self._overall_completed = 0.0
+            self._overall_var = tk.DoubleVar(value=0.0)
+            overall_bar = ttk.Progressbar(
+                wrapper,
+                mode="determinate",
+                maximum=self._overall_total,
+                variable=self._overall_var,
+            )
+            overall_bar.pack(fill="x", pady=(6, 12))
+
+            self._bars = {}
+            for phase in phases:
+                frame = ttk.Frame(wrapper)
+                frame.pack(fill="x", pady=4)
+                ttk.Label(frame, text=phase.label).pack(anchor="w")
+                maximum = max(phase.total, 1.0)
+                var = tk.DoubleVar(value=0.0)
+                bar = ttk.Progressbar(
+                    frame,
+                    mode="determinate",
+                    maximum=maximum,
+                    variable=var,
+                )
+                bar.pack(fill="x", padx=(12, 0))
+                pct_var = tk.StringVar(value="0.0%")
+                ttk.Label(
+                    frame,
+                    textvariable=pct_var,
+                    foreground="SlateGray",
+                    font=("TkDefaultFont", 9),
+                ).pack(anchor="e")
+                self._bars[phase.key] = {
+                    "var": var,
+                    "total": maximum,
+                    "percent": pct_var,
+                }
+
+            self._status_var = tk.StringVar(value="Starting…")
+            ttk.Label(
+                wrapper,
+                textvariable=self._status_var,
+                foreground="SlateGray",
+            ).pack(anchor="w", pady=(12, 0))
+            self._stop_button = ttk.Button(
+                wrapper,
+                text="Stop processing",
+                command=self._trigger_cancel,
+            )
+            state = "normal" if self._cancel_callback is not None else "disabled"
+            self._stop_button.configure(state=state)
+            self._stop_button.pack(anchor="e", pady=(16, 0))
+        else:
+            # Reset totals if a previous run reused the window.
+            self._overall_total = max(overall_total, 1.0)
+            self._overall_completed = 0.0
+            if self._overall_var is not None:
+                self._overall_var.set(0.0)
+            for bar in self._bars.values():
+                bar["var"].set(0.0)
+                bar["percent"].set("0.0%")
+        self._cancelled = False
+
+    def _handle_advance(
+        self,
+        key: str,
+        phase_completed: float,
+        overall_completed: float,
+        overall_total: float,
+    ) -> None:
+        if self._closed or self._overall_var is None:
+            return
+        if key in self._bars:
+            bar = self._bars[key]
+            total = max(bar["total"], 1.0)
+            bar["var"].set(min(phase_completed, total))
+            pct = 100.0 * min(phase_completed / total, 1.0)
+            bar["percent"].set(f"{pct:5.1f}%")
+        self._overall_completed = min(overall_completed, overall_total)
+        self._overall_var.set(self._overall_completed)
+
+    def _handle_status(self, message: str) -> None:
+        if self._status_var is not None:
+            self._status_var.set(message)
+
+    def _handle_close(self) -> None:
+        self._closed = True
+        if self._window is not None:
+            try:
+                self._window.destroy()
             except tk.TclError:
                 pass
-            self.root = None
+            self._window = None
+        self._bars.clear()
+        self._overall_var = None
+        self._status_var = None
+        self._stop_button = None
+        self._cancel_callback = None
 
-    def _pump(self) -> None:
-        if self.root is None:
+    def _handle_cancel(self) -> None:
+        if self._cancelled:
             return
-        try:
-            self.root.update_idletasks()
-            self.root.update()
-        except tk.TclError:
-            self.root = None
+        self._cancelled = True
+        if self._status_var is not None:
+            self._status_var.set("Cancelling…")
+        if self._stop_button is not None:
+            self._stop_button.configure(state="disabled")
+
+    def _handle_set_callback(self, callback: Optional[Callable[[], None]]) -> None:
+        self._cancel_callback = callback
+        if self._stop_button is not None:
+            state = "normal" if callback is not None else "disabled"
+            self._stop_button.configure(state=state)
+
+    # -- Helpers ---------------------------------------------------------
+    def _trigger_cancel(self) -> None:
+        if self._cancelled:
+            return
+        self._handle_cancel()
+        if self._cancel_callback is not None:
+            try:
+                self._cancel_callback()
+            except Exception as exc:  # pragma: no cover - keep UI responsive
+                LOG.warning("Failed to invoke cancel callback: %s", exc)
 
 
 def interactive_select(
@@ -1485,11 +1907,11 @@ def interactive_select(
     probe = probe_sample_rate(final_config.in_path)
     center = final_config.center_freq
     if center is None:
-        parsed = parse_center_frequency(final_config.in_path)
-        if parsed is None:
+        detection = detect_center_frequency(final_config.in_path)
+        if detection.value is None:
             center = final_config.target_freq
         else:
-            center = parsed
+            center = detection.value
     # Reuse selection info from final_config and the fresh probe.
     return InteractiveOutcome(
         center_freq=center,

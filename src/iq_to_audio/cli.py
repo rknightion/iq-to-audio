@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .processing import ProcessingConfig, ProcessingPipeline
+from .processing import ProcessingCancelled, ProcessingConfig, ProcessingPipeline
 from .preview import run_preview
 from .progress import TqdmProgressSink
 
@@ -171,6 +171,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preview only the first SECONDS of the recording and exit.",
     )
     parser.add_argument(
+        "--cli",
+        dest="cli",
+        action="store_true",
+        help="Run in CLI mode (default launches the interactive GUI).",
+    )
+    parser.add_argument(
         "--verbose",
         dest="verbose",
         action="store_true",
@@ -184,10 +190,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not args.interactive and args.input_path is None:
-        parser.error("--in is required unless --interactive is enabled.")
-    if not args.interactive and args.target_freq is None:
-        parser.error("--ft is required unless --interactive is enabled.")
+    if args.cli and args.interactive:
+        parser.error("--cli cannot be combined with --interactive.")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -217,7 +221,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     progress_sink = None
 
-    if args.interactive:
+    launch_gui = args.interactive or not args.cli
+
+    if launch_gui:
         try:
             from .interactive import launch_interactive_session
         except ImportError as exc:  # pragma: no cover - user feedback only
@@ -240,13 +246,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                 LOG.exception("Interactive error details")
             return 1
     else:
+        if args.input_path is None:
+            parser.error("--in is required in CLI mode.")
+        if args.target_freq is None:
+            parser.error("--ft is required in CLI mode.")
         config = ProcessingConfig(
             in_path=args.input_path,
             **base_kwargs,
         )
 
     if args.preview_seconds is not None:
-        if args.interactive:
+        if launch_gui:
             LOG.warning("--preview is ignored in interactive mode; use the GUI preview button instead.")
         else:
             try:
@@ -260,6 +270,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     args.preview_seconds,
                     progress_sink=preview_sink,
                 )
+            except ProcessingCancelled:
+                LOG.info("Preview cancelled by user.")
+                return 0
             except Exception as exc:
                 LOG.error("Preview failed: %s", exc)
                 if args.verbose:
@@ -277,6 +290,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             progress_sink = None
     try:
         result = pipeline.run(progress_sink=progress_sink)
+    except ProcessingCancelled:
+        LOG.info("Processing cancelled by user.")
+        return 0
     except Exception as exc:  # pragma: no cover - ensure user friendly exit
         LOG.error("Processing failed: %s", exc)
         if args.verbose:

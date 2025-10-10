@@ -1,22 +1,38 @@
 High Priority
-- Add additional demodulator modules (e.g., AM, SSB, P25) following the new decoder interface so users can switch modes without touching core pipeline code.
 - Implement automated integration tests that run the CLI against short fixture captures to validate end-to-end audio output and progress reporting.
-- Enhance error handling for external tools (ffmpeg, ffprobe) with actionable remediation hints and retry logic when probes fail.
-- Add test decoding to the fft graph so users can sample the selection before processing the whole file
 
 
-Medium Priority
-- Introduce configuration presets (YAML/JSON) so complex CLI selections can be stored and replayed, including interactive session defaults.
-- Provide optional GPU-accelerated DSP paths (CuPy/Numba) to speed up large recordings on capable hardware.
-- Add logging hooks/telemetry exports (JSONL) so batch runs can be monitored programmatically.
-
-Low Priority
 - Bundle a lightweight sample dataset and scripted walkthrough to help first-time contributors verify their environment.
 - Offer a web-based spectrum viewer (Dash/Panel) as an alternative to the Tk GUI for headless remote use.
+
 - Publish SNR/quality metrics post-run to help users compare decoder configurations.
+
 - Optimize spectrum/waterfall generation:
   * Add optional multi-threaded FFT via `np.fft.fft(..., workers=N)`; document NumPy version requirements and fallback path.
   * Introduce parallel PSD averaging for full-capture previews using `ProcessPoolExecutor` with bounded queues; ensure deterministic folding of partial results.
   * Rework waterfall generation around `scipy.signal.stft` or batched FFT calls to minimize Python loops; profile memory usage and chunk sizing.
   * Prototype a reader/worker pipeline where IQ blocks are streamed through a `queue.Queue` to background processes, keeping disk and CPU busy simultaneously.
   * Capture benchmarking harness (CLI flag + synthetic captures) so future LLM-assisted changes can validate throughput regressions automatically.
+
+
+Just now when trying to generate a 30s preview graph/waterfall for a 4GB wav file the system was processing for a few minutes (getting upwards of 11gb memory usage) and then it crashed out with:
+2025-10-10 13:57:04,353 INFO iq_to_audio.interactive: Gathering interactive snapshot: 30.00 s (~300000000 complex samples).
+Tcl_AsyncDelete: async handler deleted by the wrong thread
+
+We need to fix that underlying error but more broadly we need to significantly improve how the fft and waterfalls are generated so they are more performant and we get bound by disk IO rather than by cpu/memory
+I dont know if making a preview file first would help here (as dont think the whole file needs reading right now) but previously you mentioned some optimisations that can be made such as:
+- Optimize spectrum/waterfall generation:
+  * Add optional multi-threaded FFT via `np.fft.fft(..., workers=N)`; document NumPy version requirements and fallback path.
+  * Introduce parallel PSD averaging for full-capture previews using `ProcessPoolExecutor` with bounded queues; ensure deterministic folding of partial results.
+  * Rework waterfall generation around `scipy.signal.stft` or batched FFT calls to minimize Python loops; profile memory usage and chunk sizing.
+  * Potentially Prototype a reader/worker pipeline where IQ blocks are streamed through a `queue.Queue` to background processes, keeping disk and CPU busy simultaneously.
+
+So any of those that will improve performance or additional features/functionality that can improve things would be very useful I think right now the process is single threaded which could be improved upon and based on what you mentioned previously there's plenty of other improvements that can be made also.
+
+
+
+
+  * Capture benchmarking harness (CLI flag + synthetic captures) so future LLM-assisted changes can validate throughput regressions automatically.
+
+
+  Destination chooser for processed outputs

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import logging
 import soundfile as sf
 
 
@@ -104,8 +104,9 @@ def _wave_sample_rate(path: Path) -> Optional[float]:
 LOG = logging.getLogger(__name__)
 
 FFPROBE_HINT = (
-    "ffprobe executable not found. Install FFmpeg (e.g., `sudo apt install ffmpeg`, "
-    "`brew install ffmpeg`, or download from https://ffmpeg.org/download.html) and ensure it is on PATH."
+    "ffprobe executable not found. Install FFmpeg (e.g., `sudo apt install ffmpeg` (linux), "
+    "`brew install ffmpeg` (macOS), `winget install ffmpeg` (Windows) "
+    "or download from https://ffmpeg.org/download.html) and ensure it is on PATH."
 )
 
 _FFPROBE_WARNED = False

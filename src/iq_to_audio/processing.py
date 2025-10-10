@@ -1,28 +1,29 @@
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 import shutil
 import subprocess
-import itertools
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Tuple
+from typing import Iterator, Optional
 
 import numpy as np
 from scipy import signal
 
 from .decoders import create_decoder
 from .probe import SampleRateProbe, probe_sample_rate
-from .utils import parse_center_frequency
+from .progress import PhaseState, ProgressSink, ProgressTracker
+from .utils import detect_center_frequency
 from .visualize import save_stage_psd
-from .progress import PhaseState, ProgressTracker, ProgressSink
 
 LOG = logging.getLogger(__name__)
 
 FFMPEG_HINT = (
-    "ffmpeg executable not found. Install FFmpeg (e.g., `sudo apt install ffmpeg`, "
-    "`brew install ffmpeg`, or download from https://ffmpeg.org/download.html) and ensure it is on PATH."
+    "ffmpeg executable not found. Install FFmpeg (e.g., `sudo apt install ffmpeg` (linux), "
+    "`brew install ffmpeg` (macOS), `winget install ffmpeg` (Windows) "
+    "or download from https://ffmpeg.org/download.html) and ensure it is on PATH."
 )
 
 
@@ -253,18 +254,27 @@ class AudioWriter:
         if not shutil.which("ffmpeg"):
             raise RuntimeError(FFMPEG_HINT)
         self.output_path = output_path
-        self.input_rate = input_rate
+        self.input_rate = float(input_rate)
+        # ffmpeg expects an integer sample rate; round to the nearest Hz.
+        self.ffmpeg_rate = max(1, int(round(self.input_rate)))
+        if abs(self.ffmpeg_rate - self.input_rate) > 0.5:
+            LOG.debug(
+                "Rounding writer input rate from %.6f to %d Hz for ffmpeg compatibility.",
+                self.input_rate,
+                self.ffmpeg_rate,
+            )
         cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel",
             "error",
+            "-y",
             "-f",
             "f32le",
             "-ac",
             "1",
             "-ar",
-            f"{input_rate}",
+            str(self.ffmpeg_rate),
             "-i",
             "-",
             "-acodec",
@@ -294,7 +304,13 @@ class AudioWriter:
         if peak > self.peak:
             self.peak = peak
         safe = np.clip(samples, -0.99, 0.99).astype(np.float32, copy=False)
-        self.proc.stdin.write(safe.tobytes())
+        try:
+            self.proc.stdin.write(safe.tobytes())
+        except BrokenPipeError as exc:
+            raise RuntimeError(
+                "ffmpeg exited unexpectedly while writing audio (Broken pipe). "
+                "Check that the preview/output path is writable."
+            ) from exc
 
     def close(self) -> None:
         if not self.proc:
@@ -378,14 +394,58 @@ class ProcessingResult:
     audio_peak: float
 
 
+class ProcessingCancelled(RuntimeError):
+    """Raised when processing is aborted early by user request."""
+
+
 class ProcessingPipeline:
     def __init__(self, config: ProcessingConfig):
         self.config = config
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def run(self, progress_sink: Optional[ProgressSink] = None) -> ProcessingResult:
         tracker = ProgressTracker(progress_sink)
         header_bytes = 44  # baseline WAV header size (approximate)
         frame_bytes = 4  # 2 channels * int16
+        output_path: Optional[Path] = None
+        cancel_logged = False
+        last_status: Optional[str] = None
+
+        def _request_cancel() -> None:
+            self._cancelled = True
+            tracker.cancel()
+            tracker.status("Cancelling…")
+
+        def _check_cancel(stage: str = "") -> None:
+            nonlocal cancel_logged
+            if self._cancelled or tracker.cancelled:
+                self._cancelled = True
+                if not tracker.cancelled:
+                    tracker.cancel()
+                    tracker.status("Cancelling…")
+                if not cancel_logged:
+                    if stage:
+                        LOG.info("Processing cancelled during %s.", stage)
+                    else:
+                        LOG.info("Processing cancelled by user.")
+                    cancel_logged = True
+                raise ProcessingCancelled("Processing cancelled by user.")
+
+        def report(message: str) -> None:
+            nonlocal last_status
+            tracker.status(message)
+            if message != last_status:
+                LOG.info(message)
+                last_status = message
+
+        if progress_sink is not None:
+            try:
+                progress_sink.set_cancel_callback(_request_cancel)
+            except AttributeError:
+                pass
 
         try:
             probe = probe_sample_rate(self.config.in_path)
@@ -402,14 +462,27 @@ class ProcessingPipeline:
                 raise ValueError("Bandwidth must be positive.")
 
             center_freq = self.config.center_freq
+            center_source = "config"
+
+            def _describe_source(source: str) -> str:
+                if ":" in source:
+                    prefix, suffix = source.split(":", 1)
+                    return f"{prefix} ({suffix})"
+                return source
+
             if center_freq is None:
-                inferred = parse_center_frequency(self.config.in_path)
-                if inferred is None:
+                detection = detect_center_frequency(self.config.in_path)
+                if detection.value is None:
                     raise ValueError(
-                        "Center frequency not supplied and could not be parsed from filename. "
+                        "Center frequency not supplied and could not be determined from metadata or filename. "
                         "Use --fc to provide it explicitly."
                     )
-                center_freq = inferred
+                center_freq = detection.value
+                center_source = detection.source
+                LOG.info(
+                    "Center frequency detected via %s.",
+                    _describe_source(center_source),
+                )
 
             target_freq = self.config.target_freq if self.config.target_freq > 0 else center_freq
             freq_offset = target_freq - center_freq
@@ -480,11 +553,13 @@ class ProcessingPipeline:
                     ),
                 )
             tracker.start(phases)
-            tracker.status("Designing channel filter")
+            report("Designing channel filter")
+            _check_cancel("initialization")
 
             taps = design_channel_filter(sample_rate, self.config.bandwidth, decimation)
             LOG.info("Designed FIR channel filter with %d taps.", len(taps))
-            tracker.status("Initializing DSP stages")
+            report("Initializing DSP stages")
+            _check_cancel("initialization")
 
             oscillator = ComplexOscillator(freq_offset, sample_rate)
             channel_filter = OverlapSaveFIR(taps, self.config.filter_block)
@@ -513,6 +588,7 @@ class ProcessingPipeline:
                 warmup = next(iterator, None)
                 if warmup is None:
                     raise RuntimeError("Input stream produced no samples.")
+                _check_cancel("warm-up")
 
                 if self.config.plot_stages_path and not self.config.probe_only:
                     stage_snapshots["input"] = (warmup.copy(), sample_rate)
@@ -523,11 +599,13 @@ class ProcessingPipeline:
                     else choose_mix_sign(warmup, sample_rate, freq_offset, taps, decimation)
                 )
                 LOG.info("Selected mixer sign %d based on warm-up snippet.", mix_sign)
-                tracker.status("Warm-up complete; processing stream")
+                report("Warm-up complete; processing stream")
+                _check_cancel("warm-up")
 
                 if self.config.probe_only:
+                    _check_cancel("probe-only")
                     tracker.advance("ingest", warmup.size)
-                    tracker.status("Probe-only inspection complete")
+                    report("Probe-only inspection complete")
                     decoder.finalize()
                     iq_writer.close()
                     return ProcessingResult(
@@ -544,8 +622,9 @@ class ProcessingPipeline:
                 audio_writer = AudioWriter(output_path, fs_channel)
                 try:
                     for idx, block in enumerate(itertools.chain((warmup,), iterator)):
+                        _check_cancel(f"chunk {idx + 1}")
                         tracker.advance("ingest", block.size)
-                        tracker.status(f"Chunk {idx + 1}: channelizing")
+                        report(f"Chunk {idx + 1}: channelizing")
                         mixed = oscillator.mix(block, mix_sign)
                         if self.config.plot_stages_path and idx == 0:
                             stage_snapshots["mixed"] = (mixed.copy(), sample_rate)
@@ -557,7 +636,7 @@ class ProcessingPipeline:
                         decimated = decimator.process(filtered)
                         tracker.advance("channel", float(decimated.size))
                         if self.config.dump_iq_path:
-                            tracker.status(f"Chunk {idx + 1}: writing IQ dump")
+                            report(f"Chunk {idx + 1}: writing IQ dump")
                             iq_writer.write(decimated)
                             tracker.advance("dump_iq", float(decimated.size))
                         if self.config.plot_stages_path and idx == 0:
@@ -572,7 +651,7 @@ class ProcessingPipeline:
                             baseband_power,
                         )
 
-                        tracker.status(
+                        report(
                             f"Chunk {idx + 1}: demodulating ({self.config.demod_mode.upper()})"
                         )
                         audio, stats = decoder.process(decimated)
@@ -595,13 +674,14 @@ class ProcessingPipeline:
                             stats.dropped if stats else False,
                         )
 
-                        tracker.status(f"Chunk {idx + 1}: encoding audio")
+                        report(f"Chunk {idx + 1}: encoding audio")
                         audio_writer.write(audio)
+                        _check_cancel(f"chunk {idx + 1} encode")
                         if audio.size:
                             duration = audio.size / max(fs_channel, 1e-9)
                             tracker.advance("encode", duration * 48_000.0)
                 finally:
-                    tracker.status("Finalizing outputs")
+                    report("Finalizing outputs")
                     decoder.finalize()
                     iq_writer.close()
                     audio_writer.close()
@@ -617,7 +697,7 @@ class ProcessingPipeline:
                 "Audio peak level %.2f dBFS.",
                 20.0 * math.log10(max(audio_writer.peak, 1e-6)),
             )
-            tracker.status("Processing complete")
+            report("Processing complete")
 
             return ProcessingResult(
                 sample_rate_probe=probe,
@@ -629,6 +709,13 @@ class ProcessingPipeline:
                 mix_sign=mix_sign,
                 audio_peak=audio_writer.peak,
             )
+        except ProcessingCancelled:
+            if not self.config.probe_only and output_path:
+                try:
+                    output_path.unlink(missing_ok=True)
+                except OSError:
+                    LOG.debug("Failed to remove cancelled output %s", output_path)
+            raise
         finally:
             tracker.close()
 
