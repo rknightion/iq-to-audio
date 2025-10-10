@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
 
 from .processing import ProcessingConfig
+from .preview import run_preview
 from .probe import SampleRateProbe, probe_sample_rate
 from .utils import parse_center_frequency
 from .visualize import SelectionResult, compute_psd, ensure_matplotlib
@@ -191,6 +192,7 @@ class _InteractiveApp:
         self.sample_rate_var = tk.StringVar(value="Sample rate: —")
         self.status_var = tk.StringVar(value="Select a recording to begin.")
 
+        self.preview_btn: Optional[ttk.Button] = None
         self.confirm_btn: Optional[ttk.Button] = None
         self.status_label: Optional[ttk.Label] = None
         self.plot_frame: Optional[ttk.LabelFrame] = None
@@ -366,7 +368,7 @@ class _InteractiveApp:
             width=10,
         )
         nfft_combo.grid(row=0, column=1, sticky="w", padx=4, pady=2)
-        nfft_combo.bind("<<ComboboxSelected>>", lambda _event: self._schedule_refresh())
+        nfft_combo.bind("<<ComboboxSelected>>", lambda _event: None)
 
         ttk.Label(spectrum_options, text="Smoothing").grid(row=0, column=2, sticky="w", padx=4, pady=2)
         smooth_spin = ttk.Spinbox(
@@ -375,7 +377,7 @@ class _InteractiveApp:
             to=20,
             textvariable=self.smooth_var,
             width=5,
-            command=self._schedule_refresh,
+            command=lambda: None,
         )
         smooth_spin.grid(row=0, column=3, sticky="w", padx=4, pady=2)
 
@@ -386,7 +388,7 @@ class _InteractiveApp:
             to=140,
             textvariable=self.range_var,
             width=5,
-            command=self._schedule_refresh,
+            command=lambda: None,
         )
         range_spin.grid(row=0, column=5, sticky="w", padx=4, pady=2)
 
@@ -399,12 +401,18 @@ class _InteractiveApp:
             width=10,
         )
         theme_combo.grid(row=0, column=7, sticky="w", padx=4, pady=2)
-        theme_combo.bind("<<ComboboxSelected>>", lambda _event: self._schedule_refresh())
+        theme_combo.bind("<<ComboboxSelected>>", lambda _event: None)
         ttk.Button(
             spectrum_options,
             text="Reset defaults",
             command=self._reset_spectrum_defaults,
         ).grid(row=0, column=8, sticky="w", padx=4, pady=2)
+
+        ttk.Button(
+            spectrum_options,
+            text="Refresh preview",
+            command=self._refresh_preview_manual,
+        ).grid(row=0, column=9, sticky="w", padx=4, pady=2)
 
         waterfall_options = ttk.LabelFrame(main, text="Waterfall options")
         waterfall_options.pack(fill="x", expand=False, pady=(0, 8))
@@ -416,7 +424,7 @@ class _InteractiveApp:
             to=800,
             textvariable=self.waterfall_slices_var,
             width=6,
-            command=self._schedule_refresh,
+            command=lambda: None,
         )
         slices_spin.grid(row=0, column=1, sticky="w", padx=4, pady=2)
 
@@ -427,7 +435,7 @@ class _InteractiveApp:
             to=140,
             textvariable=self.waterfall_floor_var,
             width=6,
-            command=self._schedule_refresh,
+            command=lambda: None,
         )
         waterfall_range_spin.grid(row=0, column=3, sticky="w", padx=4, pady=2)
 
@@ -440,7 +448,7 @@ class _InteractiveApp:
             width=10,
         )
         waterfall_cmap_combo.grid(row=0, column=5, sticky="w", padx=4, pady=2)
-        waterfall_cmap_combo.bind("<<ComboboxSelected>>", lambda _event: self._schedule_refresh())
+        waterfall_cmap_combo.bind("<<ComboboxSelected>>", lambda _event: None)
 
         selection_frame = ttk.LabelFrame(main, text="Channel selection")
         selection_frame.pack(fill="x", expand=False, pady=(0, 8))
@@ -481,18 +489,25 @@ class _InteractiveApp:
         button_frame = ttk.Frame(main)
         button_frame.pack(fill="x", expand=False)
         button_frame.columnconfigure(0, weight=1)
+        self.preview_btn = ttk.Button(
+            button_frame,
+            text="Preview DSP",
+            command=self._on_preview,
+        )
+        self.preview_btn.grid(row=0, column=1, sticky="e", padx=6)
+        self.preview_btn.configure(state="disabled")
         self.confirm_btn = ttk.Button(
             button_frame,
             text="Confirm & Run",
             command=self._on_confirm,
-            state="disabled",
         )
-        self.confirm_btn.grid(row=0, column=1, sticky="e", padx=6)
+        self.confirm_btn.grid(row=0, column=2, sticky="e", padx=6)
+        self.confirm_btn.configure(state="disabled")
         ttk.Button(
             button_frame,
             text="Cancel",
             command=self._on_cancel,
-        ).grid(row=0, column=2, sticky="e")
+        ).grid(row=0, column=3, sticky="e")
 
         self._update_option_state()
 
@@ -578,6 +593,10 @@ class _InteractiveApp:
         self.selected_path = path
         if not same_file:
             self.selection = None
+            if self.confirm_btn:
+                self.confirm_btn.configure(state="disabled")
+            if self.preview_btn:
+                self.preview_btn.configure(state="disabled")
         self.center_freq = center_freq
         self.probe = probe
         self.sample_rate = sample_rate
@@ -725,11 +744,13 @@ class _InteractiveApp:
         else:
             self.offset_var.set("Offset: —")
         if self.confirm_btn:
-            self.confirm_btn.state(["!disabled"])
+            self.confirm_btn.configure(state="normal")
+        if self.preview_btn:
+            self.preview_btn.configure(state="normal")
 
     def _on_canvas_click(self, event) -> None:
         if event.dblclick and self.selection:
-            self._on_confirm()
+            self._on_preview()
 
     def _on_canvas_key(self, event) -> None:
         if event.key == "enter" and self.selection:
@@ -748,42 +769,113 @@ class _InteractiveApp:
             self.progress_sink = None
         self.root.quit()
 
+    def _on_preview(self) -> None:
+        if not self.selection or not self.selected_path:
+            self._set_status("Select a frequency span before previewing.", error=True)
+            return
+        seconds = self._parse_float(self.snapshot_var.get())
+        if seconds is None or seconds <= 0:
+            seconds = self.snapshot_seconds if self.snapshot_seconds > 0 else 2.0
+        center_override = self.center_freq
+        try:
+            config = self._build_config(self.selected_path, center_override)
+            config = replace(
+                config,
+                target_freq=self.selection.center_freq,
+                bandwidth=self.selection.bandwidth,
+            )
+            self._set_status(f"Previewing {seconds:.2f} s…", error=False)
+            try:
+                sink = TkProgressSink()
+            except RuntimeError as exc:
+                LOG.warning("Progress UI unavailable: %s", exc)
+                sink = None
+            result, preview_path = run_preview(config, seconds, progress_sink=sink)
+            self._set_status(
+                f"Preview complete (output: {preview_path.name})", error=False
+            )
+            messagebox.showinfo(
+                "Preview complete",
+                f"Preview audio written to:\n{preview_path}",
+            )
+            return result
+        except Exception as exc:  # pragma: no cover - user feedback
+            LOG.error("Preview failed: %s", exc)
+            self._set_status(f"Preview failed: {exc}", error=True)
+            messagebox.showerror("Preview failed", str(exc))
+        return None
+
     def _on_cancel(self) -> None:
         self.selection = None
         self.root.quit()
 
     # --- Helpers ---------------------------------------------------------
-    def _schedule_refresh(self) -> None:
+    def _schedule_refresh(self, *, full: bool = False, waterfall_only: bool = False) -> None:
         if self.snapshot_data is None:
+            self._set_status("Load a preview before refreshing.", error=True)
             return
         if self._refresh_job is not None:
             try:
                 self.root.after_cancel(self._refresh_job)
             except Exception:  # pragma: no cover - safe guard
                 pass
-        self._refresh_job = self.root.after(0, self._refresh_plot)
+        self._refresh_job = self.root.after(
+            0, lambda: self._refresh_plot(full=full, waterfall_only=waterfall_only)
+        )
 
-    def _refresh_plot(self) -> None:
+    def _refresh_preview_manual(self) -> None:
+        if self.snapshot_data is None:
+            self._set_status("Load a preview before refreshing.", error=True)
+            return
+        mode = self.snapshot_data.get("mode")
+        if mode == "samples":
+            # For snapshot mode, recompute with current settings.
+            self._schedule_refresh(full=True)
+        else:
+            # For precomputed mode, recompute waterfall but reuse PSD.
+            self._schedule_refresh(full=False, waterfall_only=True)
+
+    def _refresh_plot(self, *, full: bool = False, waterfall_only: bool = False) -> None:
         self._refresh_job = None
         if not self.snapshot_data:
             return
         mode = self.snapshot_data.get("mode")
         sample_rate = float(self.snapshot_data.get("sample_rate", 0.0))
         center_freq = float(self.snapshot_data.get("center_freq", 0.0))
-        waterfall_stored = self.snapshot_data.get("waterfall")
+
         if mode == "precomputed":
             freqs = np.asarray(self.snapshot_data.get("freqs"), dtype=np.float64)
             psd = np.asarray(self.snapshot_data.get("psd"), dtype=np.float64)
+            waterfall_stored = self.snapshot_data.get("waterfall")
+            if waterfall_only and waterfall_stored is not None:
+                self._update_waterfall_display(sample_rate, center_freq, waterfall_stored)
+            else:
+                self._render_plot(
+                    None,
+                    sample_rate,
+                    center_freq,
+                    remember=False,
+                    precomputed=(freqs, psd),
+                    waterfall=waterfall_stored,
+                )
+            return
+
+        # Snapshot mode uses raw samples.
+        samples = np.asarray(self.snapshot_data.get("samples"), dtype=np.complex64)
+        if full:
+            waterfall = self._compute_waterfall_from_samples(samples, sample_rate)
             self._render_plot(
-                None,
+                samples,
                 sample_rate,
                 center_freq,
-                remember=False,
-                precomputed=(freqs, psd),
-                waterfall=waterfall_stored,
+                remember=True,
+                precomputed=None,
+                waterfall=waterfall,
             )
+        elif waterfall_only:
+            waterfall = self._compute_waterfall_from_samples(samples, sample_rate)
+            self._update_waterfall_display(sample_rate, center_freq, waterfall)
         else:
-            samples = np.asarray(self.snapshot_data.get("samples"), dtype=np.complex64)
             waterfall = self._compute_waterfall_from_samples(samples, sample_rate)
             self._render_plot(
                 samples,
@@ -887,7 +979,7 @@ class _InteractiveApp:
             freqs, psd = compute_psd(samples, sample_rate, nfft=nfft)
             return freqs, np.array([0.0], dtype=np.float32), psd[None, :]
         matrix = np.vstack(slices)
-        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=200)
+        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
         if matrix.shape[0] > max_slices:
             step = math.ceil(matrix.shape[0] / max_slices)
             reduced = []
@@ -918,7 +1010,7 @@ class _InteractiveApp:
             )
         floor = self._get_float(self.waterfall_floor_var, 90.0)
         cmap = self.waterfall_cmap_var.get() or "viridis"
-        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=200)
+        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
         freq_arr, times_arr, matrix_arr = waterfall
         times_arr = np.asarray(times_arr, dtype=np.float32)
         matrix_arr = np.asarray(matrix_arr, dtype=np.float64)
@@ -981,6 +1073,20 @@ class _InteractiveApp:
                 "agc_enabled": kwargs["agc_enabled"],
             }
         )
+        target_freq = (
+            self.selection.center_freq
+            if self.selection is not None
+            else self.base_kwargs.get("target_freq", kwargs.get("target_freq", 0.0))
+        )
+        bandwidth = (
+            self.selection.bandwidth
+            if self.selection is not None
+            else self.base_kwargs.get("bandwidth", kwargs.get("bandwidth", 12_500.0))
+        )
+        kwargs["target_freq"] = target_freq
+        kwargs["bandwidth"] = bandwidth
+        self.base_kwargs["target_freq"] = target_freq
+        self.base_kwargs["bandwidth"] = bandwidth
         return ProcessingConfig(in_path=path, **kwargs)
 
     def _compute_full_psd(

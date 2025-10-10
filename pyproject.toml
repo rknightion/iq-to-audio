@@ -17,15 +17,8 @@ dependencies = [
   "scipy>=1.10",
   "soundfile>=0.12",
   "soxr>=0.3",
-  "tqdm>=4.66"
-]
-
-[project.optional-dependencies]
-dev = [
-  "pytest>=7.4"
-]
-interactive = [
-  "matplotlib>=3.7"
+  "tqdm>=4.66",
+  "matplotlib>=3.10.7"
 ]
 
 [project.scripts]

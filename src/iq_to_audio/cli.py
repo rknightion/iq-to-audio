@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .processing import ProcessingConfig, ProcessingPipeline
+from .preview import run_preview
 from .progress import TqdmProgressSink
 
 LOG = logging.getLogger("iq_to_audio")
@@ -164,6 +165,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Duration of IQ snapshot (seconds) for interactive mode (default: 2.0).",
     )
     parser.add_argument(
+        "--preview",
+        dest="preview_seconds",
+        type=positive_float,
+        help="Preview only the first SECONDS of the recording and exit.",
+    )
+    parser.add_argument(
         "--verbose",
         dest="verbose",
         action="store_true",
@@ -237,6 +244,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             in_path=args.input_path,
             **base_kwargs,
         )
+
+    if args.preview_seconds is not None:
+        if args.interactive:
+            LOG.warning("--preview is ignored in interactive mode; use the GUI preview button instead.")
+        else:
+            try:
+                preview_sink = TqdmProgressSink()
+            except RuntimeError as exc:
+                LOG.warning("Progress reporting disabled: %s", exc)
+                preview_sink = None
+            try:
+                _, preview_path = run_preview(
+                    config,
+                    args.preview_seconds,
+                    progress_sink=preview_sink,
+                )
+            except Exception as exc:
+                LOG.error("Preview failed: %s", exc)
+                if args.verbose:
+                    LOG.exception("Preview error details")
+                return 1
+            LOG.info("Preview written to %s", preview_path)
+            return 0
 
     pipeline = ProcessingPipeline(config)
     if progress_sink is None:

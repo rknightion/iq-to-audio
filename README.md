@@ -47,7 +47,7 @@ uv run iq-to-audio \
 
 The CLI prints per-stage progress bars (ingest, channelize, demodulate, encode) and an overall percentage. The interactive GUI shows matching progress in a dedicated window once processing begins.
 
-Interactive mode now exposes demod selection, squelch/silence trimming toggles, AGC control (for SSB modes), spectrum tools (FFT size, smoothing, dynamic range, color themes, pan/zoom toolbar), and an auto-launched waterfall so you can dial in weak signals just like an SDR waterfall.
+Interactive mode now exposes demod selection, squelch/silence trimming toggles, AGC control (for SSB modes), spectrum tools (FFT size, smoothing, dynamic range, color themes, pan/zoom toolbar), and an auto-launched waterfall so you can dial in weak signals just like an SDR waterfall. Double-click the spectrum (or press “Preview DSP”) to demodulate only the current preview window; press Enter or “Confirm & Run” to process the full capture.
 Toggle “Analyze entire recording” in the GUI to average the full capture into the preview spectrum when you need maximum frequency resolution.
 
 ## CLI Arguments
@@ -63,6 +63,7 @@ Toggle “Analyze entire recording” in the GUI to average the full capture int
 - `--silence-trim`: drop gated sections instead of inserting quiet audio.
 - `--no-squelch`: disable gating entirely (always keep audio, including static).
 - `--no-agc`: disable automatic gain control in supported demodulators.
+- `--preview SECONDS`: process only the first `SECONDS` of the recording and exit (preview mode).
 - `--out PATH`: override output WAV (default `audio_<FT>_48k.wav` beside input).
 - `--dump-iq PATH`: write channelized complex float32 IQ stream for debugging.
 - `--plot-stages PATH`: save PSD snapshots for key DSP stages to a PNG.
@@ -91,6 +92,9 @@ uv run iq-to-audio --in capture.wav --ft 453112500 \
 # Medium-wave AM broadcast
 uv run iq-to-audio --in mw_capture.wav --ft 1010000 --demod am --bw 10000
 
+# 5-second CLI preview to validate settings
+uv run iq-to-audio --in capture.wav --ft 453112500 --preview 5
+
 # LSB voice monitoring without squelch (keep noise floor)
 uv run iq-to-audio --in hf_voice.wav --ft 7090000 --demod lsb --no-squelch --no-agc
 
@@ -109,6 +113,7 @@ uv run --group dev pytest
 - FFmpeg handles resilient WAV ingestion (`-ignore_length 1`) and resampling/encoding to 48 kHz output.
 - Missing `ffmpeg`/`ffprobe` executables now yield actionable installation hints instead of generic failures.
 - The waterfall view mirrors SDR++: adjust colormap, slice density, or dynamic range, and click directly on a signal trace to retune the main selector.
+- Preview runs (`--preview` or the GUI "Preview DSP" button) emit an audio file with a `_preview` suffix so you can confirm settings before processing the full capture.
 - Progress bars never exceed 100 %: totals are estimated from file size, decimation, and audio duration, then clamped.
 - The decoder stack is modular—new demodulators can be added under `iq_to_audio/decoders` with minimal pipeline changes.
 - Interactive spectrum controls (FFT size, smoothing, theme, dynamic range) mirror SDR-style UX; use the toolbar to pan/zoom and highlight weak signals.

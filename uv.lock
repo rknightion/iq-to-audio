@@ -125,19 +125,12 @@ name = "iq-to-audio"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "matplotlib" },
     { name = "numpy" },
     { name = "scipy" },
     { name = "soundfile" },
     { name = "soxr" },
     { name = "tqdm" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-interactive = [
-    { name = "matplotlib" },
 ]
 
 [package.dev-dependencies]
@@ -147,15 +140,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "matplotlib", marker = "extra == 'interactive'", specifier = ">=3.7" },
+    { name = "matplotlib", specifier = ">=3.10.7" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "soundfile", specifier = ">=0.12" },
     { name = "soxr", specifier = ">=0.3" },
     { name = "tqdm", specifier = ">=4.66" },
 ]
-provides-extras = ["dev", "interactive"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=7.4" }]

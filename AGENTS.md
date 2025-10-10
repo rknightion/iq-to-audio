@@ -1,15 +1,19 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core source lives in `src/iq_to_audio`; `cli.py` wires argument parsing to the DSP pipeline, while `processing.py` houses channelization and demodulation, and `visualize.py` plus `interactive.py` handle optional plotting. Utilities such as filename parsing reside in `utils.py`, and sample-rate probing sits in `probe.py`. Tests mirror the package layout under `tests/`—keep new modules paired with `tests/test_<module>.py` to preserve coverage symmetry.
+Core source lives in `src/iq_to_audio`; `cli.py` wires argument parsing to the DSP pipeline, while `processing.py` houses channelization and demodulation, and `visualize.py` plus `interactive.py` handle an optional interactive mode. Utilities such as filename parsing reside in `utils.py`, and sample-rate probing sits in `probe.py`. Tests mirror the package layout under `tests/`—keep new modules paired with `tests/test_<module>.py` to preserve coverage symmetry.
 
 ## Build, Test, and Development Commands
 Use `uv run iq-to-audio --help` to confirm the CLI installs and prints usage without creating a persistent environment. For iterative work, bootstrap a venv (`uv venv && source .venv/bin/activate`) then install in editable mode with `uv pip install -e .`. Execute end-to-end demodulation locally via `uv run iq-to-audio --in <wav> --ft <Hz>`, and run the full test suite with `uv run --with dev pytest`. When packaging or validating metadata, `uv build` produces source and wheel distributions.
 
+Functionality between interactive and CLI modes should be comaprable with the exception of visualisation/interactive functionality. All DSP and processing and utils must live in a shared file consumed by interactive.py or cli.py respectively to avoid code duplication.
+
+Always use 'uv' for python environment management, dependency management and running commands/scripts
+
 ## Coding Style & Naming Conventions
 Follow PEP 8 with 4-space indents and snake_case for modules, functions, and locals (`mix_sign_override`, `parse_center_frequency`). Prefer dataclasses for configurations (see `ProcessingConfig`) and annotate public APIs with typing hints. Use `Path` objects for filesystem paths, and keep module-level loggers named `LOG = logging.getLogger(__name__)`. Maintain NumPy/SciPy vectorized operations and avoid per-sample loops unless profiled.
 
-## Testing Guidelines
+## Testing 
 Pytest drives validation; place new tests under `tests/` with files beginning `test_` and functions named `test_<behavior>()`. Include fixtures that synthesize deterministic IQ arrays where possible, avoiding large binary assets. Run `uv run --with dev pytest -k <keyword>` for focused debugging, and ensure new DSP paths exercise both demodulated audio and auxiliary outputs (e.g., `--dump-iq`).
 
 ## Commit & Pull Request Guidelines
