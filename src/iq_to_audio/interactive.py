@@ -271,6 +271,12 @@ class _InteractiveApp:
         self.snapshot_var = tk.StringVar(
             value=f"{self.snapshot_seconds:.2f}"
         )
+        provided_output = self.base_kwargs.get("output_path")
+        self._cli_output_path: Optional[Path] = Path(provided_output) if provided_output else None
+        self.output_dir_var = tk.StringVar(
+            value=str(self._cli_output_path.parent) if self._cli_output_path else ""
+        )
+        self.output_path_var = tk.StringVar(value="Select a recording to preview output location.")
         self.demod_var = tk.StringVar(
             value=(self.base_kwargs.get("demod_mode") or "nfm").lower()
         )
@@ -303,6 +309,7 @@ class _InteractiveApp:
         self.sample_rate_var = tk.StringVar(value="Sample rate: —")
         self.status_var = tk.StringVar(value="Select a recording to begin.")
 
+        self.load_preview_button: Optional[ttk.Button] = None
         self.preview_btn: Optional[ttk.Button] = None
         self.confirm_btn: Optional[ttk.Button] = None
         self.status_label: Optional[ttk.Label] = None
@@ -317,6 +324,7 @@ class _InteractiveApp:
         self._preview_lock = threading.Lock()
         self._active_pipeline = None
         self._preview_running = False
+        self._snapshot_thread: Optional[threading.Thread] = None
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_cancel)
@@ -340,6 +348,9 @@ class _InteractiveApp:
             if self._preview_thread and self._preview_thread.is_alive():
                 self._preview_thread.join(timeout=5.0)
             self._preview_thread = None
+            if self._snapshot_thread and self._snapshot_thread.is_alive():
+                self._snapshot_thread.join(timeout=5.0)
+            self._snapshot_thread = None
             try:
                 self.root.destroy()
             except Exception:  # pragma: no cover - safe cleanup
@@ -422,11 +433,12 @@ class _InteractiveApp:
             textvariable=self.snapshot_var,
             width=12,
         ).grid(row=2, column=1, sticky="w", padx=4, pady=4)
-        ttk.Button(
+        self.load_preview_button = ttk.Button(
             file_frame,
             text="Load Preview",
             command=self._load_preview,
-        ).grid(row=2, column=2, sticky="w", padx=4, pady=4)
+        )
+        self.load_preview_button.grid(row=2, column=2, sticky="w", padx=4, pady=4)
         ttk.Checkbutton(
             file_frame,
             text="Analyze entire recording",
@@ -434,8 +446,31 @@ class _InteractiveApp:
             command=self._schedule_refresh,
         ).grid(row=2, column=3, sticky="w", padx=4, pady=4)
 
-        ttk.Label(file_frame, text="Demodulator:").grid(
+        ttk.Label(file_frame, text="Output directory:").grid(
             row=3, column=0, sticky="w", pady=4
+        )
+        out_entry = ttk.Entry(
+            file_frame,
+            textvariable=self.output_dir_var,
+            width=64,
+        )
+        out_entry.grid(row=3, column=1, sticky="ew", padx=4, pady=4)
+        out_entry.bind("<FocusOut>", lambda _event: self._on_output_dir_changed())
+        out_entry.bind("<Return>", lambda _event: self._on_output_dir_changed())
+        ttk.Button(
+            file_frame,
+            text="Browse…",
+            command=self._on_output_dir_browse,
+        ).grid(row=3, column=2, sticky="w", padx=4, pady=4)
+        ttk.Label(
+            file_frame,
+            textvariable=self.output_path_var,
+            foreground="SlateGray",
+        ).grid(row=3, column=3, sticky="w", padx=4, pady=4)
+        self.output_dir_var.trace_add("write", lambda *_: self._update_output_path_hint())
+
+        ttk.Label(file_frame, text="Demodulator:").grid(
+            row=4, column=0, sticky="w", pady=4
         )
         demod_combo = ttk.Combobox(
             file_frame,
@@ -444,12 +479,12 @@ class _InteractiveApp:
             state="readonly",
             width=16,
         )
-        demod_combo.grid(row=3, column=1, sticky="w", padx=4, pady=4)
+        demod_combo.grid(row=4, column=1, sticky="w", padx=4, pady=4)
         ttk.Label(
             file_frame,
             text="Choose AM/NFM/USB/LSB demodulation",
             foreground="SlateGray",
-        ).grid(row=3, column=2, sticky="w", padx=4, pady=4)
+        ).grid(row=4, column=2, sticky="w", padx=4, pady=4)
         demod_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_option_state())
 
         options_frame = ttk.LabelFrame(main, text="Demod options")
@@ -669,6 +704,7 @@ class _InteractiveApp:
         ).grid(row=0, column=3, sticky="e")
 
         self._update_option_state()
+        self._update_output_path_hint()
 
     # --- Event handlers --------------------------------------------------
     def _on_browse(self) -> None:
@@ -679,6 +715,7 @@ class _InteractiveApp:
         if path:
             self.file_var.set(path)
             self.selected_path = Path(path)
+            self._update_output_path_hint()
             self._parse_center_from_name()
 
     def _parse_center_from_name(self) -> None:
@@ -739,36 +776,109 @@ class _InteractiveApp:
 
         center_override = self._parse_float(self.center_var.get())
 
-        config = self._build_config(path, center_override)
+        try:
+            config = self._build_config(path, center_override)
+        except Exception as exc:
+            LOG.error("Preview setup failed: %s", exc)
+            self._set_status(f"Preview setup failed: {exc}", error=True)
+            if not auto:
+                messagebox.showerror("Preview failed", str(exc))
+            return
         nfft = self._parse_int(self.nfft_var.get(), default=131072)
         hop = max(1, nfft // 4)
         max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
         fft_workers = self._fft_worker_count()
-        try:
-            if full_capture:
-                self._set_status("Computing spectrum for entire recording…", error=False)
-                snapshot = self._compute_full_psd(
-                    config,
-                    nfft=nfft,
-                    hop=hop,
-                    max_slices=max_slices,
-                    fft_workers=fft_workers,
-                )
-            else:
-                snapshot = gather_snapshot(
-                    config,
-                    seconds=snapshot_seconds,
-                    nfft=nfft,
-                    hop=hop,
-                    max_slices=max_slices,
-                    fft_workers=fft_workers,
-                )
-        except Exception as exc:
-            LOG.error("Failed to gather preview: %s", exc)
-            self._set_status(f"Preview failed: {exc}", error=True)
-            if not auto:
-                messagebox.showerror("Preview failed", str(exc))
+        status_msg = (
+            "Computing spectrum for entire recording…"
+            if full_capture
+            else f"Gathering {float(snapshot_seconds or 0.0):.2f} s preview…"
+        )
+        self._set_status(status_msg, error=False)
+        self._start_snapshot_thread(
+            config=config,
+            path=path,
+            previous_path=previous_path,
+            auto=auto,
+            full_capture=full_capture,
+            snapshot_seconds=float(snapshot_seconds or 0.0),
+            nfft=nfft,
+            hop=hop,
+            max_slices=max_slices,
+            fft_workers=fft_workers,
+        )
+
+    def _start_snapshot_thread(
+        self,
+        *,
+        config: ProcessingConfig,
+        path: Path,
+        previous_path: Optional[Path],
+        auto: bool,
+        full_capture: bool,
+        snapshot_seconds: float,
+        nfft: int,
+        hop: int,
+        max_slices: int,
+        fft_workers: Optional[int],
+        max_in_memory_samples: int = MAX_PREVIEW_SAMPLES,
+    ) -> None:
+        if self._snapshot_thread and self._snapshot_thread.is_alive():
+            self._set_status("Preview already loading; please wait.", error=False)
             return
+        if self.load_preview_button:
+            self.load_preview_button.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                if full_capture:
+                    snapshot = self._compute_full_psd(
+                        config,
+                        nfft=nfft,
+                        hop=hop,
+                        max_slices=max_slices,
+                        fft_workers=fft_workers,
+                        status_cb=lambda msg: self._threadsafe_status(msg),
+                    )
+                else:
+                    snapshot = gather_snapshot(
+                        config,
+                        seconds=snapshot_seconds,
+                        nfft=nfft,
+                        hop=hop,
+                        max_slices=max_slices,
+                        fft_workers=fft_workers,
+                        max_in_memory_samples=max_in_memory_samples,
+                    )
+            except Exception as exc:
+                LOG.error("Failed to gather preview: %s", exc)
+                try:
+                    self.root.after(
+                        0, lambda err=exc: self._on_snapshot_failed(err, auto=auto)
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.root.after(
+                        0,
+                        lambda snap=snapshot: self._on_snapshot_ready(
+                            snap, path=path, previous_path=previous_path
+                        ),
+                    )
+                except Exception:
+                    pass
+            finally:
+                try:
+                    self.root.after(0, self._on_snapshot_thread_finished)
+                except Exception:
+                    pass
+
+        self._snapshot_thread = threading.Thread(target=worker, daemon=True)
+        self._snapshot_thread.start()
+
+    def _on_snapshot_ready(
+        self, snapshot: SnapshotData, *, path: Path, previous_path: Optional[Path]
+    ) -> None:
         same_file = previous_path is not None and Path(previous_path) == path
         self.selected_path = path
         if not same_file:
@@ -782,6 +892,7 @@ class _InteractiveApp:
         self.sample_rate = snapshot.sample_rate
         self.snapshot_seconds = snapshot.seconds
         self.center_var.set(f"{snapshot.center_freq:.0f}")
+        self._update_output_path_hint()
         precomputed = (snapshot.freqs, snapshot.psd_db)
         waterfall = snapshot.waterfall
         samples = snapshot.samples
@@ -799,6 +910,16 @@ class _InteractiveApp:
             "Drag over the channel of interest, then Confirm & Run.",
             error=False,
         )
+
+    def _on_snapshot_failed(self, error: Exception, *, auto: bool) -> None:
+        self._set_status(f"Preview failed: {error}", error=True)
+        if not auto and messagebox:
+            messagebox.showerror("Preview failed", str(error))
+
+    def _on_snapshot_thread_finished(self) -> None:
+        self._snapshot_thread = None
+        if self.load_preview_button:
+            self.load_preview_button.configure(state="normal")
 
     def _render_plot(
         self,
@@ -921,6 +1042,7 @@ class _InteractiveApp:
             self.confirm_btn.configure(state="normal")
         if self.preview_btn:
             self.preview_btn.configure(state="normal")
+        self._update_output_path_hint()
 
     def _on_canvas_click(self, event) -> None:
         if self.ax_main is None or event.inaxes != self.ax_main or event.xdata is None:
@@ -957,17 +1079,13 @@ class _InteractiveApp:
             seconds = self.snapshot_seconds if self.snapshot_seconds > 0 else 2.0
         try:
             config = self._build_config(self.selected_path, self.center_freq)
-            config = replace(
-                config,
-                target_freq=self.selection.center_freq,
-                bandwidth=self.selection.bandwidth,
-            )
         except Exception as exc:  # pragma: no cover - setup validation
             LOG.error("Preview setup failed: %s", exc)
             self._set_status(f"Preview setup failed: {exc}", error=True)
             messagebox.showerror("Preview failed", str(exc))
             return
 
+        self._ensure_output_directory(config.output_path)
         self._preview_running = True
         try:
             sink: Optional[ProgressSink] = TkProgressSink(self.root)
@@ -1149,30 +1267,32 @@ class _InteractiveApp:
                     fft_frames=frames,
                 )
             else:
-                if snapshot.params.get("full_capture", False):
-                    config = self._build_config(snapshot.path, snapshot.center_freq)
-                    refreshed = self._compute_full_psd(
-                        config,
-                        nfft=nfft,
-                        hop=hop,
-                        max_slices=max_slices,
-                        fft_workers=fft_workers,
-                    )
-                else:
-                    config = self._build_config(snapshot.path, snapshot.center_freq)
-                    refreshed = gather_snapshot(
-                        config,
-                        seconds=float(snapshot.params.get("seconds", snapshot.seconds)),
-                        nfft=nfft,
-                        hop=hop,
-                        max_slices=max_slices,
-                        fft_workers=fft_workers,
-                        max_in_memory_samples=int(
-                            snapshot.params.get(
-                                "max_in_memory_samples", MAX_PREVIEW_SAMPLES
-                            )
-                        ),
-                    )
+                config = self._build_config(snapshot.path, snapshot.center_freq)
+                seconds = float(snapshot.params.get("seconds", snapshot.seconds))
+                max_samples = int(
+                    snapshot.params.get("max_in_memory_samples", MAX_PREVIEW_SAMPLES)
+                )
+                full_capture_flag = bool(snapshot.params.get("full_capture", False))
+                message = (
+                    "Recomputing full-record preview…"
+                    if full_capture_flag
+                    else "Refreshing snapshot preview…"
+                )
+                self._set_status(message, error=False)
+                self._start_snapshot_thread(
+                    config=config,
+                    path=snapshot.path,
+                    previous_path=snapshot.path,
+                    auto=False,
+                    full_capture=full_capture_flag,
+                    snapshot_seconds=seconds,
+                    nfft=nfft,
+                    hop=hop,
+                    max_slices=max_slices,
+                    fft_workers=fft_workers,
+                    max_in_memory_samples=max_samples,
+                )
+                return
         except Exception as exc:
             LOG.error("Preview refresh failed: %s", exc)
             self._set_status(f"Preview refresh failed: {exc}", error=True)
@@ -1337,6 +1457,7 @@ class _InteractiveApp:
         if self.preview_btn:
             self.preview_btn.configure(state="normal")
         self._set_status("Edited target/bandwidth applied. Use Preview DSP or Refresh preview to update outputs.", error=False)
+        self._update_output_path_hint()
 
     def _update_option_state(self) -> None:
         demod = (self.demod_var.get() or "nfm").lower()
@@ -1437,6 +1558,92 @@ class _InteractiveApp:
             return "configuration"
         return resolved
 
+    def _on_output_dir_browse(self) -> None:
+        current = self._current_output_dir()
+        if current is None and self.selected_path:
+            current = self.selected_path.parent
+        try:
+            chosen = filedialog.askdirectory(
+                parent=self.root,
+                initialdir=str(current) if current else None,
+                title="Select output directory",
+            )
+        except Exception:  # pragma: no cover - Tk dialog failure
+            chosen = ""
+        if chosen:
+            self.output_dir_var.set(chosen)
+            self._on_output_dir_changed()
+
+    def _on_output_dir_changed(self) -> None:
+        directory = self._current_output_dir()
+        if directory:
+            self._set_status(f"Output directory set to {directory}", error=False)
+        else:
+            self._set_status(
+                "Output directory cleared; previews and outputs will default next to the recording.",
+                error=False,
+            )
+        self._update_output_path_hint()
+
+    def _current_output_dir(self) -> Optional[Path]:
+        text = self.output_dir_var.get().strip()
+        if not text:
+            return None
+        return Path(text).expanduser()
+
+    def _default_output_filename(self, target_freq: float) -> str:
+        finest = int(round(target_freq)) if target_freq else 0
+        return f"audio_{finest}_48k.wav"
+
+    def _resolve_output_path(self, input_path: Path, target_freq: float) -> Optional[Path]:
+        directory = self._current_output_dir()
+        if directory:
+            return directory / self._default_output_filename(target_freq)
+        if self._cli_output_path is not None:
+            return self._cli_output_path
+        existing = self.base_kwargs.get("output_path")
+        if existing:
+            return Path(existing)
+        return None
+
+    def _ensure_output_directory(self, output_path: Optional[Path]) -> None:
+        if output_path is None:
+            return
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            LOG.warning("Failed to create output directory %s: %s", output_path.parent, exc)
+
+    def _update_output_path_hint(self) -> None:
+        target = (
+            self.selection.center_freq
+            if self.selection is not None
+            else float(self.base_kwargs.get("target_freq", 0.0))
+        )
+        input_path_text = self.file_var.get().strip()
+        input_path = Path(input_path_text) if input_path_text else None
+        resolved: Optional[Path] = None
+        if input_path:
+            try:
+                resolved = self._resolve_output_path(input_path, target)
+            except Exception:
+                resolved = None
+        if resolved is None and not input_path and self._cli_output_path is not None:
+            resolved = self._cli_output_path
+        if resolved is None and input_path:
+            resolved = input_path.with_name(self._default_output_filename(target))
+        if resolved is not None:
+            self.output_path_var.set(f"Preview/output files: {resolved}")
+        else:
+            filename = self._default_output_filename(target)
+            self.output_path_var.set(f"Preview/output files: {filename} (default)")
+
+    def _threadsafe_status(self, message: str, *, error: bool = False) -> None:
+        try:
+            self.root.after(0, lambda: self._set_status(message, error=error))
+        except Exception:  # pragma: no cover - root may be shutting down
+            pass
+
     def _set_status(self, message: str, *, error: bool) -> None:
         self.status_var.set(message)
         if self.status_label:
@@ -1498,6 +1705,13 @@ class _InteractiveApp:
         kwargs["bandwidth"] = bandwidth
         self.base_kwargs["target_freq"] = target_freq
         self.base_kwargs["bandwidth"] = bandwidth
+        output_path = self._resolve_output_path(path, target_freq)
+        kwargs["output_path"] = output_path
+        if output_path is not None:
+            self.base_kwargs["output_path"] = output_path
+        elif "output_path" in self.base_kwargs:
+            self.base_kwargs.pop("output_path")
+        self._update_output_path_hint()
         return ProcessingConfig(in_path=path, **kwargs)
 
     def _compute_full_psd(
@@ -1508,6 +1722,7 @@ class _InteractiveApp:
         hop: int,
         max_slices: int,
         fft_workers: Optional[int],
+        status_cb: Optional[Callable[[str], None]] = None,
     ) -> SnapshotData:
         probe = probe_sample_rate(config.in_path)
         sample_rate = probe.value
@@ -1530,11 +1745,15 @@ class _InteractiveApp:
 
         def _chunk_iter() -> Iterator[np.ndarray]:
             nonlocal consumed
+            chunk_index = 0
             with IQReader(config.in_path, chunk_samples, config.iq_order) as reader:
                 for block in reader:
                     if block is None or block.size == 0:
                         break
                     consumed += block.size
+                    chunk_index += 1
+                    if status_cb and chunk_index % 4 == 0:
+                        status_cb(f"Averaging PSD chunk {chunk_index}…")
                     yield block
 
         freqs, avg_psd, waterfall, frames = streaming_waterfall(
@@ -1574,13 +1793,6 @@ class _InteractiveApp:
             frames,
         )
         return snapshot
-
-    def _pump_events(self) -> None:
-        try:
-            self.root.update_idletasks()
-            self.root.update()
-        except tk.TclError:  # pragma: no cover - window closed
-            pass
 
     def _on_waterfall_pick(self, freq_hz: float) -> None:
         bandwidth = (
@@ -1812,7 +2024,7 @@ class TkProgressSink(ProgressSink):
 
     # -- Event routing ---------------------------------------------------
     def _enqueue(self, event: str, *args, **kwargs) -> None:
-        if self._closed:
+        if self._closed and event != "start":
             return
         self._queue.put((event, args, kwargs))
         self._schedule()
@@ -1840,8 +2052,7 @@ class TkProgressSink(ProgressSink):
 
     # -- Handlers --------------------------------------------------------
     def _handle_start(self, phases, overall_total: float) -> None:
-        if self._closed:
-            return
+        self._closed = False
         if self._window is None or not bool(self._window.winfo_exists()):
             self._window = tk.Toplevel(self.master)
             self._window.title("IQ to Audio — Processing")

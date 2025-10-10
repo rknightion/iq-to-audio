@@ -62,6 +62,7 @@ def run_preview(
 ) -> Tuple[ProcessingResult, Path]:
     preview_input = _trim_input_file(config.in_path, seconds)
     preview_output = _preview_output_path(config)
+    preview_output.parent.mkdir(parents=True, exist_ok=True)
     preview_config = replace(config, in_path=preview_input, output_path=preview_output)
     pipeline = ProcessingPipeline(preview_config)
     if on_pipeline is not None:

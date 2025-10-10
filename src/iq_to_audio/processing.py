@@ -606,11 +606,11 @@ class ProcessingPipeline:
                     _check_cancel("probe-only")
                     tracker.advance("ingest", warmup.size)
                     report("Probe-only inspection complete")
-                    decoder.finalize()
-                    iq_writer.close()
-                    return ProcessingResult(
-                        sample_rate_probe=probe,
-                        center_freq=center_freq,
+                decoder.finalize()
+                iq_writer.close()
+                return ProcessingResult(
+                    sample_rate_probe=probe,
+                    center_freq=center_freq,
                         target_freq=target_freq,
                         freq_offset=freq_offset,
                         decimation=decimation,
@@ -619,6 +619,7 @@ class ProcessingPipeline:
                         audio_peak=0.0,
                     )
 
+                output_path.parent.mkdir(parents=True, exist_ok=True)
                 audio_writer = AudioWriter(output_path, fs_channel)
                 try:
                     for idx, block in enumerate(itertools.chain((warmup,), iterator)):
