@@ -4,6 +4,7 @@ import math
 from typing import Dict, Optional
 
 import numpy as np
+from scipy import signal
 
 from .base import Decoder, DecoderStats
 from .common import SquelchGate
@@ -33,6 +34,8 @@ class DeemphasisFilter:
         self.alpha = 0.0
         self.beta = 0.0
         self.state = 0.0
+        self._b = np.array([1.0], dtype=np.float64)
+        self._a = np.array([1.0], dtype=np.float64)
         if sample_rate is not None:
             self.configure(sample_rate)
 
@@ -42,19 +45,21 @@ class DeemphasisFilter:
         self.alpha = alpha
         self.beta = 1.0 - alpha
         self.state = 0.0
+        self._b = np.array([self.beta], dtype=np.float64)
+        self._a = np.array([1.0, -self.alpha], dtype=np.float64)
 
     def process(self, samples: np.ndarray) -> np.ndarray:
         if samples.size == 0:
             return samples
-        out = np.empty_like(samples, dtype=np.float32)
-        state = self.state
-        alpha = self.alpha
-        beta = self.beta
-        for idx, sample in enumerate(samples):
-            state = alpha * state + beta * sample
-            out[idx] = state
-        self.state = state
-        return out
+        zi = np.array([self.state], dtype=np.float64)
+        audio, zf = signal.lfilter(
+            self._b,
+            self._a,
+            samples.astype(np.float32, copy=False),
+            zi=zi,
+        )
+        self.state = float(zf[0])
+        return audio.astype(np.float32, copy=False)
 
 
 class NarrowbandFMDecoder(Decoder):
