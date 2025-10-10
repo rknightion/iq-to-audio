@@ -48,14 +48,13 @@ Running `uv run iq-to-audio` with no extra flags launches the interactive GUI; a
 
 The CLI prints per-stage progress bars (ingest, channelize, demodulate, encode) and an overall percentage. The interactive GUI shows matching progress in a dedicated window once processing begins.
 
-Interactive mode now exposes demod selection, AGC control (for SSB modes), spectrum tools (FFT size, smoothing, dynamic range, color themes, pan/zoom toolbar), and an auto-launched waterfall so you can dial in weak signals just like an SDR waterfall. Squelch/silence trim toggles remain in the UI as placeholders for future enhancements, and additional target frequency boxes let you queue up to four extra channels—leave them blank to process only the active selection. Drag to highlight a channel, use the mouse wheel or double-click to zoom, then click “Preview DSP” to demodulate the current preview window or “Confirm & Run” to process the full capture. Adjust options as needed, then hit “Refresh preview” to regenerate the plots.
+Interactive mode now exposes demod selection, AGC control (for SSB modes), spectrum tools (FFT size, smoothing, dynamic range, color themes, pan/zoom toolbar), and an auto-launched waterfall so you can dial in weak signals just like an SDR waterfall. Squelch/silence trim toggles remain in the UI as placeholders for future enhancements, and target frequency boxes let you queue up to five channels—leave extras blank to process only the active selection. Drag to highlight a channel, use the mouse wheel or double-click to zoom, then click “Preview DSP” to demodulate the current preview window or “Confirm & Run” to process the full capture. Adjust options as needed, then hit “Refresh preview” to regenerate the plots.
 Toggle “Analyze entire recording” in the GUI to average the full capture into the preview spectrum when you need maximum frequency resolution.
 
 ## CLI Arguments
 
 - `--in PATH` (required unless `--interactive`): SDR++ baseband WAV input.
-- `--ft HZ`: primary target RF frequency; required unless using interactive selection.
-- `--tf HZ`: additional target RF frequency; repeat up to four times to batch multiple channels.
+- `--ft HZ`: target RF frequency (required unless using interactive selection); repeat up to five times to batch multiple channels.
 - `--bw HZ`: channel bandwidth (default 12 500).
 - `--fc HZ`: override center frequency if filename parsing fails.
 - `--fs-ch HZ`: complex channel sample rate before demod (default 96 000).
@@ -85,29 +84,29 @@ Toggle “Analyze entire recording” in the GUI to average the full capture int
 
 ```bash
 # Standard CLI demodulation
-uv run iq-to-audio --in capture.wav --ft 453112500 --bw 9000
+uv run iq-to-audio --in capture.wav --fc 456834049 --ft 453112500 --bw 9000
 
 # Probe-only metadata inspection
-uv run iq-to-audio --in capture.wav --ft 453112500 --probe-only
+uv run iq-to-audio --in capture.wav --fc 456834049 --ft 453112500 --probe-only
 
 # Dump channelized IQ and generate stage plots for debugging
-uv run iq-to-audio --in capture.wav --ft 453112500 \
+uv run iq-to-audio --in capture.wav --fc 456834049 --ft 453112500 \
   --dump-iq debug.cf32 --plot-stages plots/stages.png
 
 # Medium-wave AM broadcast
-uv run iq-to-audio --in mw_capture.wav --ft 1010000 --demod am --bw 10000
+uv run iq-to-audio --in mw_capture.wav --fc 1015000 --ft 1010000 --demod am --bw 10000
 
 # 5-second CLI preview to validate settings
-uv run iq-to-audio --in capture.wav --ft 453112500 --preview 5
+uv run iq-to-audio --in capture.wav --fc 456834049 --ft 453112500 --preview 5
 
 # Batch demodulate three targets in one pass
-uv run iq-to-audio --in capture.wav --ft 453112500 --tf 453137500 --tf 453200000 --out multi.wav
+uv run iq-to-audio --in capture.wav --fc 456834049 --ft 453112500 --ft 453137500 --ft 453200000 --out multi.wav
 
 # Synthetic benchmark at 2 MS/s with AM demod
 uv run iq-to-audio --benchmark --demod am --benchmark-sample-rate 2000000 --benchmark-seconds 3
 
 # LSB voice monitoring with AGC disabled
-uv run iq-to-audio --in hf_voice.wav --ft 7090000 --demod lsb --no-agc
+uv run iq-to-audio --in hf_voice.wav --fc 7105000 --ft 7090000 --demod lsb --no-agc
 
 # Interactive GUI workflow (requires matplotlib extra + Tk)
 uv run --extra interactive iq-to-audio --interactive

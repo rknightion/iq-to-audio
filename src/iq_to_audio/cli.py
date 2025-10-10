@@ -42,17 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--ft",
-        dest="target_freq",
-        type=positive_float,
-        help="Target RF frequency in Hz.",
-    )
-    parser.add_argument(
-        "--tf",
-        dest="extra_target_freqs",
+        dest="target_freqs",
         type=positive_float,
         action="append",
         default=None,
-        help="Additional target RF frequency in Hz. May be supplied up to four times.",
+        help="Target RF frequency in Hz. Supply up to five times to batch additional channels.",
     )
     parser.add_argument(
         "--bw",
@@ -226,13 +220,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    extra_target_freqs = list(args.extra_target_freqs or [])
-    frequencies: list[float] = []
-    if args.target_freq is not None:
-        frequencies.append(args.target_freq)
-    if not frequencies and extra_target_freqs:
-        frequencies.append(extra_target_freqs.pop(0))
-    frequencies.extend(extra_target_freqs)
+    frequencies: list[float] = list(args.target_freqs or [])
 
     if len(frequencies) > 5:
         parser.error("At most five target frequencies are supported per run.")
@@ -267,7 +255,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     base_kwargs = dict(shared_kwargs)
     base_kwargs.update(
         target_freq=frequencies[0] if frequencies else 0.0,
-        extra_target_freqs=frequencies[1:],
+        target_freqs=list(frequencies),
         output_path=args.output_path,
         dump_iq_path=args.dump_iq,
         plot_stages_path=args.plot_stages,
@@ -280,14 +268,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         from .benchmark import run_benchmark
 
         benchmark_kwargs = dict(base_kwargs)
-        benchmark_kwargs.pop("extra_target_freqs", None)
+        benchmark_kwargs.pop("target_freqs", None)
         try:
             return run_benchmark(
                 seconds=args.benchmark_seconds,
                 sample_rate=args.benchmark_sample_rate,
                 freq_offset=args.benchmark_offset,
                 center_freq=args.center_freq,
-                target_freq=args.target_freq,
+                target_freq=frequencies[0] if frequencies else None,
                 base_kwargs=benchmark_kwargs,
             )
         except Exception as exc:
@@ -327,7 +315,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.input_path is None:
             parser.error("--in is required in CLI mode.")
         if not frequencies:
-            parser.error("Provide at least one --ft/--tf target frequency in CLI mode.")
+            parser.error("Provide at least one --ft target frequency in CLI mode.")
 
     if args.preview_seconds is not None:
         if launch_gui:

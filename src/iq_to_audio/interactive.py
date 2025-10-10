@@ -4,7 +4,7 @@ import logging
 import math
 import os
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Optional
 
@@ -64,6 +64,7 @@ class InteractiveSessionResult:
 
 
 MAX_PREVIEW_SAMPLES = 8_000_000  # Complex samples retained in memory for previews (~64 MB).
+MAX_TARGET_FREQUENCIES = 5
 
 
 @dataclass
@@ -497,22 +498,26 @@ class _InteractiveApp:
         self.waterfall_cmap_var = tk.StringVar(value="magma")
         self.waterfall_slices_var = tk.StringVar(value="400")
         self.waterfall_floor_var = tk.StringVar(value="110")
-        self.target_var = tk.StringVar(value="—")
         self.bandwidth_var = tk.StringVar(value="—")
-        extra_defaults = []
-        raw_extras = self.base_kwargs.get("extra_target_freqs") or []
-        for value in list(raw_extras)[:4]:
+        raw_targets = self.base_kwargs.get("target_freqs") or []
+        if not raw_targets:
+            initial_target = self.base_kwargs.get("target_freq")
+            if initial_target:
+                raw_targets = [initial_target]
+        defaults: list[str] = []
+        for value in list(raw_targets)[:MAX_TARGET_FREQUENCIES]:
             try:
                 freq_val = float(value)
             except (TypeError, ValueError):
                 freq_val = 0.0
-            extra_defaults.append(f"{freq_val:.0f}" if freq_val > 0 else "")
-        while len(extra_defaults) < 4:
-            extra_defaults.append("")
-        self.extra_target_vars = [tk.StringVar(value=val) for val in extra_defaults]
+            defaults.append(f"{freq_val:.0f}" if freq_val > 0 else "")
+        while len(defaults) < MAX_TARGET_FREQUENCIES:
+            defaults.append("")
+        self.target_freq_vars = [tk.StringVar(value=val) for val in defaults]
         self.offset_var = tk.StringVar(value="Offset: —")
         self.sample_rate_var = tk.StringVar(value="Sample rate: —")
         self.status_var = tk.StringVar(value="Select a recording to begin.")
+        self._update_target_freq_state()
 
         self.load_preview_button: Optional[ttk.Button] = None
         self.preview_btn: Optional[ttk.Button] = None
@@ -566,45 +571,15 @@ class _InteractiveApp:
                 pass
         if not self.selection or not self.selected_path:
             raise KeyboardInterrupt()
-        kwargs = dict(self.base_kwargs)
-        for deprecated_key in ("squelch_dbfs", "silence_trim", "squelch_enabled", "extra_target_freqs"):
-            kwargs.pop(deprecated_key, None)
-        kwargs["center_freq"] = self.center_freq
-        kwargs["center_freq_source"] = self.center_source
-        bandwidth = self.selection.bandwidth
-        kwargs["bandwidth"] = bandwidth
-        kwargs["demod_mode"] = (self.demod_var.get() or kwargs.get("demod_mode", "nfm")).lower()
-        self.base_kwargs["demod_mode"] = kwargs["demod_mode"]
-        silence_trim = self.trim_var.get()
-        squelch_enabled = self.squelch_var.get()
-        kwargs["agc_enabled"] = self.agc_var.get()
-        self.base_kwargs["silence_trim"] = silence_trim
-        self.base_kwargs["squelch_enabled"] = squelch_enabled
-        self.base_kwargs["agc_enabled"] = kwargs["agc_enabled"]
-        target_freq = self.selection.center_freq
-        extras = self._collect_extra_targets(target_freq)
-        frequencies = [target_freq, *extras]
-        total = len(frequencies)
-        base_dump = kwargs.get("dump_iq_path")
-        base_plot = kwargs.get("plot_stages_path")
-        configs: list[ProcessingConfig] = []
-        for freq in frequencies:
-            freq_kwargs = dict(kwargs)
-            freq_kwargs["target_freq"] = freq
-            freq_kwargs["output_path"] = self._output_path_for_frequency(self.selected_path, freq, total)
-            freq_kwargs["dump_iq_path"] = self._augment_path(base_dump, freq, total)
-            freq_kwargs["plot_stages_path"] = self._augment_path(base_plot, freq, total)
-            configs.append(ProcessingConfig(in_path=self.selected_path, **freq_kwargs))
-        if configs:
-            self.base_kwargs["target_freq"] = configs[0].target_freq
-            if configs[0].output_path is not None:
-                self.base_kwargs["output_path"] = configs[0].output_path
-            elif "output_path" in self.base_kwargs:
-                self.base_kwargs.pop("output_path")
-        else:
-            self.base_kwargs["target_freq"] = 0.0
-            self.base_kwargs.pop("output_path", None)
-        self.base_kwargs["extra_target_freqs"] = extras
+        self.base_kwargs["silence_trim"] = self.trim_var.get()
+        self.base_kwargs["squelch_enabled"] = self.squelch_var.get()
+        self.base_kwargs["agc_enabled"] = self.agc_var.get()
+        demod_mode = (self.demod_var.get() or self.base_kwargs.get("demod_mode", "nfm")).lower()
+        self.base_kwargs["demod_mode"] = demod_mode
+        configs = self._build_configs(self.selected_path, self.center_freq)
+        if not configs:
+            raise ValueError("Enter at least one target frequency before running DSP.")
+        bandwidth = configs[0].bandwidth
         LOG.info(
             "Interactive selection: center %.0f Hz, %d target(s), bandwidth %.0f Hz",
             self.center_freq or 0.0,
@@ -700,7 +675,7 @@ class _InteractiveApp:
         ).grid(row=2, column=1, sticky="w", padx=4, pady=4)
         self.load_preview_button = ttk.Button(
             file_frame,
-            text="Load Preview",
+            text="Load FFT",
             command=self._load_preview,
         )
         self.load_preview_button.grid(row=2, column=2, sticky="w", padx=4, pady=4)
@@ -912,49 +887,42 @@ class _InteractiveApp:
         ttk.Label(selection_frame, textvariable=self.sample_rate_var).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(4, 8)
         )
-        ttk.Label(selection_frame, text="Target freq (Hz):").grid(
-            row=1, column=0, sticky="w", pady=4
-        )
-        target_entry = ttk.Entry(
-            selection_frame,
-            textvariable=self.target_var,
-            width=24,
-        )
-        target_entry.grid(row=1, column=1, sticky="w", padx=4, pady=4)
-        target_entry.bind("<FocusOut>", lambda _e: self._on_target_bandwidth_edit())
-        target_entry.bind("<Return>", lambda _e: self._on_target_bandwidth_edit())
         ttk.Label(selection_frame, text="Bandwidth (Hz):").grid(
-            row=2, column=0, sticky="w", pady=4
+            row=1, column=0, sticky="w", pady=4
         )
         bandwidth_entry = ttk.Entry(
             selection_frame,
             textvariable=self.bandwidth_var,
             width=24,
         )
-        bandwidth_entry.grid(row=2, column=1, sticky="w", padx=4, pady=4)
-        bandwidth_entry.bind("<FocusOut>", lambda _e: self._on_target_bandwidth_edit())
-        bandwidth_entry.bind("<Return>", lambda _e: self._on_target_bandwidth_edit())
+        bandwidth_entry.grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        bandwidth_entry.bind("<FocusOut>", lambda _e: self._on_bandwidth_edit())
+        bandwidth_entry.bind("<Return>", lambda _e: self._on_bandwidth_edit())
         ttk.Label(selection_frame, textvariable=self.offset_var).grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(4, 0)
+            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
 
-        additional_frame = ttk.LabelFrame(main, text="Additional target frequencies (Hz)")
-        additional_frame.pack(fill="x", expand=False, pady=(0, 8))
-        for idx, var in enumerate(self.extra_target_vars, start=2):
-            col = (idx - 2) * 2
-            ttk.Label(additional_frame, text=f"Target {idx}:").grid(
-                row=0,
+        target_frame = ttk.LabelFrame(main, text="Target frequencies (Hz)")
+        target_frame.pack(fill="x", expand=False, pady=(0, 8))
+        per_row = 3
+        for idx, var in enumerate(self.target_freq_vars):
+            row = idx // per_row
+            col = (idx % per_row) * 2
+            ttk.Label(target_frame, text=f"Target {idx + 1}:").grid(
+                row=row,
                 column=col,
                 sticky="w",
                 padx=4,
                 pady=4,
             )
             entry = ttk.Entry(
-                additional_frame,
+                target_frame,
                 textvariable=var,
                 width=18,
             )
-            entry.grid(row=0, column=col + 1, sticky="w", padx=4, pady=4)
+            entry.grid(row=row, column=col + 1, sticky="w", padx=4, pady=4)
+            entry.bind("<FocusOut>", lambda _e, i=idx: self._on_target_entry_edit(i))
+            entry.bind("<Return>", lambda _e, i=idx: self._on_target_entry_edit(i))
 
         self.status_label = ttk.Label(
             main,
@@ -1070,7 +1038,10 @@ class _InteractiveApp:
         center_override = self._parse_float(self.center_var.get())
 
         try:
-            config = self._build_config(path, center_override)
+            configs = self._build_configs(path, center_override, require_targets=False)
+            if not configs:
+                raise ValueError("No target frequencies configured for preview.")
+            config = configs[0]
         except Exception as exc:
             LOG.error("Preview setup failed: %s", exc)
             self._set_status(f"Preview setup failed: {exc}", error=True)
@@ -1082,9 +1053,9 @@ class _InteractiveApp:
         max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
         fft_workers = self._fft_worker_count()
         status_msg = (
-            "Computing spectrum for entire recording…"
+            "Computing full-record FFT/waterfall…"
             if full_capture
-            else f"Gathering {float(snapshot_seconds or 0.0):.2f} s preview…"
+            else f"Gathering {float(snapshot_seconds or 0.0):.2f} s FFT snapshot…"
         )
         self._set_status(status_msg, error=False)
         self._start_snapshot_thread(
@@ -1350,12 +1321,14 @@ class _InteractiveApp:
 
     def _on_span_change(self, selection: SelectionResult) -> None:
         self.selection = selection
-        self.target_var.set(f"{selection.center_freq:.0f}")
+        if self.target_freq_vars:
+            self.target_freq_vars[0].set(f"{selection.center_freq:.0f}")
+        freqs = self._update_target_freq_state()
         self.bandwidth_var.set(f"{selection.bandwidth:.0f}")
-        if self.center_freq is not None:
-            offset = selection.center_freq - self.center_freq
+        if self.center_freq is not None and freqs:
+            offset = freqs[0] - self.center_freq
             self.offset_var.set(f"Offset: {offset:+.0f} Hz")
-        else:
+        elif self.center_freq is None and freqs:
             self.offset_var.set("Offset: —")
         if self.confirm_btn:
             self.confirm_btn.configure(state="normal")
@@ -1397,37 +1370,19 @@ class _InteractiveApp:
         if seconds is None or seconds <= 0:
             seconds = self.snapshot_seconds if self.snapshot_seconds > 0 else 2.0
         try:
-            config = self._build_config(self.selected_path, self.center_freq)
+            configs = self._build_configs(self.selected_path, self.center_freq)
+            if not configs:
+                raise ValueError("Enter at least one target frequency before previewing.")
         except Exception as exc:  # pragma: no cover - setup validation
             LOG.error("Preview setup failed: %s", exc)
             self._set_status(f"Preview setup failed: {exc}", error=True)
             messagebox.showerror("Preview failed", str(exc))
             return
 
-        primary_freq = config.target_freq
-        extras = self._collect_extra_targets(primary_freq)
-        total = 1 + len(extras)
-        candidate_freqs = [primary_freq, *extras]
-        base_dump = config.dump_iq_path
-        base_plot = config.plot_stages_path
-        configs: list[ProcessingConfig] = []
-        for idx, freq in enumerate(candidate_freqs):
-            output_path = self._output_path_for_frequency(self.selected_path, freq, total)
-            dump_path = self._augment_path(base_dump, freq, total)
-            plot_path = self._augment_path(base_plot, freq, total)
-            cfg = replace(
-                config if idx == 0 else configs[0],
-                target_freq=freq,
-                output_path=output_path,
-                dump_iq_path=dump_path,
-                plot_stages_path=plot_path,
-            )
-            configs.append(cfg)
         config = configs[0]
-        self.base_kwargs["output_path"] = config.output_path
-        self._ensure_output_directory(config.output_path)
-        for extra_cfg in configs[1:]:
-            self._ensure_output_directory(extra_cfg.output_path)
+        total = len(configs)
+        for cfg in configs:
+            self._ensure_output_directory(cfg.output_path)
         self._preview_running = True
         sink = StatusProgressSink(
             lambda message, highlight: self._threadsafe_status(message, error=highlight)
@@ -1565,7 +1520,7 @@ class _InteractiveApp:
 
     def _schedule_refresh(self, *, full: bool = False, waterfall_only: bool = False) -> None:
         if self.snapshot_data is None:
-            self._set_status("Load a preview before refreshing.", error=True)
+            self._set_status("Load an FFT snapshot before refreshing.", error=True)
             return
         if self._refresh_job is not None:
             try:
@@ -1578,7 +1533,7 @@ class _InteractiveApp:
 
     def _refresh_preview_manual(self) -> None:
         if self.snapshot_data is None:
-            self._set_status("Load a preview before refreshing.", error=True)
+            self._set_status("Load an FFT snapshot before refreshing.", error=True)
             return
         full_capture = bool(self.snapshot_data.params.get("full_capture", False))
         self.full_snapshot_var.set(full_capture)
@@ -1632,7 +1587,14 @@ class _InteractiveApp:
                     fft_frames=frames,
                 )
             else:
-                config = self._build_config(snapshot.path, snapshot.center_freq)
+                configs = self._build_configs(
+                    snapshot.path,
+                    snapshot.center_freq,
+                    require_targets=False,
+                )
+                if not configs:
+                    raise ValueError("Enter at least one target frequency before refreshing.")
+                config = configs[0]
                 seconds = float(snapshot.params.get("seconds", snapshot.seconds))
                 max_samples = int(
                     snapshot.params.get("max_in_memory_samples", MAX_PREVIEW_SAMPLES)
@@ -1793,14 +1755,7 @@ class _InteractiveApp:
         # No automatic refresh; manual preview needed.
         self._set_status("Updated AGC preference. Use Preview/Refresh to apply.", error=False)
 
-    def _on_target_bandwidth_edit(self) -> None:
-        try:
-            target = float(self.target_var.get())
-            if target <= 0:
-                raise ValueError()
-        except ValueError:
-            self._set_status("Target frequency must be positive.", error=True)
-            return
+    def _on_bandwidth_edit(self) -> None:
         try:
             bandwidth = float(self.bandwidth_var.get())
             if bandwidth <= 0:
@@ -1808,20 +1763,71 @@ class _InteractiveApp:
         except ValueError:
             self._set_status("Bandwidth must be positive.", error=True)
             return
-        if self.span_controller:
+        primary_targets = self._current_target_frequencies()
+        target = primary_targets[0] if primary_targets else None
+        if self.span_controller and target:
             self.span_controller.set_selection(target, bandwidth)
-        else:
+        elif target:
             self.selection = SelectionResult(target, bandwidth)
             if self.center_freq is not None:
                 offset = target - self.center_freq
                 self.offset_var.set(f"Offset: {offset:+.0f} Hz")
-        self.base_kwargs["target_freq"] = target
+        elif self.selection:
+            self.selection = SelectionResult(self.selection.center_freq, bandwidth)
         self.base_kwargs["bandwidth"] = bandwidth
-        if self.confirm_btn:
-            self.confirm_btn.configure(state="normal")
-        if self.preview_btn:
-            self.preview_btn.configure(state="normal")
-        self._set_status("Edited target/bandwidth applied. Use Preview DSP or Refresh preview to update outputs.", error=False)
+        self._set_status(
+            "Bandwidth updated. Use Preview DSP or Refresh preview to apply.",
+            error=False,
+        )
+        self._update_output_path_hint()
+
+    def _current_target_frequencies(self) -> list[float]:
+        freqs: list[float] = []
+        for var in self.target_freq_vars:
+            freq = self._parse_float(var.get())
+            if freq is None or freq <= 0:
+                continue
+            if any(math.isclose(freq, other, rel_tol=0.0, abs_tol=0.5) for other in freqs):
+                continue
+            freqs.append(freq)
+        return freqs[:MAX_TARGET_FREQUENCIES]
+
+    def _update_target_freq_state(self) -> list[float]:
+        freqs = self._current_target_frequencies()
+        if freqs:
+            primary = freqs[0]
+            self.base_kwargs["target_freq"] = primary
+            self.base_kwargs["target_freqs"] = freqs
+            if self.center_freq is not None:
+                offset = primary - self.center_freq
+                self.offset_var.set(f"Offset: {offset:+.0f} Hz")
+            else:
+                self.offset_var.set("Offset: —")
+        else:
+            self.base_kwargs["target_freq"] = 0.0
+            self.base_kwargs["target_freqs"] = []
+            self.offset_var.set("Offset: —")
+        return freqs
+
+    def _on_target_entry_edit(self, index: int) -> None:
+        freqs = self._update_target_freq_state()
+        if not freqs:
+            self._set_status(
+                "Enter at least one target frequency before running DSP.",
+                error=True,
+            )
+            return
+        primary = freqs[0]
+        if index == 0:
+            bandwidth = self._parse_float(self.bandwidth_var.get()) or self.base_kwargs.get("bandwidth", 12_500.0)
+            if self.span_controller:
+                self.span_controller.set_selection(primary, bandwidth)
+            else:
+                self.selection = SelectionResult(primary, bandwidth)
+            if self.center_freq is not None:
+                offset = primary - self.center_freq
+                self.offset_var.set(f"Offset: {offset:+.0f} Hz")
+        self._set_status(f"Tracking {len(freqs)} target(s).", error=False)
         self._update_output_path_hint()
 
     def _update_option_state(self) -> None:
@@ -1981,11 +1987,13 @@ class _InteractiveApp:
             LOG.warning("Failed to create output directory %s: %s", output_path.parent, exc)
 
     def _update_output_path_hint(self) -> None:
-        target = (
-            self.selection.center_freq
-            if self.selection is not None
-            else float(self.base_kwargs.get("target_freq", 0.0))
-        )
+        targets = self.base_kwargs.get("target_freqs") or []
+        if targets:
+            target = float(targets[0])
+        elif self.selection is not None:
+            target = float(self.selection.center_freq)
+        else:
+            target = float(self.base_kwargs.get("target_freq", 0.0))
         input_path_text = self.file_var.get().strip()
         input_path = Path(input_path_text) if input_path_text else None
         resolved: Optional[Path] = None
@@ -2057,22 +2065,6 @@ class _InteractiveApp:
         except ValueError:
             return None
 
-    def _collect_extra_targets(self, primary: float) -> list[float]:
-        extras: list[float] = []
-        seen = []
-        if primary > 0:
-            seen.append(primary)
-        for var in self.extra_target_vars:
-            freq = self._parse_float(var.get())
-            if freq is None or freq <= 0:
-                continue
-            if any(math.isclose(freq, other, rel_tol=0.0, abs_tol=0.5) for other in seen):
-                continue
-            extras.append(freq)
-            seen.append(freq)
-        self.base_kwargs["extra_target_freqs"] = extras
-        return extras
-
     @staticmethod
     def _augment_path(path: Optional[Path], freq: float, total: int) -> Optional[Path]:
         if path is None or total <= 1:
@@ -2093,9 +2085,15 @@ class _InteractiveApp:
         freq_tag = int(round(target_freq))
         return base.with_name(f"{base.stem}_{freq_tag}{base.suffix}")
 
-    def _build_config(self, path: Path, center_override: Optional[float]) -> ProcessingConfig:
+    def _build_configs(
+        self,
+        path: Path,
+        center_override: Optional[float],
+        *,
+        require_targets: bool = True,
+    ) -> list[ProcessingConfig]:
         kwargs = dict(self.base_kwargs)
-        for deprecated_key in ("squelch_dbfs", "silence_trim", "squelch_enabled"):
+        for deprecated_key in ("squelch_dbfs", "silence_trim", "squelch_enabled", "target_freqs"):
             kwargs.pop(deprecated_key, None)
         center_value = center_override
         if center_value is None or center_value <= 0:
@@ -2120,11 +2118,6 @@ class _InteractiveApp:
         )
         if center_value is not None and center_value > 0:
             self.center_freq = center_value
-        target_freq = (
-            self.selection.center_freq
-            if self.selection is not None
-            else self.base_kwargs.get("target_freq", kwargs.get("target_freq", 0.0))
-        )
         bandwidth = (
             self.selection.bandwidth
             if self.selection is not None
@@ -2133,8 +2126,22 @@ class _InteractiveApp:
         kwargs["bandwidth"] = bandwidth
         self.base_kwargs["bandwidth"] = bandwidth
         self.base_kwargs["center_freq_source"] = self.center_source
-        extras = self._collect_extra_targets(target_freq)
-        frequencies = [target_freq, *extras]
+        frequencies = self._update_target_freq_state()
+        if not frequencies:
+            fallback = (
+                self.selection.center_freq
+                if self.selection is not None
+                else self.base_kwargs.get("target_freq", kwargs.get("target_freq", 0.0))
+            )
+            if fallback and fallback > 0:
+                frequencies = [float(fallback)]
+                if self.target_freq_vars:
+                    self.target_freq_vars[0].set(f"{float(fallback):.0f}")
+                self._update_target_freq_state()
+            elif require_targets:
+                raise ValueError("Enter at least one target frequency before running DSP.")
+            else:
+                frequencies = [max(float(fallback), 0.0)]
         total = len(frequencies)
         base_dump = kwargs.get("dump_iq_path")
         base_plot = kwargs.get("plot_stages_path")
@@ -2156,9 +2163,8 @@ class _InteractiveApp:
         else:
             self.base_kwargs["target_freq"] = 0.0
             self.base_kwargs.pop("output_path", None)
-        self.base_kwargs["extra_target_freqs"] = extras
         self._update_output_path_hint()
-        return configs[0]
+        return configs
 
     def _compute_full_psd(
         self,
@@ -2468,6 +2474,7 @@ def interactive_select(
         input_path=config.in_path,
         base_kwargs={
             "target_freq": config.target_freq,
+            "target_freqs": [config.target_freq],
             "bandwidth": config.bandwidth,
             "center_freq": config.center_freq,
             "demod_mode": config.demod_mode,
