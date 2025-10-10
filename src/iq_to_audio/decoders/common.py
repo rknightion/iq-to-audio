@@ -42,9 +42,10 @@ class SquelchGate:
         sample_rate: float,
         threshold_dbfs: Optional[float],
         silence_trim: bool,
-        hold_ms: float = 250.0,
-        open_margin_db: float = 4.0,
-        noise_alpha: float = 0.9,
+        hold_ms: float = 320.0,
+        open_margin_db: float = 5.0,
+        noise_alpha: float = 0.95,
+        noise_rise_db: float = 1.5,
     ):
         self.sample_rate = sample_rate
         self.manual_threshold = threshold_dbfs
@@ -55,6 +56,7 @@ class SquelchGate:
         self.open = False
         self.open_margin_db = max(open_margin_db, 0.0)
         self.noise_alpha = float(np.clip(noise_alpha, 0.0, 0.999))
+        self.noise_rise_db = max(float(noise_rise_db), 0.0)
 
     def process(self, samples: np.ndarray) -> tuple[np.ndarray, float, float, bool]:
         if samples.size == 0:
@@ -93,6 +95,10 @@ class SquelchGate:
                 self.noise_dbfs = dbfs
             else:
                 alpha = self.noise_alpha
-                self.noise_dbfs = alpha * self.noise_dbfs + (1.0 - alpha) * dbfs
+                delta_limit = self.noise_rise_db
+                target = dbfs
+                if target > self.noise_dbfs + delta_limit:
+                    target = self.noise_dbfs + delta_limit
+                self.noise_dbfs = alpha * self.noise_dbfs + (1.0 - alpha) * target
 
         return audio, threshold, dbfs, dropped

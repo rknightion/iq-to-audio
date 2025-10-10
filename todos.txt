@@ -1,17 +1,8 @@
-High Priority
-- Implement automated integration tests that run the CLI against short fixture captures to validate end-to-end audio output and progress reporting.
-
-
-- Bundle a lightweight sample dataset and scripted walkthrough to help first-time contributors verify their environment.
 - Offer a web-based spectrum viewer (Dash/Panel) as an alternative to the Tk GUI for headless remote use.
 
 - Publish SNR/quality metrics post-run to help users compare decoder configurations.
 
-- Optimize spectrum/waterfall generation:
-  * Add optional multi-threaded FFT via `np.fft.fft(..., workers=N)`; document NumPy version requirements and fallback path.
-  * Introduce parallel PSD averaging for full-capture previews using `ProcessPoolExecutor` with bounded queues; ensure deterministic folding of partial results.
-  * Rework waterfall generation around `scipy.signal.stft` or batched FFT calls to minimize Python loops; profile memory usage and chunk sizing.
-  * Prototype a reader/worker pipeline where IQ blocks are streamed through a `queue.Queue` to background processes, keeping disk and CPU busy simultaneously.
+
   * Capture benchmarking harness (CLI flag + synthetic captures) so future LLM-assisted changes can validate throughput regressions automatically.
 
 

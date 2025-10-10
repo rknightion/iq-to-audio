@@ -1,6 +1,8 @@
 #SDR files
-.wav
+*.wav
 baseband*
+testfiles/*preview.wav
+!testfiles/fc*.wav
 
 
 # Byte-compiled / optimized / DLL files

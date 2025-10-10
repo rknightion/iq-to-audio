@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import pytest
 
@@ -68,7 +69,7 @@ def test_squelch_gate_hold_prevents_voice_clipping():
     _, noise_threshold, noise_dbfs, dropped = gate.process(noise_block)
     assert not gate.open
     assert not dropped
-    assert noise_threshold - noise_dbfs == pytest.approx(4.0, abs=0.2)
+    assert noise_threshold - noise_dbfs == pytest.approx(gate.open_margin_db, abs=0.2)
 
     voice_block = np.full(9600, 0.2, dtype=np.float32)
     voice_audio, voice_threshold, voice_dbfs, dropped = gate.process(voice_block)
@@ -79,7 +80,8 @@ def test_squelch_gate_hold_prevents_voice_clipping():
     assert voice_threshold == pytest.approx(noise_threshold, abs=0.5)
 
     quiet_block = np.zeros(9600, dtype=np.float32)
-    for _ in range(4):
+    blocks_to_hold = math.ceil((gate.hold_samples + voice_block.size) / quiet_block.size)
+    for _ in range(blocks_to_hold):
         quiet_audio, _, _, dropped = gate.process(quiet_block)
         assert gate.open  # sustain through hold interval
         assert not dropped
@@ -96,7 +98,8 @@ def test_squelch_gate_trims_when_closed():
     _ = gate.process(np.full(9600, 0.01, dtype=np.float32))
     _ = gate.process(np.full(9600, 0.2, dtype=np.float32))
     quiet_block = np.zeros(9600, dtype=np.float32)
-    for _ in range(4):
+    blocks_to_hold = math.ceil((gate.hold_samples + quiet_block.size) / quiet_block.size)
+    for _ in range(blocks_to_hold):
         _ = gate.process(quiet_block)
     audio, _, _, dropped = gate.process(quiet_block)
     assert not gate.open

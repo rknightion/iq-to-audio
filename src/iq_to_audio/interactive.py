@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Iterator, Optional
 
 import numpy as np
 
-from .processing import ProcessingCancelled, ProcessingConfig
+from .processing import ProcessingCancelled, ProcessingConfig, tune_chunk_size
 from .preview import run_preview
 from .probe import SampleRateProbe, probe_sample_rate
 from .utils import detect_center_frequency
@@ -159,7 +159,8 @@ def gather_snapshot(
 
     total_samples = int(max(1, round(sample_rate * seconds)))
     hop = max(1, hop or nfft // 4)
-    chunk_size = max(config.chunk_size, nfft)
+    tuned_chunk = tune_chunk_size(sample_rate, config.chunk_size)
+    chunk_size = max(tuned_chunk, nfft)
     retain = min(max_in_memory_samples, total_samples)
     retain_buffer = (
         np.empty(retain, dtype=np.complex64) if retain > 0 else None
@@ -338,6 +339,11 @@ class _InteractiveApp:
         )
         self.center_source_var = tk.StringVar(value="Center source: —")
         self.center_source: str = "unavailable"
+        initial_source = self.base_kwargs.get("center_freq_source")
+        if initial_source:
+            self._set_center_source(initial_source)
+        else:
+            self._set_center_source("unavailable")
         self.snapshot_var = tk.StringVar(
             value=f"{self.snapshot_seconds:.2f}"
         )
@@ -408,6 +414,7 @@ class _InteractiveApp:
                 self.center_var.set(f"{detection.value:.0f}")
                 self._set_center_source(detection.source)
                 self.base_kwargs["center_freq"] = detection.value
+                self.base_kwargs["center_freq_source"] = detection.source
             else:
                 self._set_center_source("unavailable")
             self.root.after(150, lambda: self._load_preview(auto=True))
@@ -431,6 +438,7 @@ class _InteractiveApp:
             raise KeyboardInterrupt()
         kwargs = dict(self.base_kwargs)
         kwargs["center_freq"] = self.center_freq
+        kwargs["center_freq_source"] = self.center_source
         kwargs["target_freq"] = self.selection.center_freq
         kwargs["bandwidth"] = self.selection.bandwidth
         kwargs["demod_mode"] = (self.demod_var.get() or kwargs.get("demod_mode", "nfm")).lower()
@@ -1635,6 +1643,7 @@ class _InteractiveApp:
     def _set_center_source(self, source: Optional[str]) -> None:
         resolved = source or "unavailable"
         self.center_source = resolved
+        self.base_kwargs["center_freq_source"] = resolved
         if resolved == "unavailable":
             label = "—"
         else:
@@ -1797,6 +1806,7 @@ class _InteractiveApp:
             if parsed is not None and parsed > 0:
                 center_value = parsed
         kwargs["center_freq"] = center_value
+        kwargs["center_freq_source"] = self.center_source
         demod = (self.demod_var.get() or kwargs.get("demod_mode", "nfm")).lower()
         kwargs["demod_mode"] = demod
         kwargs["silence_trim"] = self.trim_var.get()
@@ -1827,6 +1837,7 @@ class _InteractiveApp:
         kwargs["bandwidth"] = bandwidth
         self.base_kwargs["target_freq"] = target_freq
         self.base_kwargs["bandwidth"] = bandwidth
+        self.base_kwargs["center_freq_source"] = self.center_source
         output_path = self._resolve_output_path(path, target_freq)
         kwargs["output_path"] = output_path
         if output_path is not None:

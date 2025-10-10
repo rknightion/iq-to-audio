@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from .processing import FFMPEG_HINT, ProcessingConfig, ProcessingPipeline, ProcessingResult
+from .utils import detect_center_frequency
 from .progress import ProgressSink
 
 LOG = logging.getLogger(__name__)
@@ -67,7 +68,28 @@ def run_preview(
     preview_input = _trim_input_file(config.in_path, seconds)
     preview_output = _preview_output_path(config)
     preview_output.parent.mkdir(parents=True, exist_ok=True)
-    preview_config = replace(config, in_path=preview_input, output_path=preview_output)
+    center_freq = config.center_freq
+    center_source = config.center_freq_source
+    if center_freq is None:
+        detection = detect_center_frequency(config.in_path)
+        if detection.value is None:
+            raise ValueError(
+                "Center frequency not supplied and could not be determined from metadata or filename. "
+                "Use --fc to provide it explicitly."
+            )
+        center_freq = detection.value
+        center_source = detection.source
+        LOG.info(
+            "Center frequency detected via %s for preview input.",
+            detection.source if detection.source else "metadata/filename",
+        )
+    preview_config = replace(
+        config,
+        in_path=preview_input,
+        output_path=preview_output,
+        center_freq=center_freq,
+        center_freq_source=center_source,
+    )
     pipeline = ProcessingPipeline(preview_config)
     if on_pipeline is not None:
         try:

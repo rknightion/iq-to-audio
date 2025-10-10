@@ -125,6 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Complex samples per processing chunk (default: 1,048,576).",
     )
     parser.add_argument(
+        "--fft-workers",
+        dest="fft_workers",
+        type=int,
+        help="Number of worker threads for FFT-based stages (default: auto).",
+    )
+    parser.add_argument(
         "--filter-block",
         dest="filter_block",
         type=int,
@@ -171,6 +177,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preview only the first SECONDS of the recording and exit.",
     )
     parser.add_argument(
+        "--benchmark",
+        dest="benchmark",
+        action="store_true",
+        help="Run a synthetic throughput benchmark and exit.",
+    )
+    parser.add_argument(
+        "--benchmark-seconds",
+        dest="benchmark_seconds",
+        type=positive_float,
+        default=5.0,
+        help="Duration of synthetic capture in seconds when benchmarking (default: 5).",
+    )
+    parser.add_argument(
+        "--benchmark-sample-rate",
+        dest="benchmark_sample_rate",
+        type=positive_float,
+        default=2_500_000.0,
+        help="Sample rate in Hz for synthetic benchmark captures (default: 2.5e6).",
+    )
+    parser.add_argument(
+        "--benchmark-offset",
+        dest="benchmark_offset",
+        type=float,
+        default=25_000.0,
+        help="Frequency offset (Hz) between center and target for benchmark tone (default: 25 kHz).",
+    )
+    parser.add_argument(
         "--cli",
         dest="cli",
         action="store_true",
@@ -202,6 +235,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         target_freq=args.target_freq or 0.0,
         bandwidth=args.bandwidth,
         center_freq=args.center_freq,
+        center_freq_source="cli" if args.center_freq is not None else None,
         demod_mode=args.demod,
         fs_ch_target=args.fs_ch,
         deemph_us=args.deemph_us,
@@ -217,11 +251,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         probe_only=args.probe_only,
         mix_sign_override=args.mix_sign,
         plot_stages_path=args.plot_stages,
+        fft_workers=args.fft_workers,
     )
+
+    if args.benchmark and args.interactive:
+        parser.error("--benchmark cannot be combined with --interactive.")
+
+    if args.benchmark:
+        from .benchmark import run_benchmark
+
+        try:
+            return run_benchmark(
+                seconds=args.benchmark_seconds,
+                sample_rate=args.benchmark_sample_rate,
+                freq_offset=args.benchmark_offset,
+                center_freq=args.center_freq,
+                target_freq=args.target_freq,
+                base_kwargs=base_kwargs,
+            )
+        except Exception as exc:
+            LOG.error("Benchmark failed: %s", exc)
+            if args.verbose:
+                LOG.exception("Benchmark error details")
+            return 1
 
     progress_sink = None
 
-    launch_gui = args.interactive or not args.cli
+    launch_gui = args.interactive or (not args.cli and not args.benchmark)
 
     if launch_gui:
         try:

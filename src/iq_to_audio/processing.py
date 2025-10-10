@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ class ProcessingConfig:
     target_freq: float = 0.0
     bandwidth: float = 12_500.0
     center_freq: Optional[float] = None
+    center_freq_source: Optional[str] = None
     demod_mode: str = "nfm"
     fs_ch_target: float = 96_000.0
     deemph_us: float = 300.0
@@ -48,6 +50,22 @@ class ProcessingConfig:
     probe_only: bool = False
     mix_sign_override: Optional[int] = None
     plot_stages_path: Optional[Path] = None
+    fft_workers: Optional[int] = None
+
+
+def tune_chunk_size(sample_rate: float, requested: int) -> int:
+    """Heuristic to choose a performant chunk size without exhausting memory."""
+    base = max(1, requested)
+    if sample_rate <= 0:
+        return base
+    target_seconds = 0.25  # aim for ~250 ms per block for high-rate captures
+    desired = int(round(sample_rate * target_seconds))
+    if desired <= base:
+        return base
+    max_chunk = 4_194_304  # 4M complex samples (~32 MB)
+    desired = min(max_chunk, max(base, desired))
+    power = 1 << math.ceil(math.log2(desired))
+    return int(min(max(power, base), max_chunk))
 
 
 class IQReader:
@@ -174,7 +192,7 @@ class ComplexOscillator:
 class OverlapSaveFIR:
     """FFT-based FIR filter suitable for long filters and streaming data."""
 
-    def __init__(self, taps: np.ndarray, block_size: int):
+    def __init__(self, taps: np.ndarray, block_size: int, *, workers: Optional[int] = None):
         if block_size <= 0:
             raise ValueError("block_size must be positive")
         self.taps = taps.astype(np.complex128)
@@ -186,7 +204,16 @@ class OverlapSaveFIR:
         )
         padded_taps = np.zeros(self.fft_size, dtype=np.complex128)
         padded_taps[: self.filter_len] = self.taps
-        self.taps_fft = np.fft.fft(padded_taps)
+        self.workers = workers if workers and workers > 1 else None
+        self._fft_kwargs: dict[str, int] = {}
+        if self.workers:
+            try:
+                np.fft.fft(np.zeros(8, dtype=np.complex128), workers=self.workers)
+            except TypeError:
+                self.workers = None
+            else:
+                self._fft_kwargs = {"workers": self.workers}
+        self.taps_fft = np.fft.fft(padded_taps, **self._fft_kwargs)
         self.state = np.zeros(self.overlap, dtype=np.complex64)
 
     def process(self, samples: np.ndarray) -> np.ndarray:
@@ -201,8 +228,8 @@ class OverlapSaveFIR:
             block = np.concatenate([self.state, seg]).astype(np.complex128)
             if block.size < self.fft_size:
                 block = np.pad(block, (0, self.fft_size - block.size))
-            spectrum = np.fft.fft(block)
-            filtered = np.fft.ifft(spectrum * self.taps_fft)
+            spectrum = np.fft.fft(block, **self._fft_kwargs)
+            filtered = np.fft.ifft(spectrum * self.taps_fft, **self._fft_kwargs)
             valid = filtered[self.overlap : self.overlap + seg.size]
             outputs.append(valid.astype(np.complex64))
             if self.overlap:
@@ -412,9 +439,32 @@ class ProcessingPipeline:
     def __init__(self, config: ProcessingConfig):
         self.config = config
         self._cancelled = False
+        self._resolved_chunk_size: Optional[int] = None
+        self._resolved_fft_workers: Optional[int] = None
 
     def cancel(self) -> None:
         self._cancelled = True
+
+    def _resolve_fft_workers(self) -> Optional[int]:
+        if self._resolved_fft_workers is not None:
+            return self._resolved_fft_workers
+        configured = self.config.fft_workers
+        if configured is not None:
+            self._resolved_fft_workers = None if configured <= 1 else configured
+            return self._resolved_fft_workers
+        cpu_count = os.cpu_count() or 1
+        if cpu_count <= 2:
+            self._resolved_fft_workers = None
+        else:
+            self._resolved_fft_workers = min(8, max(2, cpu_count // 2))
+        return self._resolved_fft_workers
+
+    def _effective_chunk_size(self, sample_rate: float) -> int:
+        if self._resolved_chunk_size is not None:
+            return self._resolved_chunk_size
+        chunk = tune_chunk_size(sample_rate, self.config.chunk_size)
+        self._resolved_chunk_size = chunk
+        return chunk
 
     def run(self, progress_sink: Optional[ProgressSink] = None) -> ProcessingResult:
         tracker = ProgressTracker(progress_sink)
@@ -472,7 +522,11 @@ class ProcessingPipeline:
                 raise ValueError("Bandwidth must be positive.")
 
             center_freq = self.config.center_freq
-            center_source = "config"
+            center_source = (
+                self.config.center_freq_source
+                if self.config.center_freq_source
+                else ("config" if center_freq is not None else "unavailable")
+            )
 
             def _describe_source(source: str) -> str:
                 if ":" in source:
@@ -489,6 +543,8 @@ class ProcessingPipeline:
                     )
                 center_freq = detection.value
                 center_source = detection.source
+                self.config.center_freq = center_freq
+                self.config.center_freq_source = center_source
                 LOG.info(
                     "Center frequency detected via %s.",
                     _describe_source(center_source),
@@ -545,7 +601,7 @@ class ProcessingPipeline:
                 total_input_samples / sample_rate if sample_rate > 0 else 0.0
             )
             estimated_audio_samples = max(duration_seconds * 48_000.0, 0.0)
-            chunk_size = max(1, self.config.chunk_size)
+            chunk_size = self._effective_chunk_size(sample_rate)
             estimated_chunks = (
                 int(math.ceil(total_input_samples / chunk_size))
                 if total_input_samples > 0
@@ -563,6 +619,17 @@ class ProcessingPipeline:
                     "Processing chunk size %d samples; input duration could not be estimated from metadata.",
                     chunk_size,
                 )
+            if chunk_size != self.config.chunk_size:
+                approx_duration = chunk_size / sample_rate if sample_rate > 0 else 0.0
+                LOG.info(
+                    "Adjusted chunk size from %d to %d samples (~%.3f s) for improved throughput.",
+                    self.config.chunk_size,
+                    chunk_size,
+                    approx_duration,
+                )
+            fft_workers = self._resolve_fft_workers()
+            if fft_workers:
+                LOG.info("Using up to %d FFT workers where supported.", fft_workers)
 
             phases: list[PhaseState] = [
                 PhaseState("ingest", "Ingest IQ", total_input_samples, unit="samples"),
@@ -590,7 +657,9 @@ class ProcessingPipeline:
             _check_cancel("initialization")
 
             oscillator = ComplexOscillator(freq_offset, sample_rate)
-            channel_filter = OverlapSaveFIR(taps, self.config.filter_block)
+            channel_filter = OverlapSaveFIR(
+                taps, self.config.filter_block, workers=fft_workers
+            )
             decimator = Decimator(decimation)
             decoder = create_decoder(
                 self.config.demod_mode,
@@ -611,7 +680,7 @@ class ProcessingPipeline:
 
             stage_snapshots: dict[str, tuple[np.ndarray, float]] = {}
 
-            with IQReader(self.config.in_path, self.config.chunk_size, self.config.iq_order) as reader:
+            with IQReader(self.config.in_path, chunk_size, self.config.iq_order) as reader:
                 iterator = iter(reader)
                 warmup = next(iterator, None)
                 if warmup is None:

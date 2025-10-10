@@ -10,8 +10,8 @@ Python CLI for extracting a narrowband FM (NFM) channel from large SDR++ baseban
 - Toggleable squelch, silence trimming, and AGC to match monitoring or archival workflows.
 - Interactive Tk/Matplotlib workspace that covers file discovery, spectrum preview (with adjustable FFT size, theme, smoothing, dynamic range) and a companion waterfall view for time-varying activity, plus selection and run-time monitoring.
 - Live progress bars for each DSP stage plus overall completion in both CLI and interactive flows.
-- Interactive Tk/Matplotlib workspace that covers file discovery, spectrum preview, selection, and run-time monitoring.
 - Optional PSD snapshots, channelized IQ dumps, and probe-only mode for diagnostics.
+- Built-in synthetic benchmarking harness (`--benchmark`) for repeatable throughput measurements.
 
 ## Installation (with uv)
 
@@ -71,12 +71,17 @@ Toggle “Analyze entire recording” in the GUI to average the full capture int
 - `--dump-iq PATH`: write channelized complex float32 IQ stream for debugging.
 - `--plot-stages PATH`: save PSD snapshots for key DSP stages to a PNG.
 - `--chunk N`: complex samples per processing block (default 1 048 576).
+- `--fft-workers N`: override automatic FFT worker selection for filter/demod stages.
 - `--filter-block N`: FFT overlap-save block size for the channel filter (default 65 536).
 - `--iq-order {iq,qi,iq_inv,qi_inv}`: interpret stereo order and polarity.
 - `--mix-sign {-1,1}`: manually override automatic mixer sign selection.
 - `--probe-only`: inspect derived parameters and exit without demodulating.
 - `--interactive`: launch the Tk/Matplotlib UI (no other args required).
 - `--interactive-seconds SEC`: snapshot duration for the interactive spectrum (default 2.0).
+- `--benchmark`: generate a synthetic capture, run the full pipeline, and report throughput; exits afterward.
+- `--benchmark-seconds SEC`: duration of the synthetic capture used for benchmarking (default 5).
+- `--benchmark-sample-rate HZ`: sample rate for the synthetic benchmark capture (default 2.5 MHz).
+- `--benchmark-offset HZ`: frequency offset between synthetic center and target (default 25 000 Hz).
 - `--verbose`: enable verbose logging (stack traces on failure when combined with `--verbose`).
 
 ## Examples
@@ -97,6 +102,9 @@ uv run iq-to-audio --in mw_capture.wav --ft 1010000 --demod am --bw 10000
 
 # 5-second CLI preview to validate settings
 uv run iq-to-audio --in capture.wav --ft 453112500 --preview 5
+
+# Synthetic benchmark at 2 MS/s with AM demod
+uv run iq-to-audio --benchmark --demod am --benchmark-sample-rate 2000000 --benchmark-seconds 3
 
 # LSB voice monitoring without squelch (keep noise floor)
 uv run iq-to-audio --in hf_voice.wav --ft 7090000 --demod lsb --no-squelch --no-agc
