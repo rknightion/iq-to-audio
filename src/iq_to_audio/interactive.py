@@ -328,21 +328,21 @@ class _InteractiveApp:
             options_frame,
             text="Adaptive squelch",
             variable=self.squelch_var,
-            command=self._on_toggle_squelch,
+            command=lambda: None,
         )
         self.squelch_check.grid(row=0, column=0, sticky="w", padx=4, pady=2)
         self.trim_check = ttk.Checkbutton(
             options_frame,
             text="Trim silences",
             variable=self.trim_var,
-            command=self._on_toggle_trim,
+            command=lambda: None,
         )
         self.trim_check.grid(row=0, column=1, sticky="w", padx=4, pady=2)
         self.agc_check = ttk.Checkbutton(
             options_frame,
             text="Automatic gain control",
             variable=self.agc_var,
-            command=self._on_toggle_agc,
+            command=lambda: None,
         )
         self.agc_check.grid(row=0, column=2, sticky="w", padx=4, pady=2)
 
@@ -897,7 +897,8 @@ class _InteractiveApp:
             if self.trim_check:
                 self.trim_check.state(["!disabled"])
         self.base_kwargs["silence_trim"] = self.trim_var.get()
-        self._schedule_refresh()
+        if full and self.snapshot_data:
+            self._schedule_refresh(full=True)
 
     def _reset_spectrum_defaults(self) -> None:
         self.nfft_var.set("131072")
@@ -911,7 +912,7 @@ class _InteractiveApp:
 
     def _on_toggle_trim(self) -> None:
         self.base_kwargs["silence_trim"] = self.trim_var.get()
-        self._schedule_refresh()
+        # No automatic refresh to avoid recompute surprises.
 
     def _on_toggle_agc(self) -> None:
         value = self.agc_var.get()
@@ -919,7 +920,7 @@ class _InteractiveApp:
         if demod in {"usb", "lsb", "ssb"}:
             self._preferred_agc = value
         self.base_kwargs["agc_enabled"] = value
-        self._schedule_refresh()
+        # No automatic refresh; manual preview needed.
 
     def _update_option_state(self) -> None:
         demod = (self.demod_var.get() or "nfm").lower()
