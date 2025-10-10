@@ -7,6 +7,8 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from .spectrum import compute_psd
+
 LOG = logging.getLogger(__name__)
 
 try:  # Lazy import to avoid forcing matplotlib when unused.
@@ -23,24 +25,6 @@ def ensure_matplotlib() -> None:
         raise RuntimeError(
             "matplotlib is required for plotting. Please install it (pip install matplotlib)."
         )
-
-
-def compute_psd(samples: np.ndarray, sample_rate: float, nfft: int = 1 << 18) -> tuple[np.ndarray, np.ndarray]:
-    """Compute single-sided PSD (dBFS) for complex samples."""
-    if samples.size == 0:
-        raise ValueError("Cannot plot PSD of empty signal.")
-    use = samples
-    if use.size > nfft:
-        use = use[:nfft]
-    window = np.hanning(use.size).astype(np.float64)
-    win_power = np.sum(window**2) / use.size
-    spectrum = np.fft.fftshift(np.fft.fft(use * window, n=nfft))
-    freqs = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / sample_rate))
-    psd = spectrum * np.conj(spectrum) / (use.size * sample_rate * win_power + 1e-18)
-    psd_db = 10.0 * np.log10(np.abs(psd) + 1e-18)
-    return freqs.astype(np.float64), psd_db.astype(np.float64)
-
-
 def plot_psd(
     freqs: np.ndarray,
     psd_db: np.ndarray,

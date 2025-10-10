@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import queue
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 import numpy as np
 
@@ -14,7 +15,8 @@ from .processing import ProcessingCancelled, ProcessingConfig
 from .preview import run_preview
 from .probe import SampleRateProbe, probe_sample_rate
 from .utils import detect_center_frequency
-from .visualize import SelectionResult, compute_psd, ensure_matplotlib
+from .spectrum import WaterfallResult, compute_psd, streaming_waterfall
+from .visualize import SelectionResult, ensure_matplotlib
 from .progress import PhaseState, ProgressSink
 
 LOG = logging.getLogger(__name__)
@@ -58,10 +60,35 @@ class InteractiveSessionResult:
     progress_sink: Optional[ProgressSink]
 
 
+MAX_PREVIEW_SAMPLES = 8_000_000  # Complex samples retained in memory for previews (~64 MB).
+
+
+@dataclass
+class SnapshotData:
+    path: Path
+    sample_rate: float
+    center_freq: float
+    probe: SampleRateProbe
+    seconds: float
+    mode: str
+    freqs: np.ndarray
+    psd_db: np.ndarray
+    waterfall: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]
+    samples: Optional[np.ndarray]
+    params: Dict[str, Any]
+    fft_frames: int
+
 def gather_snapshot(
-    config: ProcessingConfig, seconds: float = 2.0
-) -> tuple[np.ndarray, float, float, SampleRateProbe]:
-    """Read a short segment of IQ data for spectrum display."""
+    config: ProcessingConfig,
+    seconds: float = 2.0,
+    *,
+    nfft: int,
+    hop: Optional[int],
+    max_slices: int,
+    fft_workers: Optional[int],
+    max_in_memory_samples: int = MAX_PREVIEW_SAMPLES,
+) -> SnapshotData:
+    """Stream a preview segment of IQ data for interactive spectrum display."""
     probe = probe_sample_rate(config.in_path)
     sample_rate = probe.value
 
@@ -75,22 +102,94 @@ def gather_snapshot(
             )
         center_freq = detection.value
 
-    block_samples = int(sample_rate * seconds)
-    LOG.info(
-        "Gathering interactive snapshot: %.2f s (~%d complex samples).",
-        seconds,
-        block_samples,
+    total_samples = int(max(1, round(sample_rate * seconds)))
+    hop = max(1, hop or nfft // 4)
+    chunk_size = max(config.chunk_size, nfft)
+    retain = min(max_in_memory_samples, total_samples)
+    retain_buffer = (
+        np.empty(retain, dtype=np.complex64) if retain > 0 else None
     )
+    retain_pos = 0
+    consumed = 0
 
     from .processing import IQReader  # Local import to avoid circular refs.
 
-    with IQReader(config.in_path, block_samples, config.iq_order) as reader:
-        block = reader.read_block()
+    def _chunk_iter() -> Iterator[np.ndarray]:
+        nonlocal retain_pos, consumed
+        remaining = total_samples
+        with IQReader(config.in_path, chunk_size, config.iq_order) as reader:
+            for block in reader:
+                if remaining <= 0:
+                    break
+                use = block
+                if block.size > remaining:
+                    use = block[:remaining]
+                remaining -= use.size
+                consumed += use.size
+                if retain_buffer is not None and retain_pos < retain_buffer.size:
+                    take = min(retain_buffer.size - retain_pos, use.size)
+                    if take > 0:
+                        retain_buffer[retain_pos : retain_pos + take] = use[:take]
+                        retain_pos += take
+                yield use
+                if remaining <= 0:
+                    break
 
-    if block is None or block.size == 0:
-        raise RuntimeError("Failed to read samples for interactive snapshot.")
+    freqs, avg_psd, waterfall, frames = streaming_waterfall(
+        _chunk_iter(),
+        sample_rate,
+        nfft=nfft,
+        hop=hop,
+        max_slices=max_slices,
+        fft_workers=fft_workers,
+    )
 
-    return block, sample_rate, center_freq, probe
+    samples = None
+    if retain_buffer is not None and retain_pos > 0:
+        samples = retain_buffer[:retain_pos].copy()
+
+    params: Dict[str, Any] = {
+        "nfft": nfft,
+        "hop": hop,
+        "max_slices": max_slices,
+        "fft_workers": fft_workers,
+        "seconds": seconds,
+        "full_capture": False,
+        "max_in_memory_samples": max_in_memory_samples,
+    }
+    snapshot = SnapshotData(
+        path=config.in_path,
+        sample_rate=sample_rate,
+        center_freq=center_freq,
+        probe=probe,
+        seconds=consumed / sample_rate,
+        mode="samples" if samples is not None else "precomputed",
+        freqs=freqs,
+        psd_db=avg_psd,
+        waterfall=_waterfall_to_tuple(waterfall),
+        samples=samples,
+        params=params,
+        fft_frames=frames,
+    )
+    LOG.info(
+        "Snapshot complete: %.2f s processed (%d FFT frames, mode=%s).",
+        snapshot.seconds,
+        frames,
+        snapshot.mode,
+    )
+    return snapshot
+
+
+def _waterfall_to_tuple(
+    waterfall: Optional[WaterfallResult],
+) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    if waterfall is None:
+        return None
+    return (
+        np.asarray(waterfall.freqs, dtype=np.float64),
+        np.asarray(waterfall.times, dtype=np.float32),
+        np.asarray(waterfall.matrix, dtype=np.float32),
+    )
 
 
 def launch_interactive_session(
@@ -149,7 +248,7 @@ class _InteractiveApp:
         self.progress_sink: Optional[ProgressSink] = None
         self.toolbar: Optional[NavigationToolbar2Tk] = None
         self.plot_container: Optional[ttk.Frame] = None
-        self.snapshot_data: Optional[dict[str, object]] = None
+        self.snapshot_data: Optional[SnapshotData] = None
         self._refresh_job: Optional[str] = None
         self.demod_options = ("nfm", "am", "usb", "lsb", "ssb")
         self.color_themes: dict[str, dict[str, str]] = {
@@ -623,10 +722,10 @@ class _InteractiveApp:
                 messagebox.showerror("Preview failed", f"File not found: {path}")
             return
 
-        snapshot = self._parse_float(self.snapshot_var.get())
+        snapshot_seconds = self._parse_float(self.snapshot_var.get())
         full_capture = self.full_snapshot_var.get()
         if not full_capture:
-            if snapshot is None or snapshot <= 0:
+            if snapshot_seconds is None or snapshot_seconds <= 0:
                 self._set_status("Snapshot duration must be a positive number.", error=True)
                 if not auto:
                     messagebox.showerror(
@@ -636,24 +735,34 @@ class _InteractiveApp:
                 self.snapshot_var.set(f"{self.snapshot_seconds:.2f}")
                 return
         else:
-            snapshot = self.snapshot_seconds  # preserve last value for reuse even though unused
+            snapshot_seconds = self.snapshot_seconds  # maintain last value for reuse
 
         center_override = self._parse_float(self.center_var.get())
 
         config = self._build_config(path, center_override)
+        nfft = self._parse_int(self.nfft_var.get(), default=131072)
+        hop = max(1, nfft // 4)
+        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
+        fft_workers = self._fft_worker_count()
         try:
             if full_capture:
                 self._set_status("Computing spectrum for entire recording…", error=False)
-                freqs, psd_db, sample_rate, center_freq, probe, wf_times, wf_matrix = self._compute_full_psd(config)
-                block = None
-                precomputed = (freqs, psd_db)
-                waterfall = (freqs, wf_times, wf_matrix)
-            else:
-                block, sample_rate, center_freq, probe = gather_snapshot(
-                    config, seconds=snapshot
+                snapshot = self._compute_full_psd(
+                    config,
+                    nfft=nfft,
+                    hop=hop,
+                    max_slices=max_slices,
+                    fft_workers=fft_workers,
                 )
-                precomputed = None
-                waterfall = self._compute_waterfall_from_samples(block, sample_rate)
+            else:
+                snapshot = gather_snapshot(
+                    config,
+                    seconds=snapshot_seconds,
+                    nfft=nfft,
+                    hop=hop,
+                    max_slices=max_slices,
+                    fft_workers=fft_workers,
+                )
         except Exception as exc:
             LOG.error("Failed to gather preview: %s", exc)
             self._set_status(f"Preview failed: {exc}", error=True)
@@ -668,18 +777,23 @@ class _InteractiveApp:
                 self.confirm_btn.configure(state="disabled")
             if self.preview_btn:
                 self.preview_btn.configure(state="disabled")
-        self.center_freq = center_freq
-        self.probe = probe
-        self.sample_rate = sample_rate
-        self.snapshot_seconds = snapshot
-        self.center_var.set(f"{center_freq:.0f}")
+        self.center_freq = snapshot.center_freq
+        self.probe = snapshot.probe
+        self.sample_rate = snapshot.sample_rate
+        self.snapshot_seconds = snapshot.seconds
+        self.center_var.set(f"{snapshot.center_freq:.0f}")
+        precomputed = (snapshot.freqs, snapshot.psd_db)
+        waterfall = snapshot.waterfall
+        samples = snapshot.samples
+        self.snapshot_data = snapshot
         self._render_plot(
-            block,
-            sample_rate,
-            center_freq,
+            samples,
+            snapshot.sample_rate,
+            snapshot.center_freq,
             remember=True,
             precomputed=precomputed,
             waterfall=waterfall,
+            snapshot=snapshot,
         )
         self._set_status(
             "Drag over the channel of interest, then Confirm & Run.",
@@ -693,6 +807,7 @@ class _InteractiveApp:
         center_freq: float,
         *,
         remember: bool,
+        snapshot: Optional[SnapshotData] = None,
         precomputed: Optional[tuple[np.ndarray, np.ndarray]] = None,
         waterfall: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
     ) -> None:
@@ -789,24 +904,8 @@ class _InteractiveApp:
         )
         self._on_span_change(self.span_controller.selection)
         self.sample_rate_var.set(f"Sample rate: {sample_rate:,.2f} Hz")
-        if remember:
-            if precomputed is not None:
-                self.snapshot_data = {
-                    "mode": "precomputed",
-                    "freqs": freqs.copy(),
-                    "psd": psd_db.copy(),
-                    "sample_rate": sample_rate,
-                    "center_freq": center_freq,
-                    "waterfall": waterfall,
-                }
-            else:
-                self.snapshot_data = {
-                    "mode": "samples",
-                    "samples": samples.copy() if samples is not None else np.empty(0, dtype=np.complex64),
-                    "sample_rate": sample_rate,
-                    "center_freq": center_freq,
-                    "waterfall": waterfall,
-                }
+        if remember and snapshot is not None:
+            self.snapshot_data = snapshot
         self._update_waterfall_display(sample_rate, center_freq, waterfall)
 
     def _on_span_change(self, selection: SelectionResult) -> None:
@@ -998,66 +1097,98 @@ class _InteractiveApp:
         if self.snapshot_data is None:
             self._set_status("Load a preview before refreshing.", error=True)
             return
-        mode = self.snapshot_data.get("mode")
-        if mode == "samples":
-            # For snapshot mode, recompute with current settings.
-            self._set_status("Refreshing preview (snapshot)…", error=False)
-            self._schedule_refresh(full=True)
-        else:
-            # For precomputed mode, recompute waterfall but reuse PSD.
-            self._set_status("Refreshing waterfall…", error=False)
-            self._schedule_refresh(full=False, waterfall_only=True)
+        full_capture = bool(self.snapshot_data.params.get("full_capture", False))
+        self.full_snapshot_var.set(full_capture)
+        self._set_status("Refreshing preview…", error=False)
+        self._schedule_refresh(full=True)
 
     def _refresh_plot(self, *, full: bool = False, waterfall_only: bool = False) -> None:
         self._refresh_job = None
-        if not self.snapshot_data:
+        snapshot = self.snapshot_data
+        if snapshot is None:
             return
-        mode = self.snapshot_data.get("mode")
-        sample_rate = float(self.snapshot_data.get("sample_rate", 0.0))
-        center_freq = float(self.snapshot_data.get("center_freq", 0.0))
+        if not full and snapshot.waterfall is not None and waterfall_only:
+            self._update_waterfall_display(
+                snapshot.sample_rate, snapshot.center_freq, snapshot.waterfall
+            )
+            return
 
-        if mode == "precomputed":
-            freqs = np.asarray(self.snapshot_data.get("freqs"), dtype=np.float64)
-            psd = np.asarray(self.snapshot_data.get("psd"), dtype=np.float64)
-            waterfall_stored = self.snapshot_data.get("waterfall")
-            if waterfall_only and waterfall_stored is not None:
-                self._update_waterfall_display(sample_rate, center_freq, waterfall_stored)
-            else:
-                self._render_plot(
-                    None,
-                    sample_rate,
-                    center_freq,
-                    remember=False,
-                    precomputed=(freqs, psd),
-                    waterfall=waterfall_stored,
+        nfft = self._parse_int(self.nfft_var.get(), default=131072)
+        hop = max(1, nfft // 4)
+        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
+        fft_workers = self._fft_worker_count()
+
+        try:
+            if snapshot.mode == "samples" and snapshot.samples is not None:
+                freqs, psd, waterfall_res, frames = streaming_waterfall(
+                    [snapshot.samples],
+                    snapshot.sample_rate,
+                    nfft=nfft,
+                    hop=hop,
+                    max_slices=max_slices,
+                    fft_workers=fft_workers,
                 )
+                refreshed = SnapshotData(
+                    path=snapshot.path,
+                    sample_rate=snapshot.sample_rate,
+                    center_freq=snapshot.center_freq,
+                    probe=snapshot.probe,
+                    seconds=snapshot.seconds,
+                    mode="samples",
+                    freqs=freqs,
+                    psd_db=psd,
+                    waterfall=_waterfall_to_tuple(waterfall_res),
+                    samples=snapshot.samples,
+                    params={
+                        **snapshot.params,
+                        "nfft": nfft,
+                        "hop": hop,
+                        "max_slices": max_slices,
+                        "fft_workers": fft_workers,
+                    },
+                    fft_frames=frames,
+                )
+            else:
+                if snapshot.params.get("full_capture", False):
+                    config = self._build_config(snapshot.path, snapshot.center_freq)
+                    refreshed = self._compute_full_psd(
+                        config,
+                        nfft=nfft,
+                        hop=hop,
+                        max_slices=max_slices,
+                        fft_workers=fft_workers,
+                    )
+                else:
+                    config = self._build_config(snapshot.path, snapshot.center_freq)
+                    refreshed = gather_snapshot(
+                        config,
+                        seconds=float(snapshot.params.get("seconds", snapshot.seconds)),
+                        nfft=nfft,
+                        hop=hop,
+                        max_slices=max_slices,
+                        fft_workers=fft_workers,
+                        max_in_memory_samples=int(
+                            snapshot.params.get(
+                                "max_in_memory_samples", MAX_PREVIEW_SAMPLES
+                            )
+                        ),
+                    )
+        except Exception as exc:
+            LOG.error("Preview refresh failed: %s", exc)
+            self._set_status(f"Preview refresh failed: {exc}", error=True)
             return
 
-        # Snapshot mode uses raw samples.
-        samples = np.asarray(self.snapshot_data.get("samples"), dtype=np.complex64)
-        if full:
-            waterfall = self._compute_waterfall_from_samples(samples, sample_rate)
-            self._render_plot(
-                samples,
-                sample_rate,
-                center_freq,
-                remember=True,
-                precomputed=None,
-                waterfall=waterfall,
-            )
-        elif waterfall_only:
-            waterfall = self._compute_waterfall_from_samples(samples, sample_rate)
-            self._update_waterfall_display(sample_rate, center_freq, waterfall)
-        else:
-            waterfall = self._compute_waterfall_from_samples(samples, sample_rate)
-            self._render_plot(
-                samples,
-                sample_rate,
-                center_freq,
-                remember=False,
-                precomputed=None,
-                waterfall=waterfall,
-            )
+        self.snapshot_data = refreshed
+        self.snapshot_seconds = refreshed.seconds
+        self._render_plot(
+            refreshed.samples,
+            refreshed.sample_rate,
+            refreshed.center_freq,
+            remember=True,
+            snapshot=refreshed,
+            precomputed=(refreshed.freqs, refreshed.psd_db),
+            waterfall=refreshed.waterfall,
+        )
 
     def _zoom_to_selection(self) -> None:
         if self.ax_main is None or self.selection is None:
@@ -1240,43 +1371,6 @@ class _InteractiveApp:
             return default
         return value
 
-    def _compute_waterfall_from_samples(
-        self, samples: np.ndarray, sample_rate: float
-    ) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        if samples.size == 0:
-            return None
-        nfft = self._parse_int(self.nfft_var.get(), default=131072)
-        if samples.size < nfft:
-            freqs, psd = compute_psd(samples, sample_rate, nfft=nfft)
-            return freqs, np.array([0.0], dtype=np.float32), psd[None, :]
-        hop = max(nfft // 4, 1)
-        slices: list[np.ndarray] = []
-        times: list[float] = []
-        start = 0
-        idx = 0
-        while start + nfft <= samples.size:
-            window = samples[start : start + nfft]
-            freqs, psd = compute_psd(window, sample_rate, nfft=nfft)
-            slices.append(psd)
-            times.append(start / sample_rate)
-            start += hop
-            idx += 1
-        if not slices:
-            freqs, psd = compute_psd(samples, sample_rate, nfft=nfft)
-            return freqs, np.array([0.0], dtype=np.float32), psd[None, :]
-        matrix = np.vstack(slices)
-        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=400)
-        if matrix.shape[0] > max_slices:
-            step = math.ceil(matrix.shape[0] / max_slices)
-            reduced = []
-            reduced_times = []
-            for idx in range(0, matrix.shape[0], step):
-                reduced.append(np.mean(matrix[idx : idx + step], axis=0))
-                reduced_times.append(times[idx])
-            matrix = np.array(reduced)
-            times = reduced_times
-        return freqs, np.array(times, dtype=np.float32), matrix
-
     def _update_waterfall_display(
         self,
         sample_rate: float,
@@ -1351,6 +1445,13 @@ class _InteractiveApp:
             )
 
     @staticmethod
+    def _fft_worker_count() -> Optional[int]:
+        cpu_count = os.cpu_count() or 1
+        if cpu_count <= 1:
+            return None
+        return min(4, cpu_count)
+
+    @staticmethod
     def _format_float(value: Optional[float]) -> str:
         if value is None or value <= 0:
             return ""
@@ -1400,16 +1501,14 @@ class _InteractiveApp:
         return ProcessingConfig(in_path=path, **kwargs)
 
     def _compute_full_psd(
-        self, config: ProcessingConfig
-    ) -> tuple[
-        np.ndarray,
-        np.ndarray,
-        float,
-        float,
-        SampleRateProbe,
-        np.ndarray,
-        np.ndarray,
-    ]:
+        self,
+        config: ProcessingConfig,
+        *,
+        nfft: int,
+        hop: int,
+        max_slices: int,
+        fft_workers: Optional[int],
+    ) -> SnapshotData:
         probe = probe_sample_rate(config.in_path)
         sample_rate = probe.value
         center_freq = config.center_freq
@@ -1421,51 +1520,60 @@ class _InteractiveApp:
                 )
             center_freq = detection.value
 
-        nfft = self._parse_int(self.nfft_var.get(), default=131072)
         chunk_samples = max(config.chunk_size, nfft)
+        consumed = 0
+
         try:
             from .processing import IQReader
         except ImportError as exc:  # pragma: no cover - safety
             raise RuntimeError(f"Interactive mode missing IQReader: {exc}") from exc
 
-        acc_psd: Optional[np.ndarray] = None
-        freqs_ref: Optional[np.ndarray] = None
-        slices: list[np.ndarray] = []
-        times: list[float] = []
-        chunks = 0
-        with IQReader(config.in_path, chunk_samples, config.iq_order) as reader:
-            for block in reader:
-                if block is None or block.size == 0:
-                    break
-                freqs, psd = compute_psd(block, sample_rate, nfft=nfft)
-                if acc_psd is None:
-                    acc_psd = psd
-                    freqs_ref = freqs
-                else:
-                    acc_psd += psd
-                slices.append(psd)
-                times.append(block.size * chunks / sample_rate)
-                chunks += 1
-                if chunks % 4 == 0:
-                    self._set_status(f"Averaging PSD chunk {chunks}…", error=False)
-                    self._pump_events()
+        def _chunk_iter() -> Iterator[np.ndarray]:
+            nonlocal consumed
+            with IQReader(config.in_path, chunk_samples, config.iq_order) as reader:
+                for block in reader:
+                    if block is None or block.size == 0:
+                        break
+                    consumed += block.size
+                    yield block
 
-        if acc_psd is None or freqs_ref is None or chunks == 0:
-            raise RuntimeError("Recording did not contain any IQ samples to analyze.")
+        freqs, avg_psd, waterfall, frames = streaming_waterfall(
+            _chunk_iter(),
+            sample_rate,
+            nfft=nfft,
+            hop=hop,
+            max_slices=max_slices,
+            fft_workers=fft_workers,
+        )
 
-        avg_psd = acc_psd / float(chunks)
-        waterfall_matrix = np.vstack(slices)
-        max_slices = self._parse_int(self.waterfall_slices_var.get(), default=200)
-        if waterfall_matrix.shape[0] > max_slices:
-            step = math.ceil(waterfall_matrix.shape[0] / max_slices)
-            reduced = []
-            reduced_times = []
-            for idx in range(0, waterfall_matrix.shape[0], step):
-                reduced.append(np.mean(waterfall_matrix[idx : idx + step], axis=0))
-                reduced_times.append(times[idx])
-            waterfall_matrix = np.array(reduced)
-            times = reduced_times
-        return freqs_ref, avg_psd, sample_rate, center_freq, probe, np.array(times, dtype=np.float32), waterfall_matrix
+        params: Dict[str, Any] = {
+            "nfft": nfft,
+            "hop": hop,
+            "max_slices": max_slices,
+            "fft_workers": fft_workers,
+            "seconds": consumed / sample_rate if sample_rate > 0 else 0.0,
+            "full_capture": True,
+        }
+        snapshot = SnapshotData(
+            path=config.in_path,
+            sample_rate=sample_rate,
+            center_freq=center_freq,
+            probe=probe,
+            seconds=consumed / sample_rate if sample_rate > 0 else 0.0,
+            mode="precomputed",
+            freqs=freqs,
+            psd_db=avg_psd,
+            waterfall=_waterfall_to_tuple(waterfall),
+            samples=None,
+            params=params,
+            fft_frames=frames,
+        )
+        LOG.info(
+            "Full-record spectrum gathered: %.2f s analysed (%d FFT frames).",
+            snapshot.seconds,
+            frames,
+        )
+        return snapshot
 
     def _pump_events(self) -> None:
         try:

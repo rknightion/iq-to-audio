@@ -15,24 +15,9 @@ High Priority
   * Capture benchmarking harness (CLI flag + synthetic captures) so future LLM-assisted changes can validate throughput regressions automatically.
 
 
-Just now when trying to generate a 30s preview graph/waterfall for a 4GB wav file the system was processing for a few minutes (getting upwards of 11gb memory usage) and then it crashed out with:
-2025-10-10 13:57:04,353 INFO iq_to_audio.interactive: Gathering interactive snapshot: 30.00 s (~300000000 complex samples).
-Tcl_AsyncDelete: async handler deleted by the wrong thread
-
-We need to fix that underlying error but more broadly we need to significantly improve how the fft and waterfalls are generated so they are more performant and we get bound by disk IO rather than by cpu/memory
-I dont know if making a preview file first would help here (as dont think the whole file needs reading right now) but previously you mentioned some optimisations that can be made such as:
-- Optimize spectrum/waterfall generation:
-  * Add optional multi-threaded FFT via `np.fft.fft(..., workers=N)`; document NumPy version requirements and fallback path.
-  * Introduce parallel PSD averaging for full-capture previews using `ProcessPoolExecutor` with bounded queues; ensure deterministic folding of partial results.
-  * Rework waterfall generation around `scipy.signal.stft` or batched FFT calls to minimize Python loops; profile memory usage and chunk sizing.
-  * Potentially Prototype a reader/worker pipeline where IQ blocks are streamed through a `queue.Queue` to background processes, keeping disk and CPU busy simultaneously.
-
-So any of those that will improve performance or additional features/functionality that can improve things would be very useful I think right now the process is single threaded which could be improved upon and based on what you mentioned previously there's plenty of other improvements that can be made also.
 
 
 
 
-  * Capture benchmarking harness (CLI flag + synthetic captures) so future LLM-assisted changes can validate throughput regressions automatically.
-
-
-  Destination chooser for processed outputs
+  Something is up with our progress bar. While it does update I saw it get to 2% I then got completed (this was on the preview path I should add) and trhe file was generated but our preview box stayed there and when I closed it it closed the whole app.
+  Also, we should add a box to select a destination for the outputs right now they're saved in the same place as the source location but users might want a different destination for the processed files (both previews and final processing both can go to the same output dir)
