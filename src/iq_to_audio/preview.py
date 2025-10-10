@@ -4,12 +4,15 @@ import os
 import shutil
 import subprocess
 import tempfile
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from .processing import FFMPEG_HINT, ProcessingConfig, ProcessingPipeline, ProcessingResult
 from .progress import ProgressSink
+
+LOG = logging.getLogger(__name__)
 
 
 def _trim_input_file(source: Path, seconds: float) -> Path:
@@ -36,6 +39,7 @@ def _trim_input_file(source: Path, seconds: float) -> Path:
         "copy",
         str(tmp),
     ]
+    LOG.info("Creating %.2f s preview snippet from %s", seconds, source)
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as exc:
@@ -77,4 +81,5 @@ def run_preview(
             os.remove(preview_input)
         except OSError:
             pass
+    LOG.info("Preview DSP complete (%s)", preview_output)
     return result, preview_output

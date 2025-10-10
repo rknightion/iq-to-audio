@@ -606,11 +606,11 @@ class ProcessingPipeline:
                     _check_cancel("probe-only")
                     tracker.advance("ingest", warmup.size)
                     report("Probe-only inspection complete")
-                decoder.finalize()
-                iq_writer.close()
-                return ProcessingResult(
-                    sample_rate_probe=probe,
-                    center_freq=center_freq,
+                    decoder.finalize()
+                    iq_writer.close()
+                    return ProcessingResult(
+                        sample_rate_probe=probe,
+                        center_freq=center_freq,
                         target_freq=target_freq,
                         freq_offset=freq_offset,
                         decimation=decimation,

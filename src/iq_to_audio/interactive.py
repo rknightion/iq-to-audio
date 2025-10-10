@@ -87,6 +87,7 @@ def gather_snapshot(
     max_slices: int,
     fft_workers: Optional[int],
     max_in_memory_samples: int = MAX_PREVIEW_SAMPLES,
+    progress_cb: Optional[Callable[[float, float], None]] = None,
 ) -> SnapshotData:
     """Stream a preview segment of IQ data for interactive spectrum display."""
     probe = probe_sample_rate(config.in_path)
@@ -111,11 +112,12 @@ def gather_snapshot(
     )
     retain_pos = 0
     consumed = 0
+    last_report = -1.0
 
     from .processing import IQReader  # Local import to avoid circular refs.
 
     def _chunk_iter() -> Iterator[np.ndarray]:
-        nonlocal retain_pos, consumed
+        nonlocal retain_pos, consumed, last_report
         remaining = total_samples
         with IQReader(config.in_path, chunk_size, config.iq_order) as reader:
             for block in reader:
@@ -131,6 +133,15 @@ def gather_snapshot(
                     if take > 0:
                         retain_buffer[retain_pos : retain_pos + take] = use[:take]
                         retain_pos += take
+                if progress_cb:
+                    try:
+                        frac = min(consumed / total_samples, 1.0)
+                        if frac - last_report >= 0.02 or frac >= 0.999:
+                            seconds_done = consumed / sample_rate
+                            progress_cb(seconds_done, frac)
+                            last_report = frac
+                    except Exception:
+                        pass
                 yield use
                 if remaining <= 0:
                     break
@@ -171,6 +182,11 @@ def gather_snapshot(
         params=params,
         fft_frames=frames,
     )
+    if progress_cb:
+        try:
+            progress_cb(snapshot.seconds, 1.0)
+        except Exception:
+            pass
     LOG.info(
         "Snapshot complete: %.2f s processed (%d FFT frames, mode=%s).",
         snapshot.seconds,
@@ -805,6 +821,7 @@ class _InteractiveApp:
             hop=hop,
             max_slices=max_slices,
             fft_workers=fft_workers,
+            max_in_memory_samples=MAX_PREVIEW_SAMPLES,
         )
 
     def _start_snapshot_thread(
@@ -828,6 +845,15 @@ class _InteractiveApp:
         if self.load_preview_button:
             self.load_preview_button.configure(state="disabled")
 
+        if full_capture:
+            self._threadsafe_status(
+                "Analyzing entire recording… this may take a moment.", error=False
+            )
+        else:
+            self._threadsafe_status(
+                f"Preparing preview (~{snapshot_seconds:.2f} s)…", error=False
+            )
+
         def worker() -> None:
             try:
                 if full_capture:
@@ -837,7 +863,7 @@ class _InteractiveApp:
                         hop=hop,
                         max_slices=max_slices,
                         fft_workers=fft_workers,
-                        status_cb=lambda msg: self._threadsafe_status(msg),
+                        status_cb=lambda msg: self._threadsafe_status(msg, error=False),
                     )
                 else:
                     snapshot = gather_snapshot(
@@ -848,6 +874,10 @@ class _InteractiveApp:
                         max_slices=max_slices,
                         fft_workers=fft_workers,
                         max_in_memory_samples=max_in_memory_samples,
+                        progress_cb=lambda seconds_done, frac: self._threadsafe_status(
+                            f"Gathered {seconds_done:.1f} s of preview ({frac * 100:4.1f}%)…",
+                            error=False,
+                        ),
                     )
             except Exception as exc:
                 LOG.error("Failed to gather preview: %s", exc)
@@ -1743,6 +1773,12 @@ class _InteractiveApp:
         except ImportError as exc:  # pragma: no cover - safety
             raise RuntimeError(f"Interactive mode missing IQReader: {exc}") from exc
 
+        if status_cb:
+            try:
+                status_cb("Reading full recording for spectrum analysis…")
+            except Exception:
+                pass
+
         def _chunk_iter() -> Iterator[np.ndarray]:
             nonlocal consumed
             chunk_index = 0
@@ -1753,7 +1789,10 @@ class _InteractiveApp:
                     consumed += block.size
                     chunk_index += 1
                     if status_cb and chunk_index % 4 == 0:
-                        status_cb(f"Averaging PSD chunk {chunk_index}…")
+                        try:
+                            status_cb(f"Averaging PSD chunk {chunk_index}…")
+                        except Exception:
+                            pass
                     yield block
 
         freqs, avg_psd, waterfall, frames = streaming_waterfall(
@@ -1792,6 +1831,11 @@ class _InteractiveApp:
             snapshot.seconds,
             frames,
         )
+        if status_cb:
+            try:
+                status_cb("Full-record spectrum ready.")
+            except Exception:
+                pass
         return snapshot
 
     def _on_waterfall_pick(self, freq_hz: float) -> None:
@@ -2129,6 +2173,19 @@ class TkProgressSink(ProgressSink):
             for bar in self._bars.values():
                 bar["var"].set(0.0)
                 bar["percent"].set("0.0%")
+        if self._window is not None:
+            try:
+                self._window.deiconify()
+                self._window.lift()
+                self._window.attributes("-topmost", True)
+                self._window.after(200, lambda: self._window.attributes("-topmost", False))
+                self._window.focus_force()
+            except Exception:  # pragma: no cover - best effort
+                pass
+            try:
+                self._window.update_idletasks()
+            except Exception:
+                pass
         self._cancelled = False
 
     def _handle_advance(
@@ -2157,6 +2214,7 @@ class TkProgressSink(ProgressSink):
         self._closed = True
         if self._window is not None:
             try:
+                self._window.grab_release()
                 self._window.destroy()
             except tk.TclError:
                 pass
