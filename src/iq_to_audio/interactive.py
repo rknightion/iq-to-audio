@@ -750,6 +750,7 @@ class _InteractiveApp:
             self._set_status("Enter center frequency manually.", error=True)
             return
         self.center_var.set(f"{detection.value:.0f}")
+        self.center_freq = detection.value
         self._set_center_source(detection.source or "filename")
         self.base_kwargs["center_freq"] = detection.value
         friendly = self._describe_center_source(detection.source)
@@ -760,6 +761,7 @@ class _InteractiveApp:
         value = self._parse_float(self.center_var.get())
         if value is not None and value > 0:
             self.base_kwargs["center_freq"] = value
+            self.center_freq = value
 
     def _load_preview(self, auto: bool = False) -> None:
         path_text = self.file_var.get().strip()
@@ -1706,7 +1708,12 @@ class _InteractiveApp:
 
     def _build_config(self, path: Path, center_override: Optional[float]) -> ProcessingConfig:
         kwargs = dict(self.base_kwargs)
-        kwargs["center_freq"] = center_override
+        center_value = center_override
+        if center_value is None or center_value <= 0:
+            parsed = self._parse_float(self.center_var.get())
+            if parsed is not None and parsed > 0:
+                center_value = parsed
+        kwargs["center_freq"] = center_value
         demod = (self.demod_var.get() or kwargs.get("demod_mode", "nfm")).lower()
         kwargs["demod_mode"] = demod
         kwargs["silence_trim"] = self.trim_var.get()
@@ -1714,13 +1721,15 @@ class _InteractiveApp:
         kwargs["agc_enabled"] = self.agc_var.get()
         self.base_kwargs.update(
             {
-                "center_freq": center_override,
+                "center_freq": center_value,
                 "demod_mode": demod,
                 "silence_trim": kwargs["silence_trim"],
                 "squelch_enabled": kwargs["squelch_enabled"],
                 "agc_enabled": kwargs["agc_enabled"],
             }
         )
+        if center_value is not None and center_value > 0:
+            self.center_freq = center_value
         target_freq = (
             self.selection.center_freq
             if self.selection is not None
