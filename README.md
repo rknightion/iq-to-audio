@@ -4,12 +4,14 @@ Python CLI for extracting a narrowband FM (NFM) channel from large SDR++ baseban
 
 ## Features
 
-- Parses SDR++ filenames to recover center frequency automatically (override with `--fc`).
-- Probes true sample rate via `ffprobe -ignore_length 1`, falling back to libsndfile headers.
-- Streams multi‑gigabyte recordings without loading them into memory.
-- Channelizes with an FFT-based FIR low-pass/decimator and quadrature FM demodulator.
-- Applies configurable de-emphasis and adaptive squelch (or user threshold).
-- Outputs resampled, limiter-protected mono audio via FFmpeg; optional channelized IQ dump for debugging.
+- Streams multi‑gigabyte SDR++ recordings without loading them into memory.
+- Auto-recovers center frequency from filenames (override with `--fc`) and probes true sample rate via `ffprobe`.
+- Modular decoding pipeline with pluggable stages supporting NFM, AM, USB, and LSB demodulation.
+- Toggleable squelch, silence trimming, and AGC to match monitoring or archival workflows.
+- Interactive Tk/Matplotlib workspace that covers file discovery, spectrum preview (with adjustable FFT size, theme, smoothing, dynamic range) and a companion waterfall view for time-varying activity, plus selection and run-time monitoring.
+- Live progress bars for each DSP stage plus overall completion in both CLI and interactive flows.
+- Interactive Tk/Matplotlib workspace that covers file discovery, spectrum preview, selection, and run-time monitoring.
+- Optional PSD snapshots, channelized IQ dumps, and probe-only mode for diagnostics.
 
 ## Installation (with uv)
 
@@ -27,7 +29,11 @@ source .venv/bin/activate  # or uv run --project .
 uv pip install -e .
 ```
 
-FFmpeg must be on your `PATH` for ingestion and WAV output.
+FFmpeg must be on your `PATH` for ingestion and WAV output. Install the optional extras when needed:
+
+- `uv run --extra interactive iq-to-audio --interactive`: pulls in Matplotlib for the GUI/plotting workflow.
+- `uv run --group dev pytest`: installs development tooling (pytest) for local testing.
+- System Tk packages (`python3-tk`, `python-tk@3.14`, etc.) are required for the interactive GUI; see your OS package manager.
 
 ## Usage
 
@@ -39,28 +45,71 @@ uv run iq-to-audio \
   --squelch -45
 ```
 
-Key options:
+The CLI prints per-stage progress bars (ingest, channelize, demodulate, encode) and an overall percentage. The interactive GUI shows matching progress in a dedicated window once processing begins.
 
-- `--fc` override center frequency if filename parsing fails.
-- `--fs-ch` choose the complex channel rate before demod (default 96 kHz).
-- `--deemph` set the de-emphasis time constant in microseconds.
-- `--silence-trim` drop chunks below the squelch threshold instead of inserting quiet audio.
-- `--dump-iq` write intermediate channelized IQ as `cf32` for debugging.
-- `--probe-only` inspect derived parameters without demodulating.
-- `--verbose` enable detailed logging for DSP stages.
-- `--interactive` open a matplotlib spectrum viewer to choose the RF channel visually (drag to set span, double-click or press Enter to confirm). Adjust snapshot duration with `--interactive-seconds`.
-- `--plot-stages` save FFT snapshots (PNG) for the first chunk at key DSP stages (input, mixed, filtered, decimated, demod, deemphasis, squelch) for debugging and documentation.
+Interactive mode now exposes demod selection, squelch/silence trimming toggles, AGC control (for SSB modes), spectrum tools (FFT size, smoothing, dynamic range, color themes, pan/zoom toolbar), and an auto-launched waterfall so you can dial in weak signals just like an SDR waterfall.
+Toggle “Analyze entire recording” in the GUI to average the full capture into the preview spectrum when you need maximum frequency resolution.
+
+## CLI Arguments
+
+- `--in PATH` (required unless `--interactive`): SDR++ baseband WAV input.
+- `--ft HZ`: target RF frequency; required unless using interactive selection.
+- `--bw HZ`: channel bandwidth (default 12 500).
+- `--fc HZ`: override center frequency if filename parsing fails.
+- `--fs-ch HZ`: complex channel sample rate before demod (default 96 000).
+- `--demod MODE`: choose demodulator (`nfm`, `am`, `usb`, `lsb`, `ssb` alias for `usb`).
+- `--deemph µs`: FM deemphasis time constant (default 300).
+- `--squelch dBFS`: fixed squelch threshold; omit for adaptive noise tracking.
+- `--silence-trim`: drop gated sections instead of inserting quiet audio.
+- `--no-squelch`: disable gating entirely (always keep audio, including static).
+- `--no-agc`: disable automatic gain control in supported demodulators.
+- `--out PATH`: override output WAV (default `audio_<FT>_48k.wav` beside input).
+- `--dump-iq PATH`: write channelized complex float32 IQ stream for debugging.
+- `--plot-stages PATH`: save PSD snapshots for key DSP stages to a PNG.
+- `--chunk N`: complex samples per processing block (default 1 048 576).
+- `--filter-block N`: FFT overlap-save block size for the channel filter (default 65 536).
+- `--iq-order {iq,qi,iq_inv,qi_inv}`: interpret stereo order and polarity.
+- `--mix-sign {-1,1}`: manually override automatic mixer sign selection.
+- `--probe-only`: inspect derived parameters and exit without demodulating.
+- `--interactive`: launch the Tk/Matplotlib UI (no other args required).
+- `--interactive-seconds SEC`: snapshot duration for the interactive spectrum (default 2.0).
+- `--verbose`: enable verbose logging (stack traces on failure when combined with `--verbose`).
+
+## Examples
+
+```bash
+# Standard CLI demodulation with adaptive squelch
+uv run iq-to-audio --in capture.wav --ft 453112500 --bw 9000
+
+# Probe-only metadata inspection
+uv run iq-to-audio --in capture.wav --ft 453112500 --probe-only
+
+# Dump channelized IQ and generate stage plots for debugging
+uv run iq-to-audio --in capture.wav --ft 453112500 \
+  --dump-iq debug.cf32 --plot-stages plots/stages.png
+
+# Medium-wave AM broadcast
+uv run iq-to-audio --in mw_capture.wav --ft 1010000 --demod am --bw 10000
+
+# LSB voice monitoring without squelch (keep noise floor)
+uv run iq-to-audio --in hf_voice.wav --ft 7090000 --demod lsb --no-squelch --no-agc
+
+# Interactive GUI workflow (requires matplotlib extra + Tk)
+uv run --extra interactive iq-to-audio --interactive
+```
 
 ## Testing
 
 ```bash
-uv run --with dev pytest
+uv run --group dev pytest
 ```
 
 ## Notes
 
-- FFmpeg is used both for resilient WAV ingestion (`-ignore_length 1`) and final WAV encoding/resampling to 48 kHz.
-- Processing defaults target land-mobile style NFM voice (7–12.5 kHz bandwidth) but can be tuned for other narrowband signals.
-- The adaptive squelch estimates noise power while closed and opens ~6 dB above the noise floor; provide `--squelch` to set a fixed threshold.
-- Sample rate probing uses ffprobe when available, falling back to libsndfile metadata and finally the standard library `wave` reader.
-- Matplotlib powers optional visualization; install a backend (e.g. Tk, Qt) when using the interactive picker on headless systems.
+- FFmpeg handles resilient WAV ingestion (`-ignore_length 1`) and resampling/encoding to 48 kHz output.
+- Missing `ffmpeg`/`ffprobe` executables now yield actionable installation hints instead of generic failures.
+- The waterfall view mirrors SDR++: adjust colormap, slice density, or dynamic range, and click directly on a signal trace to retune the main selector.
+- Progress bars never exceed 100 %: totals are estimated from file size, decimation, and audio duration, then clamped.
+- The decoder stack is modular—new demodulators can be added under `iq_to_audio/decoders` with minimal pipeline changes.
+- Interactive spectrum controls (FFT size, smoothing, theme, dynamic range) mirror SDR-style UX; use the toolbar to pan/zoom and highlight weak signals.
+- Ensure system Tk libraries are installed before launching `--interactive`; missing dependencies trigger a helpful installation hint.

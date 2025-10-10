@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .processing import ProcessingConfig, ProcessingPipeline
+from .progress import TqdmProgressSink
 
 LOG = logging.getLogger("iq_to_audio")
 
@@ -29,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--in",
         dest="input_path",
-        required=True,
+        required=False,
         type=Path,
         help="Input SDR++ baseband WAV file.",
     )
@@ -60,6 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Desired complex channel sample rate prior to demod (default: 96 kHz).",
     )
     parser.add_argument(
+        "--demod",
+        dest="demod",
+        choices=["nfm", "am", "usb", "lsb", "ssb"],
+        default="nfm",
+        help="Demodulator to use (nfm, am, usb, lsb, ssb=alias for usb). Default: nfm.",
+    )
+    parser.add_argument(
         "--deemph",
         dest="deemph_us",
         type=positive_float,
@@ -77,6 +85,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="silence_trim",
         action="store_true",
         help="Drop chunks that fall below squelch threshold.",
+    )
+    parser.add_argument(
+        "--no-squelch",
+        dest="squelch_enabled",
+        action="store_false",
+        help="Disable squelch gating (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-agc",
+        dest="agc_enabled",
+        action="store_false",
+        help="Disable automatic gain control in supported demodulators.",
     )
     parser.add_argument(
         "--out",
@@ -149,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable debug logging.",
     )
+    parser.set_defaults(squelch_enabled=True, agc_enabled=True)
     return parser
 
 
@@ -156,6 +177,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if not args.interactive and args.input_path is None:
+        parser.error("--in is required unless --interactive is enabled.")
     if not args.interactive and args.target_freq is None:
         parser.error("--ft is required unless --interactive is enabled.")
 
@@ -164,15 +187,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    config = ProcessingConfig(
-        in_path=args.input_path,
+    base_kwargs = dict(
         target_freq=args.target_freq or 0.0,
         bandwidth=args.bandwidth,
         center_freq=args.center_freq,
+        demod_mode=args.demod,
         fs_ch_target=args.fs_ch,
         deemph_us=args.deemph_us,
         squelch_dbfs=args.squelch_dbfs,
         silence_trim=args.silence_trim,
+        squelch_enabled=args.squelch_enabled,
+        agc_enabled=args.agc_enabled,
         output_path=args.output_path,
         dump_iq_path=args.dump_iq,
         chunk_size=args.chunk_size,
@@ -183,26 +208,45 @@ def main(argv: Optional[list[str]] = None) -> int:
         plot_stages_path=args.plot_stages,
     )
 
+    progress_sink = None
+
     if args.interactive:
         try:
-            from .interactive import interactive_select
+            from .interactive import launch_interactive_session
         except ImportError as exc:  # pragma: no cover - user feedback only
             LOG.error("Interactive mode unavailable: %s", exc)
             return 1
-        outcome = interactive_select(config, seconds=args.interactive_seconds)
-        config.center_freq = outcome.center_freq
-        config.target_freq = outcome.target_freq
-        config.bandwidth = outcome.bandwidth
-        LOG.info(
-            "Interactive selection: center %.0f Hz, target %.0f Hz, bandwidth %.0f Hz",
-            outcome.center_freq,
-            outcome.target_freq,
-            outcome.bandwidth,
+        try:
+            session = launch_interactive_session(
+                input_path=args.input_path,
+                base_kwargs=base_kwargs,
+                snapshot_seconds=args.interactive_seconds,
+            )
+            config = session.config
+            progress_sink = session.progress_sink
+        except KeyboardInterrupt:
+            LOG.info("Interactive session cancelled.")
+            return 0
+        except Exception as exc:
+            LOG.error("Interactive session failed: %s", exc)
+            if args.verbose:
+                LOG.exception("Interactive error details")
+            return 1
+    else:
+        config = ProcessingConfig(
+            in_path=args.input_path,
+            **base_kwargs,
         )
 
     pipeline = ProcessingPipeline(config)
+    if progress_sink is None:
+        try:
+            progress_sink = TqdmProgressSink()
+        except RuntimeError as exc:
+            LOG.warning("Progress reporting disabled: %s", exc)
+            progress_sink = None
     try:
-        result = pipeline.run()
+        result = pipeline.run(progress_sink=progress_sink)
     except Exception as exc:  # pragma: no cover - ensure user friendly exit
         LOG.error("Processing failed: %s", exc)
         if args.verbose:

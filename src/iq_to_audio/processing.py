@@ -12,11 +12,18 @@ from typing import Dict, Iterator, Optional, Tuple
 import numpy as np
 from scipy import signal
 
+from .decoders import create_decoder
 from .probe import SampleRateProbe, probe_sample_rate
 from .utils import parse_center_frequency
 from .visualize import save_stage_psd
+from .progress import PhaseState, ProgressTracker, ProgressSink
 
 LOG = logging.getLogger(__name__)
+
+FFMPEG_HINT = (
+    "ffmpeg executable not found. Install FFmpeg (e.g., `sudo apt install ffmpeg`, "
+    "`brew install ffmpeg`, or download from https://ffmpeg.org/download.html) and ensure it is on PATH."
+)
 
 
 @dataclass
@@ -25,10 +32,13 @@ class ProcessingConfig:
     target_freq: float = 0.0
     bandwidth: float = 12_500.0
     center_freq: Optional[float] = None
+    demod_mode: str = "nfm"
     fs_ch_target: float = 96_000.0
     deemph_us: float = 300.0
     squelch_dbfs: Optional[float] = None
     silence_trim: bool = False
+    squelch_enabled: bool = True
+    agc_enabled: bool = True
     output_path: Optional[Path] = None
     dump_iq_path: Optional[Path] = None
     chunk_size: int = 1_048_576  # complex samples per block (~0.1 s @ 10 MS/s)
@@ -51,7 +61,7 @@ class IQReader:
 
     def __enter__(self) -> "IQReader":
         if not shutil.which("ffmpeg"):
-            raise RuntimeError("ffmpeg is required to read SDR++ baseband recordings.")
+            raise RuntimeError(FFMPEG_HINT)
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -68,11 +78,16 @@ class IQReader:
             "2",
             "-",
         ]
-        self.proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:  # pragma: no cover - dependency missing at runtime
+            raise RuntimeError(FFMPEG_HINT) from exc
+        except OSError as exc:  # pragma: no cover - runtime failure launching ffmpeg
+            raise RuntimeError(f"Failed to launch ffmpeg: {exc}") from exc
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -213,96 +228,6 @@ class Decimator:
         return decimated
 
 
-class QuadratureDemod:
-    def __init__(self):
-        self.prev = np.complex64(1 + 0j)
-
-    def process(self, samples: np.ndarray) -> np.ndarray:
-        if samples.size == 0:
-            return np.empty(0, dtype=np.float32)
-        prevs = np.concatenate(([self.prev], samples[:-1]))
-        prod = samples * np.conj(prevs)
-        demod = np.angle(prod).astype(np.float32)
-        self.prev = samples[-1]
-        return demod
-
-
-class DeemphasisFilter:
-    def __init__(self, tau_us: float, sample_rate: float):
-        tau_sec = max(tau_us * 1e-6, 1e-6)
-        alpha = math.exp(-1.0 / (sample_rate * tau_sec))
-        self.alpha = alpha
-        self.beta = 1.0 - alpha
-        self.state = 0.0
-
-    def process(self, samples: np.ndarray) -> np.ndarray:
-        if samples.size == 0:
-            return samples
-        out = np.empty_like(samples, dtype=np.float32)
-        state = self.state
-        alpha = self.alpha
-        beta = self.beta
-        for idx, sample in enumerate(samples):
-            state = alpha * state + beta * sample
-            out[idx] = state
-        self.state = state
-        return out
-
-
-class SquelchGate:
-    def __init__(
-        self,
-        sample_rate: float,
-        threshold_dbfs: Optional[float],
-        silence_trim: bool,
-        hold_ms: float = 120.0,
-    ):
-        self.sample_rate = sample_rate
-        self.manual_threshold = threshold_dbfs
-        self.silence_trim = silence_trim
-        self.hold_samples = int(sample_rate * hold_ms / 1000.0)
-        self.hold_counter = 0
-        self.noise_dbfs: Optional[float] = None
-        self.open = False
-
-    def process(self, samples: np.ndarray) -> tuple[np.ndarray, float, float, bool]:
-        if samples.size == 0:
-            return samples, self.manual_threshold or -120.0, -120.0, False
-
-        rms = math.sqrt(float(np.mean(samples.astype(np.float64) ** 2)) + 1e-18)
-        dbfs = 20.0 * math.log10(rms + 1e-12)
-
-        if self.manual_threshold is None:
-            if self.noise_dbfs is None:
-                self.noise_dbfs = dbfs
-            elif not self.open:
-                self.noise_dbfs = 0.95 * self.noise_dbfs + 0.05 * dbfs
-            threshold = (self.noise_dbfs or dbfs) + 6.0
-        else:
-            threshold = self.manual_threshold
-
-        dropped = False
-        if dbfs >= threshold:
-            self.open = True
-            self.hold_counter = self.hold_samples
-        else:
-            if self.hold_counter > 0:
-                self.hold_counter = max(0, self.hold_counter - samples.size)
-            else:
-                self.open = False
-
-        if self.open:
-            audio = samples
-        else:
-            if self.silence_trim:
-                audio = np.empty(0, dtype=samples.dtype)
-                dropped = True
-            else:
-                audio = np.zeros_like(samples)
-
-        return audio, threshold, dbfs, dropped
-
-
 class IQDebugWriter:
     def __init__(self, path: Optional[Path], sample_rate: float):
         self.path = path
@@ -326,7 +251,7 @@ class AudioWriter:
 
     def __init__(self, output_path: Path, input_rate: float):
         if not shutil.which("ffmpeg"):
-            raise RuntimeError("ffmpeg is required to write WAV output.")
+            raise RuntimeError(FFMPEG_HINT)
         self.output_path = output_path
         self.input_rate = input_rate
         cmd = [
@@ -348,11 +273,16 @@ class AudioWriter:
             "48000",
             str(output_path),
         ]
-        self.proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:  # pragma: no cover - dependency missing at runtime
+            raise RuntimeError(FFMPEG_HINT) from exc
+        except OSError as exc:  # pragma: no cover - runtime failure launching ffmpeg
+            raise RuntimeError(f"Failed to launch ffmpeg: {exc}") from exc
         self.peak = 0.0
 
     def write(self, samples: np.ndarray) -> None:
@@ -452,170 +382,255 @@ class ProcessingPipeline:
     def __init__(self, config: ProcessingConfig):
         self.config = config
 
-    def run(self) -> ProcessingResult:
-        probe = probe_sample_rate(self.config.in_path)
-        sample_rate = probe.value
+    def run(self, progress_sink: Optional[ProgressSink] = None) -> ProcessingResult:
+        tracker = ProgressTracker(progress_sink)
+        header_bytes = 44  # baseline WAV header size (approximate)
+        frame_bytes = 4  # 2 channels * int16
 
-        if self.config.target_freq <= 0 and not self.config.probe_only:
-            raise ValueError("Target frequency must be positive. Provide --ft or use --interactive.")
-        if self.config.bandwidth <= 0:
-            raise ValueError("Bandwidth must be positive.")
+        try:
+            probe = probe_sample_rate(self.config.in_path)
+            try:
+                sample_rate = probe.value
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "Unable to determine input sample rate. Ensure ffprobe/ffmpeg is installed or the WAV header is valid."
+                ) from exc
 
-        center_freq = self.config.center_freq
-        if center_freq is None:
-            inferred = parse_center_frequency(self.config.in_path)
-            if inferred is None:
-                raise ValueError(
-                    "Center frequency not supplied and could not be parsed from filename. "
-                    "Use --fc to provide it explicitly."
-                )
-            center_freq = inferred
+            if self.config.target_freq <= 0 and not self.config.probe_only:
+                raise ValueError("Target frequency must be positive. Provide --ft or use --interactive.")
+            if self.config.bandwidth <= 0:
+                raise ValueError("Bandwidth must be positive.")
 
-        target_freq = self.config.target_freq if self.config.target_freq > 0 else center_freq
-        freq_offset = target_freq - center_freq
+            center_freq = self.config.center_freq
+            if center_freq is None:
+                inferred = parse_center_frequency(self.config.in_path)
+                if inferred is None:
+                    raise ValueError(
+                        "Center frequency not supplied and could not be parsed from filename. "
+                        "Use --fc to provide it explicitly."
+                    )
+                center_freq = inferred
 
-        decimation = max(1, int(round(sample_rate / self.config.fs_ch_target)))
-        fs_channel = sample_rate / decimation
-        if fs_channel > self.config.fs_ch_target * 1.5:
-            decimation = int(math.floor(sample_rate / self.config.fs_ch_target))
-            decimation = max(decimation, 1)
+            target_freq = self.config.target_freq if self.config.target_freq > 0 else center_freq
+            freq_offset = target_freq - center_freq
+
+            decimation = max(1, int(round(sample_rate / self.config.fs_ch_target)))
             fs_channel = sample_rate / decimation
+            if fs_channel > self.config.fs_ch_target * 1.5:
+                decimation = int(math.floor(sample_rate / self.config.fs_ch_target))
+                decimation = max(decimation, 1)
+                fs_channel = sample_rate / decimation
 
-        LOG.info(
-            "Input sample rate %.2f Hz (ffprobe=%s, header=%s, wave=%s).",
-            sample_rate,
-            f"{probe.ffprobe:.2f}" if probe.ffprobe else "n/a",
-            f"{probe.header:.2f}" if probe.header else "n/a",
-            f"{probe.wave:.2f}" if probe.wave else "n/a",
-        )
-        LOG.info(
-            "Center frequency %.0f Hz, target %.0f Hz, offset %.0f Hz.",
-            center_freq,
-            target_freq,
-            freq_offset,
-        )
-        LOG.info(
-            "Channel decimation factor %d -> %.2f Hz complex rate.",
-            decimation,
-            fs_channel,
-        )
+            LOG.info(
+                "Input sample rate %.2f Hz (ffprobe=%s, header=%s, wave=%s).",
+                sample_rate,
+                f"{probe.ffprobe:.2f}" if probe.ffprobe else "n/a",
+                f"{probe.header:.2f}" if probe.header else "n/a",
+                f"{probe.wave:.2f}" if probe.wave else "n/a",
+            )
+            LOG.info(
+                "Center frequency %.0f Hz, target %.0f Hz, offset %.0f Hz.",
+                center_freq,
+                target_freq,
+                freq_offset,
+            )
+            LOG.info(
+                "Channel decimation factor %d -> %.2f Hz complex rate.",
+                decimation,
+                fs_channel,
+            )
+            LOG.info("Using %s demodulator.", self.config.demod_mode.upper())
+            LOG.info(
+                "Squelch %s, silence trim %s, AGC %s.",
+                "enabled" if self.config.squelch_enabled else "disabled",
+                "enabled" if self.config.silence_trim else "disabled",
+                "enabled" if self.config.agc_enabled else "disabled",
+            )
+            if not self.config.squelch_enabled and self.config.silence_trim:
+                LOG.warning("silence_trim is ignored because squelch is disabled.")
 
-        taps = design_channel_filter(sample_rate, self.config.bandwidth, decimation)
-        LOG.info("Designed FIR channel filter with %d taps.", len(taps))
+            try:
+                file_size = self.config.in_path.stat().st_size
+            except OSError:
+                file_size = 0
+            payload_bytes = max(file_size - header_bytes, 0)
+            total_input_samples = max(payload_bytes / frame_bytes, 0.0)
+            estimated_channel_samples = (
+                total_input_samples / max(decimation, 1)
+            )
+            duration_seconds = (
+                total_input_samples / sample_rate if sample_rate > 0 else 0.0
+            )
+            estimated_audio_samples = max(duration_seconds * 48_000.0, 0.0)
 
-        oscillator = ComplexOscillator(freq_offset, sample_rate)
-        channel_filter = OverlapSaveFIR(taps, self.config.filter_block)
-        decimator = Decimator(decimation)
-        demod = QuadratureDemod()
-        deemph = DeemphasisFilter(self.config.deemph_us, fs_channel)
-        squelch = SquelchGate(
-            sample_rate=fs_channel,
-            threshold_dbfs=self.config.squelch_dbfs,
-            silence_trim=self.config.silence_trim,
-        )
-        iq_writer = IQDebugWriter(self.config.dump_iq_path, fs_channel)
+            phases: list[PhaseState] = [
+                PhaseState("ingest", "Ingest IQ", total_input_samples, unit="samples"),
+                PhaseState("channel", "Channelize", estimated_channel_samples, unit="samples"),
+                PhaseState("demod", "Demodulate", estimated_channel_samples, unit="samples"),
+                PhaseState("encode", "Encode Audio", estimated_audio_samples, unit="samples"),
+            ]
+            if self.config.dump_iq_path:
+                phases.insert(
+                    3,
+                    PhaseState(
+                        "dump_iq",
+                        "Write IQ Dump",
+                        estimated_channel_samples,
+                        unit="samples",
+                    ),
+                )
+            tracker.start(phases)
+            tracker.status("Designing channel filter")
 
-        output_path = (
-            self.config.output_path
-            if self.config.output_path
-            else self._default_output_path()
-        )
+            taps = design_channel_filter(sample_rate, self.config.bandwidth, decimation)
+            LOG.info("Designed FIR channel filter with %d taps.", len(taps))
+            tracker.status("Initializing DSP stages")
 
-        stage_snapshots: dict[str, tuple[np.ndarray, float]] = {}
+            oscillator = ComplexOscillator(freq_offset, sample_rate)
+            channel_filter = OverlapSaveFIR(taps, self.config.filter_block)
+            decimator = Decimator(decimation)
+            decoder = create_decoder(
+                self.config.demod_mode,
+                deemph_us=self.config.deemph_us,
+                squelch_dbfs=self.config.squelch_dbfs,
+                silence_trim=self.config.silence_trim,
+                squelch_enabled=self.config.squelch_enabled,
+                agc_enabled=self.config.agc_enabled,
+            )
+            decoder.setup(fs_channel)
+            iq_writer = IQDebugWriter(self.config.dump_iq_path, fs_channel)
 
-        with IQReader(self.config.in_path, self.config.chunk_size, self.config.iq_order) as reader:
-            iterator = iter(reader)
-            warmup = next(iterator, None)
-            if warmup is None:
-                raise RuntimeError("Input stream produced no samples.")
+            output_path = (
+                self.config.output_path
+                if self.config.output_path
+                else self._default_output_path()
+            )
+
+            stage_snapshots: dict[str, tuple[np.ndarray, float]] = {}
+
+            with IQReader(self.config.in_path, self.config.chunk_size, self.config.iq_order) as reader:
+                iterator = iter(reader)
+                warmup = next(iterator, None)
+                if warmup is None:
+                    raise RuntimeError("Input stream produced no samples.")
+
+                if self.config.plot_stages_path and not self.config.probe_only:
+                    stage_snapshots["input"] = (warmup.copy(), sample_rate)
+
+                mix_sign = (
+                    self.config.mix_sign_override
+                    if self.config.mix_sign_override in (1, -1)
+                    else choose_mix_sign(warmup, sample_rate, freq_offset, taps, decimation)
+                )
+                LOG.info("Selected mixer sign %d based on warm-up snippet.", mix_sign)
+                tracker.status("Warm-up complete; processing stream")
+
+                if self.config.probe_only:
+                    tracker.advance("ingest", warmup.size)
+                    tracker.status("Probe-only inspection complete")
+                    decoder.finalize()
+                    iq_writer.close()
+                    return ProcessingResult(
+                        sample_rate_probe=probe,
+                        center_freq=center_freq,
+                        target_freq=target_freq,
+                        freq_offset=freq_offset,
+                        decimation=decimation,
+                        fs_channel=fs_channel,
+                        mix_sign=mix_sign,
+                        audio_peak=0.0,
+                    )
+
+                audio_writer = AudioWriter(output_path, fs_channel)
+                try:
+                    for idx, block in enumerate(itertools.chain((warmup,), iterator)):
+                        tracker.advance("ingest", block.size)
+                        tracker.status(f"Chunk {idx + 1}: channelizing")
+                        mixed = oscillator.mix(block, mix_sign)
+                        if self.config.plot_stages_path and idx == 0:
+                            stage_snapshots["mixed"] = (mixed.copy(), sample_rate)
+
+                        filtered = channel_filter.process(mixed)
+                        if self.config.plot_stages_path and idx == 0:
+                            stage_snapshots["filtered"] = (filtered.copy(), sample_rate)
+
+                        decimated = decimator.process(filtered)
+                        tracker.advance("channel", float(decimated.size))
+                        if self.config.dump_iq_path:
+                            tracker.status(f"Chunk {idx + 1}: writing IQ dump")
+                            iq_writer.write(decimated)
+                            tracker.advance("dump_iq", float(decimated.size))
+                        if self.config.plot_stages_path and idx == 0:
+                            stage_snapshots["decimated"] = (decimated.copy(), fs_channel)
+
+                        baseband_power = np.mean(np.abs(decimated) ** 2) if decimated.size else 0.0
+                        LOG.debug(
+                            "Block %d: mixed=%d samples, decimated=%d, power=%.3e",
+                            idx,
+                            block.size,
+                            decimated.size,
+                            baseband_power,
+                        )
+
+                        tracker.status(
+                            f"Chunk {idx + 1}: demodulating ({self.config.demod_mode.upper()})"
+                        )
+                        audio, stats = decoder.process(decimated)
+                        intermediates = decoder.intermediates()
+                        if intermediates:
+                            first_stage = next(iter(intermediates.values()))
+                            demod_len = float(first_stage[0].size)
+                        else:
+                            demod_len = float(decimated.size)
+                        tracker.advance("demod", demod_len)
+                        if self.config.plot_stages_path and idx == 0 and intermediates:
+                            for name, (buf, rate) in intermediates.items():
+                                stage_snapshots[name] = (buf.copy(), rate)
+                        LOG.debug(
+                            "Demod chunk %d: %d samples, rms=%.2f dBFS, gate %.2f dBFS, dropped=%s",
+                            idx,
+                            int(demod_len),
+                            stats.rms_dbfs if stats else float("nan"),
+                            stats.gate_threshold_dbfs if stats else float("nan"),
+                            stats.dropped if stats else False,
+                        )
+
+                        tracker.status(f"Chunk {idx + 1}: encoding audio")
+                        audio_writer.write(audio)
+                        if audio.size:
+                            duration = audio.size / max(fs_channel, 1e-9)
+                            tracker.advance("encode", duration * 48_000.0)
+                finally:
+                    tracker.status("Finalizing outputs")
+                    decoder.finalize()
+                    iq_writer.close()
+                    audio_writer.close()
 
             if self.config.plot_stages_path and not self.config.probe_only:
-                stage_snapshots["input"] = (warmup.copy(), sample_rate)
+                try:
+                    save_stage_psd(stage_snapshots, self.config.plot_stages_path, center_freq)
+                    LOG.info("Saved stage PSD plots to %s", self.config.plot_stages_path)
+                except Exception as exc:  # pragma: no cover - plotting errors logged
+                    LOG.warning("Failed to save stage plots: %s", exc)
 
-            mix_sign = (
-                self.config.mix_sign_override
-                if self.config.mix_sign_override in (1, -1)
-                else choose_mix_sign(warmup, sample_rate, freq_offset, taps, decimation)
+            LOG.info(
+                "Audio peak level %.2f dBFS.",
+                20.0 * math.log10(max(audio_writer.peak, 1e-6)),
             )
-            LOG.info("Selected mixer sign %d based on warm-up snippet.", mix_sign)
+            tracker.status("Processing complete")
 
-            if self.config.probe_only:
-                iq_writer.close()
-                return ProcessingResult(
-                    sample_rate_probe=probe,
-                    center_freq=center_freq,
-                    target_freq=target_freq,
-                    freq_offset=freq_offset,
-                    decimation=decimation,
-                    fs_channel=fs_channel,
-                    mix_sign=mix_sign,
-                    audio_peak=0.0,
-                )
-
-            audio_writer = AudioWriter(output_path, fs_channel)
-            try:
-                for idx, block in enumerate(itertools.chain((warmup,), iterator)):
-                    mixed = oscillator.mix(block, mix_sign)
-                    if self.config.plot_stages_path and idx == 0 and not self.config.probe_only:
-                        stage_snapshots["mixed"] = (mixed.copy(), sample_rate)
-                    filtered = channel_filter.process(mixed)
-                    if self.config.plot_stages_path and idx == 0 and not self.config.probe_only:
-                        stage_snapshots["filtered"] = (filtered.copy(), sample_rate)
-                    decimated = decimator.process(filtered)
-                    if self.config.dump_iq_path:
-                        iq_writer.write(decimated)
-                    if self.config.plot_stages_path and idx == 0 and not self.config.probe_only:
-                        stage_snapshots["decimated"] = (decimated.copy(), fs_channel)
-                    baseband_power = np.mean(np.abs(decimated) ** 2) if decimated.size else 0.0
-                    LOG.debug(
-                        "Block: mixed=%d samples, decimated=%d, power=%.3e",
-                        block.size,
-                        decimated.size,
-                        baseband_power,
-                    )
-                    audio = demod.process(decimated)
-                    if self.config.plot_stages_path and idx == 0 and not self.config.probe_only:
-                        stage_snapshots["demod"] = (audio.copy(), fs_channel)
-                    audio = deemph.process(audio)
-                    if self.config.plot_stages_path and idx == 0 and not self.config.probe_only:
-                        stage_snapshots["deemph"] = (audio.copy(), fs_channel)
-                    gated, threshold, dbfs, dropped = squelch.process(audio)
-                    if self.config.plot_stages_path and idx == 0 and not self.config.probe_only:
-                        stage_snapshots["squelch"] = (gated.copy(), fs_channel)
-                    LOG.debug(
-                        "Demod chunk: %d samples, rms=%.2f dBFS, gate %.2f dBFS, dropped=%s",
-                        audio.size,
-                        dbfs,
-                        threshold,
-                        dropped,
-                    )
-                    audio_writer.write(gated)
-            finally:
-                iq_writer.close()
-                audio_writer.close()
-
-        if self.config.plot_stages_path and not self.config.probe_only:
-            try:
-                save_stage_psd(stage_snapshots, self.config.plot_stages_path, center_freq)
-                LOG.info("Saved stage PSD plots to %s", self.config.plot_stages_path)
-            except Exception as exc:  # pragma: no cover - plotting errors logged
-                LOG.warning("Failed to save stage plots: %s", exc)
-
-        LOG.info(
-            "Audio peak level %.2f dBFS.",
-            20.0 * math.log10(max(audio_writer.peak, 1e-6)),
-        )
-
-        return ProcessingResult(
-            sample_rate_probe=probe,
-            center_freq=center_freq,
-            target_freq=target_freq,
-            freq_offset=freq_offset,
-            decimation=decimation,
-            fs_channel=fs_channel,
-            mix_sign=mix_sign,
-            audio_peak=audio_writer.peak,
-        )
+            return ProcessingResult(
+                sample_rate_probe=probe,
+                center_freq=center_freq,
+                target_freq=target_freq,
+                freq_offset=freq_offset,
+                decimation=decimation,
+                fs_channel=fs_channel,
+                mix_sign=mix_sign,
+                audio_peak=audio_writer.peak,
+            )
+        finally:
+            tracker.close()
 
     def _default_output_path(self) -> Path:
         ft = int(self.config.target_freq)

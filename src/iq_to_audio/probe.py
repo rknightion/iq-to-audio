@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import logging
 import soundfile as sf
 
 
@@ -37,7 +38,11 @@ def probe_sample_rate(path: Path) -> SampleRateProbe:
 
 
 def _ffprobe_sample_rate(path: Path) -> Optional[float]:
+    global _FFPROBE_WARNED
     if not shutil.which("ffprobe"):
+        if not _FFPROBE_WARNED:
+            LOG.warning(FFPROBE_HINT)
+            _FFPROBE_WARNED = True
         return None
 
     cmd = [
@@ -58,7 +63,8 @@ def _ffprobe_sample_rate(path: Path) -> Optional[float]:
         result = subprocess.run(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
         )
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as exc:
+        LOG.warning("ffprobe failed for %s: %s", path, exc)
         return None
     except FileNotFoundError:
         return None
@@ -94,3 +100,12 @@ def _wave_sample_rate(path: Path) -> Optional[float]:
         return None
     except FileNotFoundError:
         return None
+
+LOG = logging.getLogger(__name__)
+
+FFPROBE_HINT = (
+    "ffprobe executable not found. Install FFmpeg (e.g., `sudo apt install ffmpeg`, "
+    "`brew install ffmpeg`, or download from https://ffmpeg.org/download.html) and ensure it is on PATH."
+)
+
+_FFPROBE_WARNED = False

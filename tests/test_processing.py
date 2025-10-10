@@ -1,9 +1,8 @@
 import numpy as np
 
+from iq_to_audio.decoders.nfm import DeemphasisFilter, QuadratureDemod
 from iq_to_audio.processing import (
     Decimator,
-    DeemphasisFilter,
-    QuadratureDemod,
     choose_mix_sign,
     design_channel_filter,
 )
