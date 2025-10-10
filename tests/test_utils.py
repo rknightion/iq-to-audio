@@ -33,3 +33,15 @@ def test_detect_center_frequency_prefers_metadata(monkeypatch, tmp_path):
     result = detect_center_frequency(target)
     assert result.value == pytest.approx(462_500_000.0)
     assert result.source == "metadata:center_frequency"
+
+
+def test_detect_center_frequency_ignores_non_frequency_metadata(monkeypatch, tmp_path):
+    target = tmp_path / "baseband_456834049Hz.wav"
+    target.write_bytes(b"")
+
+    monkeypatch.setattr(utils, "_soundfile_tags", lambda _path: {"file": str(target)})
+    monkeypatch.setattr(utils, "_ffprobe_tags", lambda _path: {})
+
+    result = detect_center_frequency(target)
+    assert result.value == pytest.approx(456_834_049.0)
+    assert result.source == "filename:sdrpp"

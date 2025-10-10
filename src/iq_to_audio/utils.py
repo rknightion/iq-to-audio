@@ -67,6 +67,11 @@ def _center_frequency_from_metadata(path: Path) -> Optional[CenterFrequencyResul
                 return CenterFrequencyResult(freq, f"metadata:{key}")
 
     for key, raw in tags.items():
+        if key in _METADATA_KEYS:
+            continue
+        lowered = key.lower()
+        if "freq" not in lowered and "hz" not in lowered:
+            continue
         freq = _parse_frequency_text(raw)
         if freq:
             return CenterFrequencyResult(freq, f"metadata:{key}")

@@ -356,18 +356,28 @@ def choose_mix_sign(
     taps: np.ndarray,
     decimation: int,
 ) -> int:
-    snippet_len = min(warmup.size, int(sample_rate * 0.5))
-    if snippet_len < taps.size:
-        snippet_len = warmup.size
-    snippet = warmup[:snippet_len]
+    if warmup.size == 0:
+        return 1
+    # Limit snippet length so mixer sign probing stays responsive on high-rate captures.
+    max_len = max(int(sample_rate * 0.05), len(taps) * 4, 131_072)
+    snippet_len = min(warmup.size, max_len)
+    if snippet_len < len(taps):
+        snippet_len = min(warmup.size, len(taps) * 2)
+    snippet = warmup[:snippet_len].astype(np.complex64, copy=False)
     n = np.arange(snippet.size, dtype=np.float64)
+    decim = max(decimation, 1)
+    block_size = min(snippet.size, max(len(taps), 16_384))
+
     best_sign = 1
     best_power = -np.inf
     for sign in (1, -1):
-        osc = np.exp(-1j * sign * 2.0 * np.pi * freq_offset * n / sample_rate)
+        osc = np.exp(-1j * sign * 2.0 * np.pi * freq_offset * n / sample_rate).astype(
+            np.complex64, copy=False
+        )
         mixed = snippet * osc
-        filtered = signal.lfilter(taps, [1.0], mixed)
-        decimated = filtered[:: max(decimation, 1)]
+        fir = OverlapSaveFIR(taps, block_size)
+        filtered = fir.process(mixed)
+        decimated = filtered[::decim]
         if decimated.size == 0:
             power = -np.inf
         else:
