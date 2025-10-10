@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
-from typing import Optional
-
 import numpy as np
 
 
@@ -32,73 +28,3 @@ class DCBlocker:
         self._x_prev = float(x_prev)
         self._y_prev = float(y_prev)
         return out
-
-
-class SquelchGate:
-    """Adaptive squelch gate with optional hard threshold and silence trimming."""
-
-    def __init__(
-        self,
-        sample_rate: float,
-        threshold_dbfs: Optional[float],
-        silence_trim: bool,
-        hold_ms: float = 320.0,
-        open_margin_db: float = 5.0,
-        noise_alpha: float = 0.95,
-        noise_rise_db: float = 1.5,
-    ):
-        self.sample_rate = sample_rate
-        self.manual_threshold = threshold_dbfs
-        self.silence_trim = silence_trim
-        self.hold_samples = max(int(sample_rate * hold_ms / 1000.0), 1)
-        self.hold_counter = 0
-        self.noise_dbfs: Optional[float] = None
-        self.open = False
-        self.open_margin_db = max(open_margin_db, 0.0)
-        self.noise_alpha = float(np.clip(noise_alpha, 0.0, 0.999))
-        self.noise_rise_db = max(float(noise_rise_db), 0.0)
-
-    def process(self, samples: np.ndarray) -> tuple[np.ndarray, float, float, bool]:
-        if samples.size == 0:
-            return samples, self.manual_threshold or -120.0, -120.0, False
-
-        rms = math.sqrt(float(np.mean(samples.astype(np.float64) ** 2)) + 1e-18)
-        dbfs = 20.0 * math.log10(rms + 1e-12)
-
-        if self.manual_threshold is None:
-            noise_estimate = self.noise_dbfs if self.noise_dbfs is not None else dbfs
-            threshold = noise_estimate + self.open_margin_db
-        else:
-            threshold = self.manual_threshold
-
-        dropped = False
-        if dbfs >= threshold:
-            self.open = True
-            self.hold_counter = self.hold_samples + samples.size
-        else:
-            if self.hold_counter > 0:
-                self.hold_counter = max(0, self.hold_counter - samples.size)
-            else:
-                self.open = False
-
-        if self.open:
-            audio = samples
-        else:
-            if self.silence_trim:
-                audio = np.empty(0, dtype=samples.dtype)
-                dropped = True
-            else:
-                audio = np.zeros_like(samples)
-
-        if self.manual_threshold is None and not self.open:
-            if self.noise_dbfs is None:
-                self.noise_dbfs = dbfs
-            else:
-                alpha = self.noise_alpha
-                delta_limit = self.noise_rise_db
-                target = dbfs
-                if target > self.noise_dbfs + delta_limit:
-                    target = self.noise_dbfs + delta_limit
-                self.noise_dbfs = alpha * self.noise_dbfs + (1.0 - alpha) * target
-
-        return audio, threshold, dbfs, dropped

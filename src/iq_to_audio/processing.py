@@ -4,13 +4,16 @@ import itertools
 import logging
 import math
 import os
+import queue
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
 import numpy as np
+from scipy import fft as sp_fft
 from scipy import signal
 
 from .decoders import create_decoder
@@ -38,9 +41,6 @@ class ProcessingConfig:
     demod_mode: str = "nfm"
     fs_ch_target: float = 96_000.0
     deemph_us: float = 300.0
-    squelch_dbfs: Optional[float] = None
-    silence_trim: bool = False
-    squelch_enabled: bool = True
     agc_enabled: bool = True
     output_path: Optional[Path] = None
     dump_iq_path: Optional[Path] = None
@@ -51,6 +51,7 @@ class ProcessingConfig:
     mix_sign_override: Optional[int] = None
     plot_stages_path: Optional[Path] = None
     fft_workers: Optional[int] = None
+    max_input_seconds: Optional[float] = None
 
 
 def tune_chunk_size(sample_rate: float, requested: int) -> int:
@@ -58,7 +59,11 @@ def tune_chunk_size(sample_rate: float, requested: int) -> int:
     base = max(1, requested)
     if sample_rate <= 0:
         return base
-    target_seconds = 0.25  # aim for ~250 ms per block for high-rate captures
+    target_seconds = 0.25  # default to ~250 ms per block
+    if sample_rate >= 2_000_000.0:
+        target_seconds = 0.40
+    if sample_rate >= 5_000_000.0:
+        target_seconds = 0.50
     desired = int(round(sample_rate * target_seconds))
     if desired <= base:
         return base
@@ -208,12 +213,12 @@ class OverlapSaveFIR:
         self._fft_kwargs: dict[str, int] = {}
         if self.workers:
             try:
-                np.fft.fft(np.zeros(8, dtype=np.complex128), workers=self.workers)
+                sp_fft.fft(np.zeros(8, dtype=np.complex128), workers=self.workers)
             except TypeError:
                 self.workers = None
             else:
                 self._fft_kwargs = {"workers": self.workers}
-        self.taps_fft = np.fft.fft(padded_taps, **self._fft_kwargs)
+        self.taps_fft = sp_fft.fft(padded_taps, **self._fft_kwargs)
         self.state = np.zeros(self.overlap, dtype=np.complex64)
 
     def process(self, samples: np.ndarray) -> np.ndarray:
@@ -228,8 +233,8 @@ class OverlapSaveFIR:
             block = np.concatenate([self.state, seg]).astype(np.complex128)
             if block.size < self.fft_size:
                 block = np.pad(block, (0, self.fft_size - block.size))
-            spectrum = np.fft.fft(block, **self._fft_kwargs)
-            filtered = np.fft.ifft(spectrum * self.taps_fft, **self._fft_kwargs)
+            spectrum = sp_fft.fft(block, **self._fft_kwargs)
+            filtered = sp_fft.ifft(spectrum * self.taps_fft, **self._fft_kwargs)
             valid = filtered[self.overlap : self.overlap + seg.size]
             outputs.append(valid.astype(np.complex64))
             if self.overlap:
@@ -321,35 +326,75 @@ class AudioWriter:
         except OSError as exc:  # pragma: no cover - runtime failure launching ffmpeg
             raise RuntimeError(f"Failed to launch ffmpeg: {exc}") from exc
         self.peak = 0.0
+        self._queue: queue.SimpleQueue[Optional[bytes]] = queue.SimpleQueue()
+        self._error: Optional[BaseException] = None
+        self._closed = False
+        self._writer = threading.Thread(
+            target=self._drain,
+            name="AudioWriter",
+            daemon=True,
+        )
+        self._writer.start()
 
     def write(self, samples: np.ndarray) -> None:
         if not self.proc or not self.proc.stdin:
             raise RuntimeError("AudioWriter is not ready.")
+        if self._closed:
+            raise RuntimeError("AudioWriter has already been closed.")
+        if self._error:
+            raise RuntimeError("ffmpeg writer failed") from self._error
         if samples.size == 0:
             return
         peak = float(np.max(np.abs(samples)))
         if peak > self.peak:
             self.peak = peak
         safe = np.clip(samples, -0.99, 0.99).astype(np.float32, copy=False)
-        try:
-            self.proc.stdin.write(safe.tobytes())
-        except BrokenPipeError as exc:
-            raise RuntimeError(
-                "ffmpeg exited unexpectedly while writing audio (Broken pipe). "
-                "Check that the preview/output path is writable."
-            ) from exc
+        payload = safe.tobytes()
+        self._queue.put(payload)
+        if self._error:
+            raise RuntimeError("ffmpeg writer failed") from self._error
+
+    def _drain(self) -> None:
+        stdin = self.proc.stdin if self.proc else None
+        while True:
+            payload = self._queue.get()
+            if payload is None:
+                break
+            if self._error or not stdin:
+                continue
+            try:
+                stdin.write(payload)
+            except BrokenPipeError as exc:
+                error = RuntimeError(
+                    "ffmpeg exited unexpectedly while writing audio (Broken pipe). "
+                    "Check that the preview/output path is writable."
+                )
+                error.__cause__ = exc
+                self._error = error
+            except BaseException as exc:  # pragma: no cover - defensive catch
+                self._error = exc
 
     def close(self) -> None:
-        if not self.proc:
+        if self._closed:
             return
-        if self.proc.stdin:
-            self.proc.stdin.close()
-        self.proc.wait(timeout=10)
-        if self.proc.stderr:
-            err = self.proc.stderr.read().decode("utf-8").strip()
-            if err:
-                LOG.debug("ffmpeg: %s", err)
-        self.proc = None
+        self._closed = True
+        self._queue.put(None)
+        if self._writer.is_alive():
+            self._writer.join(timeout=10)
+        if self.proc:
+            if self.proc.stdin:
+                try:
+                    self.proc.stdin.close()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            self.proc.wait(timeout=10)
+            if self.proc.stderr:
+                err = self.proc.stderr.read().decode("utf-8").strip()
+                if err:
+                    LOG.debug("ffmpeg: %s", err)
+            if self._error:
+                raise RuntimeError("ffmpeg writer failed") from self._error
+            self.proc = None
 
 
 def design_channel_filter(sample_rate: float, bandwidth: float, decimation: int) -> np.ndarray:
@@ -456,7 +501,7 @@ class ProcessingPipeline:
         if cpu_count <= 2:
             self._resolved_fft_workers = None
         else:
-            self._resolved_fft_workers = min(8, max(2, cpu_count // 2))
+            self._resolved_fft_workers = min(12, max(2, cpu_count - 1))
         return self._resolved_fft_workers
 
     def _effective_chunk_size(self, sample_rate: float) -> int:
@@ -494,6 +539,24 @@ class ProcessingPipeline:
                     cancel_logged = True
                 raise ProcessingCancelled("Processing cancelled by user.")
 
+        stage_labels = {
+            "design": "design filter",
+            "init": "init dsp",
+            "warmup": "warm-up",
+            "channel": "channel",
+            "dump": "dump IQ",
+            "demod": f"demod {self.config.demod_mode.upper()}",
+            "encode": "write audio",
+            "finalize": "flush outputs",
+            "complete": "Processing complete",
+        }
+
+        def _status_text(key: str, *, chunk: Optional[int] = None) -> str:
+            base = stage_labels.get(key, key)
+            if chunk is None:
+                return base
+            return f"C{chunk} {base}"
+
         def report(message: str) -> None:
             nonlocal last_status
             tracker.status(message)
@@ -515,6 +578,15 @@ class ProcessingPipeline:
                 raise RuntimeError(
                     "Unable to determine input sample rate. Ensure ffprobe/ffmpeg is installed or the WAV header is valid."
                 ) from exc
+
+            preview_seconds = self.config.max_input_seconds
+            if preview_seconds is not None and preview_seconds <= 0:
+                preview_seconds = None
+            max_input_samples: Optional[int] = None
+            if preview_seconds is not None and sample_rate > 0:
+                max_input_samples = max(
+                    1, int(math.floor(preview_seconds * sample_rate))
+                )
 
             if self.config.target_freq <= 0 and not self.config.probe_only:
                 raise ValueError("Target frequency must be positive. Provide --ft or use --interactive.")
@@ -580,13 +652,9 @@ class ProcessingPipeline:
             )
             LOG.info("Using %s demodulator.", self.config.demod_mode.upper())
             LOG.info(
-                "Squelch %s, silence trim %s, AGC %s.",
-                "enabled" if self.config.squelch_enabled else "disabled",
-                "enabled" if self.config.silence_trim else "disabled",
+                "AGC %s.",
                 "enabled" if self.config.agc_enabled else "disabled",
             )
-            if not self.config.squelch_enabled and self.config.silence_trim:
-                LOG.warning("silence_trim is ignored because squelch is disabled.")
 
             try:
                 file_size = self.config.in_path.stat().st_size
@@ -594,19 +662,35 @@ class ProcessingPipeline:
                 file_size = 0
             payload_bytes = max(file_size - header_bytes, 0)
             total_input_samples = max(payload_bytes / frame_bytes, 0.0)
+            if max_input_samples is not None:
+                if total_input_samples > 0:
+                    total_input_samples = float(
+                        min(total_input_samples, max_input_samples)
+                    )
+                else:
+                    total_input_samples = float(max_input_samples)
             estimated_channel_samples = (
                 total_input_samples / max(decimation, 1)
             )
-            duration_seconds = (
-                total_input_samples / sample_rate if sample_rate > 0 else 0.0
-            )
-            estimated_audio_samples = max(duration_seconds * 48_000.0, 0.0)
+            duration_seconds = total_input_samples / sample_rate if sample_rate > 0 else 0.0
             chunk_size = self._effective_chunk_size(sample_rate)
             estimated_chunks = (
                 int(math.ceil(total_input_samples / chunk_size))
                 if total_input_samples > 0
                 else 0
             )
+            if max_input_samples is not None and preview_seconds is not None:
+                duration_seconds = min(duration_seconds, preview_seconds)
+            estimated_audio_samples = max(duration_seconds * 48_000.0, 0.0)
+            if max_input_samples is not None and preview_seconds is not None:
+                limited_duration = (
+                    duration_seconds if duration_seconds > 0 else preview_seconds
+                )
+                LOG.info(
+                    "Preview constrained to %.2f s of IQ (~%.3f M complex samples).",
+                    limited_duration,
+                    total_input_samples / 1e6,
+                )
             if estimated_chunks > 0:
                 LOG.info(
                     "Expecting approximately %d processing chunks (chunk size %d samples, %.2f s of IQ).",
@@ -648,12 +732,12 @@ class ProcessingPipeline:
                     ),
                 )
             tracker.start(phases)
-            report("Designing channel filter")
+            report(_status_text("design"))
             _check_cancel("initialization")
 
             taps = design_channel_filter(sample_rate, self.config.bandwidth, decimation)
             LOG.info("Designed FIR channel filter with %d taps.", len(taps))
-            report("Initializing DSP stages")
+            report(_status_text("init"))
             _check_cancel("initialization")
 
             oscillator = ComplexOscillator(freq_offset, sample_rate)
@@ -664,9 +748,6 @@ class ProcessingPipeline:
             decoder = create_decoder(
                 self.config.demod_mode,
                 deemph_us=self.config.deemph_us,
-                squelch_dbfs=self.config.squelch_dbfs,
-                silence_trim=self.config.silence_trim,
-                squelch_enabled=self.config.squelch_enabled,
                 agc_enabled=self.config.agc_enabled,
             )
             decoder.setup(fs_channel)
@@ -679,6 +760,7 @@ class ProcessingPipeline:
             )
 
             stage_snapshots: dict[str, tuple[np.ndarray, float]] = {}
+            processed_samples = 0
 
             with IQReader(self.config.in_path, chunk_size, self.config.iq_order) as reader:
                 iterator = iter(reader)
@@ -687,8 +769,10 @@ class ProcessingPipeline:
                     raise RuntimeError("Input stream produced no samples.")
                 _check_cancel("warm-up")
 
-                if self.config.plot_stages_path and not self.config.probe_only:
-                    stage_snapshots["input"] = (warmup.copy(), sample_rate)
+                limit_exhausted = False
+                if max_input_samples is not None and warmup.size > max_input_samples:
+                    warmup = warmup[:max_input_samples]
+                    limit_exhausted = True
 
                 mix_sign = (
                     self.config.mix_sign_override
@@ -696,11 +780,13 @@ class ProcessingPipeline:
                     else choose_mix_sign(warmup, sample_rate, freq_offset, taps, decimation)
                 )
                 LOG.info("Selected mixer sign %d based on warm-up snippet.", mix_sign)
-                report("Warm-up complete; processing stream")
+                report(_status_text("warmup"))
                 _check_cancel("warm-up")
 
                 if self.config.probe_only:
                     _check_cancel("probe-only")
+                    if self.config.plot_stages_path:
+                        stage_snapshots["input"] = (warmup.copy(), sample_rate)
                     tracker.advance("ingest", warmup.size)
                     report("Probe-only inspection complete")
                     decoder.finalize()
@@ -719,10 +805,25 @@ class ProcessingPipeline:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 audio_writer = AudioWriter(output_path, fs_channel)
                 try:
-                    for idx, block in enumerate(itertools.chain((warmup,), iterator)):
+                    processed_samples = 0
+                    for idx, raw_block in enumerate(itertools.chain((warmup,), iterator)):
+                        block = raw_block
+                        if max_input_samples is not None:
+                            remaining = max_input_samples - processed_samples
+                            if remaining <= 0:
+                                limit_exhausted = True
+                                break
+                            if block.size > remaining:
+                                block = block[:remaining]
+                                limit_exhausted = True
+                        if block.size == 0:
+                            continue
                         _check_cancel(f"chunk {idx + 1}")
                         tracker.advance("ingest", block.size)
-                        report(f"Chunk {idx + 1}: channelizing")
+                        processed_samples += block.size
+                        if self.config.plot_stages_path and idx == 0 and not self.config.probe_only:
+                            stage_snapshots["input"] = (block.copy(), sample_rate)
+                        report(_status_text("channel", chunk=idx + 1))
                         mixed = oscillator.mix(block, mix_sign)
                         if self.config.plot_stages_path and idx == 0:
                             stage_snapshots["mixed"] = (mixed.copy(), sample_rate)
@@ -734,7 +835,7 @@ class ProcessingPipeline:
                         decimated = decimator.process(filtered)
                         tracker.advance("channel", float(decimated.size))
                         if self.config.dump_iq_path:
-                            report(f"Chunk {idx + 1}: writing IQ dump")
+                            report(_status_text("dump", chunk=idx + 1))
                             iq_writer.write(decimated)
                             tracker.advance("dump_iq", float(decimated.size))
                         if self.config.plot_stages_path and idx == 0:
@@ -749,9 +850,7 @@ class ProcessingPipeline:
                             baseband_power,
                         )
 
-                        report(
-                            f"Chunk {idx + 1}: demodulating ({self.config.demod_mode.upper()})"
-                        )
+                        report(_status_text("demod", chunk=idx + 1))
                         audio, stats = decoder.process(decimated)
                         intermediates = decoder.intermediates()
                         if intermediates:
@@ -764,25 +863,39 @@ class ProcessingPipeline:
                             for name, (buf, rate) in intermediates.items():
                                 stage_snapshots[name] = (buf.copy(), rate)
                         LOG.debug(
-                            "Demod chunk %d: %d samples, rms=%.2f dBFS, gate %.2f dBFS, dropped=%s",
+                            "Demod chunk %d: %d samples, rms=%.2f dBFS",
                             idx,
                             int(demod_len),
                             stats.rms_dbfs if stats else float("nan"),
-                            stats.gate_threshold_dbfs if stats else float("nan"),
-                            stats.dropped if stats else False,
                         )
 
-                        report(f"Chunk {idx + 1}: encoding audio")
+                        report(_status_text("encode", chunk=idx + 1))
                         audio_writer.write(audio)
                         _check_cancel(f"chunk {idx + 1} encode")
                         if audio.size:
                             duration = audio.size / max(fs_channel, 1e-9)
                             tracker.advance("encode", duration * 48_000.0)
+                        if (
+                            max_input_samples is not None
+                            and processed_samples >= max_input_samples
+                        ):
+                            limit_exhausted = True
+                            break
                 finally:
-                    report("Finalizing outputs")
+                    report(_status_text("finalize"))
                     decoder.finalize()
                     iq_writer.close()
                     audio_writer.close()
+
+            if limit_exhausted and preview_seconds is not None:
+                processed_duration = (
+                    processed_samples / sample_rate if sample_rate > 0 else 0.0
+                )
+                LOG.info(
+                    "Stopped after %.2f s due to preview limit (processed %.3f M complex samples).",
+                    processed_duration if processed_duration > 0 else preview_seconds,
+                    processed_samples / 1e6,
+                )
 
             if self.config.plot_stages_path and not self.config.probe_only:
                 try:
@@ -795,7 +908,7 @@ class ProcessingPipeline:
                 "Audio peak level %.2f dBFS.",
                 20.0 * math.log10(max(audio_writer.peak, 1e-6)),
             )
-            report("Processing complete")
+            report(_status_text("complete"))
 
             return ProcessingResult(
                 sample_rate_probe=probe,

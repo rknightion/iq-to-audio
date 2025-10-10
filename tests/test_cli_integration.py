@@ -69,12 +69,12 @@ def test_cli_preview_nfm_generates_audio(tmp_path):
     assert stats["peak"] > 0.25
 
     assert "Expecting approximately" in logs
-    assert "Chunk 1: channelizing" in logs
+    assert "C1 channel" in logs
     assert "Processing complete" in logs
     assert "Center frequency 456834049 Hz" in logs
 
 
-def test_cli_preview_am_runs_without_squelch(tmp_path):
+def test_cli_preview_am_generates_audio(tmp_path):
     output = tmp_path / "am.wav"
     logs = _run_cli(
         [
@@ -87,7 +87,6 @@ def test_cli_preview_am_runs_without_squelch(tmp_path):
             "am",
             "--preview",
             "5",
-            "--no-squelch",
             "--out",
             str(output),
         ],
@@ -108,7 +107,7 @@ def test_cli_preview_am_runs_without_squelch(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["usb", "lsb"])
-def test_cli_preview_ssb_without_squelch(tmp_path, mode: str):
+def test_cli_preview_ssb_generates_audio(tmp_path, mode: str):
     output = tmp_path / f"{mode}.wav"
     logs = _run_cli(
         [
@@ -121,7 +120,6 @@ def test_cli_preview_ssb_without_squelch(tmp_path, mode: str):
             mode,
             "--preview",
             "5",
-            "--no-squelch",
             "--out",
             str(output),
         ]
@@ -139,6 +137,69 @@ def test_cli_preview_ssb_without_squelch(tmp_path, mode: str):
     assert "Processing complete" in logs
 
 
+def test_cli_preview_multiple_targets(tmp_path):
+    output = tmp_path / "batch.wav"
+    logs = _run_cli(
+        [
+            "--cli",
+            "--in",
+            str(NFM_FIXTURE),
+            "--ft",
+            "455837500",
+            "--tf",
+            "456872500",
+            "--demod",
+            "nfm",
+            "--preview",
+            "3",
+            "--out",
+            str(output),
+        ]
+    )
+    first_preview = tmp_path / "batch_455837500_preview.wav"
+    second_preview = tmp_path / "batch_456872500_preview.wav"
+    assert first_preview.exists()
+    assert second_preview.exists()
+    stats_first = _audio_stats(first_preview)
+    stats_second = _audio_stats(second_preview)
+    assert stats_first["samples"] > 100_000
+    assert stats_second["samples"] > 100_000
+    assert "=== Previewing target 455837500 Hz (1/2) ===" in logs
+    assert "=== Previewing target 456872500 Hz (2/2) ===" in logs
+
+
+def test_cli_multi_target_outputs_are_unique(tmp_path):
+    output = tmp_path / "main.wav"
+    logs = _run_cli(
+        [
+            "--cli",
+            "--in",
+            str(NFM_FIXTURE),
+            "--ft",
+            "455837500",
+            "--tf",
+            "456872500",
+            "--demod",
+            "nfm",
+            "--out",
+            str(output),
+        ]
+    )
+    first_path = tmp_path / "main_455837500.wav"
+    second_path = tmp_path / "main_456872500.wav"
+    assert first_path.exists()
+    assert second_path.exists()
+    stats_first = _audio_stats(first_path)
+    stats_second = _audio_stats(second_path)
+    assert stats_first["sample_rate"] == 48_000
+    assert stats_second["sample_rate"] == 48_000
+    assert stats_first["samples"] > 200_000
+    assert stats_second["samples"] > 200_000
+    assert "=== Processing target 455837500 Hz (1/2) ===" in logs
+    assert "=== Processing target 456872500 Hz (2/2) ===" in logs
+    assert logs.count("Processing complete") >= 2
+
+
 def test_cli_dump_iq_and_plot(tmp_path):
     output = tmp_path / "nfm_full.wav"
     iq_dump = tmp_path / "channel.cf32"
@@ -154,7 +215,6 @@ def test_cli_dump_iq_and_plot(tmp_path):
             "nfm",
             "--preview",
             "3",
-            "--no-squelch",
             "--out",
             str(output),
             "--dump-iq",
@@ -173,7 +233,7 @@ def test_cli_dump_iq_and_plot(tmp_path):
     stats = _audio_stats(preview_path)
     assert stats["rms"] > 0.01
 
-    assert ("writing IQ dump" in logs) or ("Dump IQ" in logs)
+    assert "dump IQ" in logs
     assert "Saved stage PSD" in logs
 
 

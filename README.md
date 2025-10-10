@@ -1,13 +1,12 @@
 # IQ to Audio
 
-Python CLI for extracting a narrowband FM (NFM) channel from large SDR++ baseband WAV recordings. The tool streams I/Q samples from disk, isolates the requested RF slice, demodulates to audio, applies optional squelch or silence trimming, and writes a mono 48 kHz WAV.
+Python CLI for extracting a narrowband FM (NFM) channel from large SDR++ baseband WAV recordings. The tool streams I/Q samples from disk, isolates the requested RF slice, demodulates to audio, and writes a mono 48 kHz WAV.
 
 ## Features
 
 - Streams multi‑gigabyte SDR++ recordings without loading them into memory.
 - Auto-recovers center frequency from filenames (override with `--fc`) and probes true sample rate via `ffprobe`.
 - Modular decoding pipeline with pluggable stages supporting NFM, AM, USB, and LSB demodulation.
-- Toggleable squelch, silence trimming, and AGC to match monitoring or archival workflows.
 - Interactive Tk/Matplotlib workspace that covers file discovery, spectrum preview (with adjustable FFT size, theme, smoothing, dynamic range) and a companion waterfall view for time-varying activity, plus selection and run-time monitoring.
 - Live progress bars for each DSP stage plus overall completion in both CLI and interactive flows.
 - Optional PSD snapshots, channelized IQ dumps, and probe-only mode for diagnostics.
@@ -42,28 +41,26 @@ uv run iq-to-audio \
   --in baseband_456834049Hz_14-17-29_09-10-2025.wav \
   --ft 453112500 \
   --bw 7000 \
-  --squelch -45
+  --preview 5
 ```
 
 Running `uv run iq-to-audio` with no extra flags launches the interactive GUI; add `--cli` to stay entirely in terminal mode.
 
 The CLI prints per-stage progress bars (ingest, channelize, demodulate, encode) and an overall percentage. The interactive GUI shows matching progress in a dedicated window once processing begins.
 
-Interactive mode now exposes demod selection, squelch/silence trimming toggles, AGC control (for SSB modes), spectrum tools (FFT size, smoothing, dynamic range, color themes, pan/zoom toolbar), and an auto-launched waterfall so you can dial in weak signals just like an SDR waterfall. Drag to highlight a channel, use the mouse wheel or double-click to zoom, then click “Preview DSP” to demodulate the current preview window or “Confirm & Run” to process the full capture. Adjust options as needed, then hit “Refresh preview” to regenerate the plots.
+Interactive mode now exposes demod selection, AGC control (for SSB modes), spectrum tools (FFT size, smoothing, dynamic range, color themes, pan/zoom toolbar), and an auto-launched waterfall so you can dial in weak signals just like an SDR waterfall. Squelch/silence trim toggles remain in the UI as placeholders for future enhancements, and additional target frequency boxes let you queue up to four extra channels—leave them blank to process only the active selection. Drag to highlight a channel, use the mouse wheel or double-click to zoom, then click “Preview DSP” to demodulate the current preview window or “Confirm & Run” to process the full capture. Adjust options as needed, then hit “Refresh preview” to regenerate the plots.
 Toggle “Analyze entire recording” in the GUI to average the full capture into the preview spectrum when you need maximum frequency resolution.
 
 ## CLI Arguments
 
 - `--in PATH` (required unless `--interactive`): SDR++ baseband WAV input.
-- `--ft HZ`: target RF frequency; required unless using interactive selection.
+- `--ft HZ`: primary target RF frequency; required unless using interactive selection.
+- `--tf HZ`: additional target RF frequency; repeat up to four times to batch multiple channels.
 - `--bw HZ`: channel bandwidth (default 12 500).
 - `--fc HZ`: override center frequency if filename parsing fails.
 - `--fs-ch HZ`: complex channel sample rate before demod (default 96 000).
 - `--demod MODE`: choose demodulator (`nfm`, `am`, `usb`, `lsb`, `ssb` alias for `usb`).
 - `--deemph µs`: FM deemphasis time constant (default 300).
-- `--squelch dBFS`: fixed squelch threshold; omit for adaptive noise tracking.
-- `--silence-trim`: drop gated sections instead of inserting quiet audio.
-- `--no-squelch`: disable gating entirely (always keep audio, including static).
 - `--no-agc`: disable automatic gain control in supported demodulators.
 - `--preview SECONDS`: process only the first `SECONDS` of the recording and exit (preview mode).
 - `--cli`: force CLI mode (default with no flag launches the interactive GUI).
@@ -87,7 +84,7 @@ Toggle “Analyze entire recording” in the GUI to average the full capture int
 ## Examples
 
 ```bash
-# Standard CLI demodulation with adaptive squelch
+# Standard CLI demodulation
 uv run iq-to-audio --in capture.wav --ft 453112500 --bw 9000
 
 # Probe-only metadata inspection
@@ -103,11 +100,14 @@ uv run iq-to-audio --in mw_capture.wav --ft 1010000 --demod am --bw 10000
 # 5-second CLI preview to validate settings
 uv run iq-to-audio --in capture.wav --ft 453112500 --preview 5
 
+# Batch demodulate three targets in one pass
+uv run iq-to-audio --in capture.wav --ft 453112500 --tf 453137500 --tf 453200000 --out multi.wav
+
 # Synthetic benchmark at 2 MS/s with AM demod
 uv run iq-to-audio --benchmark --demod am --benchmark-sample-rate 2000000 --benchmark-seconds 3
 
-# LSB voice monitoring without squelch (keep noise floor)
-uv run iq-to-audio --in hf_voice.wav --ft 7090000 --demod lsb --no-squelch --no-agc
+# LSB voice monitoring with AGC disabled
+uv run iq-to-audio --in hf_voice.wav --ft 7090000 --demod lsb --no-agc
 
 # Interactive GUI workflow (requires matplotlib extra + Tk)
 uv run --extra interactive iq-to-audio --interactive

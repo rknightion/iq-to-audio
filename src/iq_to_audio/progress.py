@@ -158,6 +158,8 @@ class TqdmProgressSink(ProgressSink):
 class ProgressTracker:
     """Coordinate progress phases and delegate rendering to a sink."""
 
+    _MAX_STATUS_WIDTH = 48
+
     def __init__(self, sink: Optional[ProgressSink] = None):
         self._sink: ProgressSink = sink or NullProgressSink()
         self._phases: Dict[str, PhaseState] = {}
@@ -208,7 +210,7 @@ class ProgressTracker:
     def status(self, message: str) -> None:
         if not self._started:
             return
-        self._sink.status(message)
+        self._sink.status(self._normalize_status(message))
 
     def close(self) -> None:
         self._sink.close()
@@ -231,6 +233,12 @@ class ProgressTracker:
     @property
     def cancelled(self) -> bool:
         return self._cancelled
+
+    def _normalize_status(self, message: str) -> str:
+        stripped = " ".join(str(message).split())
+        if len(stripped) <= self._MAX_STATUS_WIDTH:
+            return stripped
+        return stripped[: self._MAX_STATUS_WIDTH - 1] + "…"
 
 
 def clamp(amount: float, upper: float) -> float:

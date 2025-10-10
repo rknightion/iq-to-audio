@@ -55,8 +55,12 @@ class InteractiveOutcome:
 
 @dataclass
 class InteractiveSessionResult:
-    config: ProcessingConfig
+    configs: list[ProcessingConfig]
     progress_sink: Optional[ProgressSink]
+
+    @property
+    def config(self) -> ProcessingConfig:
+        return self.configs[0]
 
 
 MAX_PREVIEW_SAMPLES = 8_000_000  # Complex samples retained in memory for previews (~64 MB).
@@ -495,6 +499,17 @@ class _InteractiveApp:
         self.waterfall_floor_var = tk.StringVar(value="110")
         self.target_var = tk.StringVar(value="—")
         self.bandwidth_var = tk.StringVar(value="—")
+        extra_defaults = []
+        raw_extras = self.base_kwargs.get("extra_target_freqs") or []
+        for value in list(raw_extras)[:4]:
+            try:
+                freq_val = float(value)
+            except (TypeError, ValueError):
+                freq_val = 0.0
+            extra_defaults.append(f"{freq_val:.0f}" if freq_val > 0 else "")
+        while len(extra_defaults) < 4:
+            extra_defaults.append("")
+        self.extra_target_vars = [tk.StringVar(value=val) for val in extra_defaults]
         self.offset_var = tk.StringVar(value="Offset: —")
         self.sample_rate_var = tk.StringVar(value="Sample rate: —")
         self.status_var = tk.StringVar(value="Select a recording to begin.")
@@ -552,26 +567,51 @@ class _InteractiveApp:
         if not self.selection or not self.selected_path:
             raise KeyboardInterrupt()
         kwargs = dict(self.base_kwargs)
+        for deprecated_key in ("squelch_dbfs", "silence_trim", "squelch_enabled", "extra_target_freqs"):
+            kwargs.pop(deprecated_key, None)
         kwargs["center_freq"] = self.center_freq
         kwargs["center_freq_source"] = self.center_source
-        kwargs["target_freq"] = self.selection.center_freq
-        kwargs["bandwidth"] = self.selection.bandwidth
+        bandwidth = self.selection.bandwidth
+        kwargs["bandwidth"] = bandwidth
         kwargs["demod_mode"] = (self.demod_var.get() or kwargs.get("demod_mode", "nfm")).lower()
         self.base_kwargs["demod_mode"] = kwargs["demod_mode"]
-        kwargs["silence_trim"] = self.trim_var.get()
-        kwargs["squelch_enabled"] = self.squelch_var.get()
+        silence_trim = self.trim_var.get()
+        squelch_enabled = self.squelch_var.get()
         kwargs["agc_enabled"] = self.agc_var.get()
-        self.base_kwargs["silence_trim"] = kwargs["silence_trim"]
-        self.base_kwargs["squelch_enabled"] = kwargs["squelch_enabled"]
+        self.base_kwargs["silence_trim"] = silence_trim
+        self.base_kwargs["squelch_enabled"] = squelch_enabled
         self.base_kwargs["agc_enabled"] = kwargs["agc_enabled"]
-        config = ProcessingConfig(in_path=self.selected_path, **kwargs)
+        target_freq = self.selection.center_freq
+        extras = self._collect_extra_targets(target_freq)
+        frequencies = [target_freq, *extras]
+        total = len(frequencies)
+        base_dump = kwargs.get("dump_iq_path")
+        base_plot = kwargs.get("plot_stages_path")
+        configs: list[ProcessingConfig] = []
+        for freq in frequencies:
+            freq_kwargs = dict(kwargs)
+            freq_kwargs["target_freq"] = freq
+            freq_kwargs["output_path"] = self._output_path_for_frequency(self.selected_path, freq, total)
+            freq_kwargs["dump_iq_path"] = self._augment_path(base_dump, freq, total)
+            freq_kwargs["plot_stages_path"] = self._augment_path(base_plot, freq, total)
+            configs.append(ProcessingConfig(in_path=self.selected_path, **freq_kwargs))
+        if configs:
+            self.base_kwargs["target_freq"] = configs[0].target_freq
+            if configs[0].output_path is not None:
+                self.base_kwargs["output_path"] = configs[0].output_path
+            elif "output_path" in self.base_kwargs:
+                self.base_kwargs.pop("output_path")
+        else:
+            self.base_kwargs["target_freq"] = 0.0
+            self.base_kwargs.pop("output_path", None)
+        self.base_kwargs["extra_target_freqs"] = extras
         LOG.info(
-            "Interactive selection: center %.0f Hz, target %.0f Hz, bandwidth %.0f Hz",
+            "Interactive selection: center %.0f Hz, %d target(s), bandwidth %.0f Hz",
             self.center_freq or 0.0,
-            self.selection.center_freq,
-            self.selection.bandwidth,
+            len(configs),
+            bandwidth,
         )
-        return InteractiveSessionResult(config=config, progress_sink=self.progress_sink)
+        return InteractiveSessionResult(configs=configs, progress_sink=self.progress_sink)
 
     def _configure_root_window(self) -> None:
         screen_w = max(1, self.root.winfo_screenwidth())
@@ -898,6 +938,24 @@ class _InteractiveApp:
             row=3, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
 
+        additional_frame = ttk.LabelFrame(main, text="Additional target frequencies (Hz)")
+        additional_frame.pack(fill="x", expand=False, pady=(0, 8))
+        for idx, var in enumerate(self.extra_target_vars, start=2):
+            col = (idx - 2) * 2
+            ttk.Label(additional_frame, text=f"Target {idx}:").grid(
+                row=0,
+                column=col,
+                sticky="w",
+                padx=4,
+                pady=4,
+            )
+            entry = ttk.Entry(
+                additional_frame,
+                textvariable=var,
+                width=18,
+            )
+            entry.grid(row=0, column=col + 1, sticky="w", padx=4, pady=4)
+
         self.status_label = ttk.Label(
             main,
             textvariable=self.status_var,
@@ -1202,7 +1260,12 @@ class _InteractiveApp:
         else:
             if samples is None:
                 raise ValueError("Samples must be provided when no precomputed PSD is supplied.")
-            freqs, psd_db = compute_psd(samples, sample_rate, nfft=nfft)
+            freqs, psd_db = compute_psd(
+                samples,
+                sample_rate,
+                nfft=nfft,
+                fft_workers=self._fft_worker_count(),
+            )
         psd_db = np.asarray(psd_db, dtype=np.float64)
         if smooth > 1 and psd_db.size >= smooth:
             kernel = np.ones(smooth) / smooth
@@ -1341,7 +1404,30 @@ class _InteractiveApp:
             messagebox.showerror("Preview failed", str(exc))
             return
 
+        primary_freq = config.target_freq
+        extras = self._collect_extra_targets(primary_freq)
+        total = 1 + len(extras)
+        candidate_freqs = [primary_freq, *extras]
+        base_dump = config.dump_iq_path
+        base_plot = config.plot_stages_path
+        configs: list[ProcessingConfig] = []
+        for idx, freq in enumerate(candidate_freqs):
+            output_path = self._output_path_for_frequency(self.selected_path, freq, total)
+            dump_path = self._augment_path(base_dump, freq, total)
+            plot_path = self._augment_path(base_plot, freq, total)
+            cfg = replace(
+                config if idx == 0 else configs[0],
+                target_freq=freq,
+                output_path=output_path,
+                dump_iq_path=dump_path,
+                plot_stages_path=plot_path,
+            )
+            configs.append(cfg)
+        config = configs[0]
+        self.base_kwargs["output_path"] = config.output_path
         self._ensure_output_directory(config.output_path)
+        for extra_cfg in configs[1:]:
+            self._ensure_output_directory(extra_cfg.output_path)
         self._preview_running = True
         sink = StatusProgressSink(
             lambda message, highlight: self._threadsafe_status(message, error=highlight)
@@ -1352,16 +1438,33 @@ class _InteractiveApp:
         if self.confirm_btn:
             self.confirm_btn.configure(state="disabled")
         self._set_stop_enabled(True)
-        self._set_status(f"Previewing {seconds:.2f} s…", error=True)
+        if total > 1:
+            self._set_status(f"Previewing {seconds:.2f} s… (1/{total})", error=True)
+        else:
+            self._set_status(f"Previewing {seconds:.2f} s…", error=True)
 
         def worker() -> None:
+            outputs: list[Path] = []
             try:
-                result, preview_path = run_preview(
-                    config,
-                    seconds,
-                    progress_sink=sink,
-                    on_pipeline=self._register_preview_pipeline,
-                )
+                for index, cfg in enumerate(configs, start=1):
+                    if total > 1:
+                        sink.status(f"Preview {index}/{total}")
+                    try:
+                        _result, preview_path = run_preview(
+                            cfg,
+                            seconds,
+                            progress_sink=sink,
+                            on_pipeline=self._register_preview_pipeline,
+                        )
+                    except ProcessingCancelled:
+                        raise
+                    except Exception as exc:
+                        LOG.error(
+                            "Preview failed for %.0f Hz: %s", cfg.target_freq, exc
+                        )
+                        raise
+                    else:
+                        outputs.append(preview_path)
             except ProcessingCancelled:
                 LOG.info("Preview cancelled by user.")
                 try:
@@ -1369,7 +1472,8 @@ class _InteractiveApp:
                 except Exception:  # pragma: no cover - root already closed
                     pass
             except Exception as exc:
-                LOG.error("Preview failed: %s", exc)
+                if not outputs:
+                    LOG.error("Preview failed: %s", exc)
                 try:
                     self.root.after(0, lambda err=exc: self._handle_preview_failed(err))
                 except Exception:  # pragma: no cover - root already closed
@@ -1378,9 +1482,7 @@ class _InteractiveApp:
                 try:
                     self.root.after(
                         0,
-                        lambda res=result, path=preview_path: self._handle_preview_complete(
-                            res, path
-                        ),
+                        lambda paths=list(outputs): self._handle_preview_complete(paths),
                     )
                 except Exception:  # pragma: no cover - root already closed
                     pass
@@ -1423,16 +1525,20 @@ class _InteractiveApp:
                 state="normal" if self.selection is not None else "disabled"
             )
 
-    def _handle_preview_complete(self, _result, preview_path: Path) -> None:
+    def _handle_preview_complete(self, preview_paths: list[Path]) -> None:
         self._preview_finished()
-        self._set_status(
-            f"Preview complete (output: {preview_path.name})", error=False
-        )
+        if not preview_paths:
+            self._set_status("Preview complete.", error=False)
+            return
+        if len(preview_paths) == 1:
+            summary = f"Preview complete (output: {preview_paths[0].name})"
+            detail = str(preview_paths[0])
+        else:
+            summary = f"Preview complete for {len(preview_paths)} targets."
+            detail = "\n".join(f"{idx+1}. {path}" for idx, path in enumerate(preview_paths))
+        self._set_status(summary, error=False)
         if messagebox:
-            messagebox.showinfo(
-                "Preview complete",
-                f"Preview audio written to:\n{preview_path}",
-            )
+            messagebox.showinfo("Preview complete", f"Preview audio written to:\n{detail}")
 
     def _handle_preview_failed(self, error: Exception) -> None:
         self._preview_finished()
@@ -1951,8 +2057,46 @@ class _InteractiveApp:
         except ValueError:
             return None
 
+    def _collect_extra_targets(self, primary: float) -> list[float]:
+        extras: list[float] = []
+        seen = []
+        if primary > 0:
+            seen.append(primary)
+        for var in self.extra_target_vars:
+            freq = self._parse_float(var.get())
+            if freq is None or freq <= 0:
+                continue
+            if any(math.isclose(freq, other, rel_tol=0.0, abs_tol=0.5) for other in seen):
+                continue
+            extras.append(freq)
+            seen.append(freq)
+        self.base_kwargs["extra_target_freqs"] = extras
+        return extras
+
+    @staticmethod
+    def _augment_path(path: Optional[Path], freq: float, total: int) -> Optional[Path]:
+        if path is None or total <= 1:
+            return path
+        freq_tag = int(round(freq))
+        return path.with_name(f"{path.stem}_{freq_tag}{path.suffix}")
+
+    def _output_path_for_frequency(
+        self, input_path: Path, target_freq: float, total: int
+    ) -> Optional[Path]:
+        base = self._resolve_output_path(input_path, target_freq)
+        if total <= 1:
+            return base
+        if self._current_output_dir() is not None:
+            return base
+        if base is None:
+            return None
+        freq_tag = int(round(target_freq))
+        return base.with_name(f"{base.stem}_{freq_tag}{base.suffix}")
+
     def _build_config(self, path: Path, center_override: Optional[float]) -> ProcessingConfig:
         kwargs = dict(self.base_kwargs)
+        for deprecated_key in ("squelch_dbfs", "silence_trim", "squelch_enabled"):
+            kwargs.pop(deprecated_key, None)
         center_value = center_override
         if center_value is None or center_value <= 0:
             parsed = self._parse_float(self.center_var.get())
@@ -1962,17 +2106,17 @@ class _InteractiveApp:
         kwargs["center_freq_source"] = self.center_source
         demod = (self.demod_var.get() or kwargs.get("demod_mode", "nfm")).lower()
         kwargs["demod_mode"] = demod
-        kwargs["silence_trim"] = self.trim_var.get()
-        kwargs["squelch_enabled"] = self.squelch_var.get()
+        silence_trim = self.trim_var.get()
+        squelch_enabled = self.squelch_var.get()
         kwargs["agc_enabled"] = self.agc_var.get()
         self.base_kwargs.update(
             {
                 "center_freq": center_value,
                 "demod_mode": demod,
-                "silence_trim": kwargs["silence_trim"],
-                "squelch_enabled": kwargs["squelch_enabled"],
-                "agc_enabled": kwargs["agc_enabled"],
-            }
+                "silence_trim": silence_trim,
+                "squelch_enabled": squelch_enabled,
+            "agc_enabled": kwargs["agc_enabled"],
+        }
         )
         if center_value is not None and center_value > 0:
             self.center_freq = center_value
@@ -1986,19 +2130,35 @@ class _InteractiveApp:
             if self.selection is not None
             else self.base_kwargs.get("bandwidth", kwargs.get("bandwidth", 12_500.0))
         )
-        kwargs["target_freq"] = target_freq
         kwargs["bandwidth"] = bandwidth
-        self.base_kwargs["target_freq"] = target_freq
         self.base_kwargs["bandwidth"] = bandwidth
         self.base_kwargs["center_freq_source"] = self.center_source
-        output_path = self._resolve_output_path(path, target_freq)
-        kwargs["output_path"] = output_path
-        if output_path is not None:
-            self.base_kwargs["output_path"] = output_path
-        elif "output_path" in self.base_kwargs:
-            self.base_kwargs.pop("output_path")
+        extras = self._collect_extra_targets(target_freq)
+        frequencies = [target_freq, *extras]
+        total = len(frequencies)
+        base_dump = kwargs.get("dump_iq_path")
+        base_plot = kwargs.get("plot_stages_path")
+        configs: list[ProcessingConfig] = []
+        for freq in frequencies:
+            freq_kwargs = dict(kwargs)
+            freq_kwargs["target_freq"] = freq
+            freq_kwargs["output_path"] = self._output_path_for_frequency(path, freq, total)
+            freq_kwargs["dump_iq_path"] = self._augment_path(base_dump, freq, total)
+            freq_kwargs["plot_stages_path"] = self._augment_path(base_plot, freq, total)
+            config = ProcessingConfig(in_path=path, **freq_kwargs)
+            configs.append(config)
+        if configs:
+            self.base_kwargs["target_freq"] = configs[0].target_freq
+            if configs[0].output_path is not None:
+                self.base_kwargs["output_path"] = configs[0].output_path
+            elif "output_path" in self.base_kwargs:
+                self.base_kwargs.pop("output_path")
+        else:
+            self.base_kwargs["target_freq"] = 0.0
+            self.base_kwargs.pop("output_path", None)
+        self.base_kwargs["extra_target_freqs"] = extras
         self._update_output_path_hint()
-        return ProcessingConfig(in_path=path, **kwargs)
+        return configs[0]
 
     def _compute_full_psd(
         self,
@@ -2313,9 +2473,9 @@ def interactive_select(
             "demod_mode": config.demod_mode,
             "fs_ch_target": config.fs_ch_target,
             "deemph_us": config.deemph_us,
-            "squelch_dbfs": config.squelch_dbfs,
-            "silence_trim": config.silence_trim,
-            "squelch_enabled": config.squelch_enabled,
+            "squelch_dbfs": getattr(config, "squelch_dbfs", None),
+            "silence_trim": getattr(config, "silence_trim", False),
+            "squelch_enabled": getattr(config, "squelch_enabled", False),
             "agc_enabled": config.agc_enabled,
             "output_path": config.output_path,
             "dump_iq_path": config.dump_iq_path,

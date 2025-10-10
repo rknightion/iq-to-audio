@@ -6,7 +6,7 @@ from typing import Dict, Optional
 import numpy as np
 
 from .base import Decoder, DecoderStats
-from .common import DCBlocker, SquelchGate
+from .common import DCBlocker
 
 
 class SSBDecoder(Decoder):
@@ -17,9 +17,6 @@ class SSBDecoder(Decoder):
     def __init__(
         self,
         sideband: str,
-        squelch_dbfs: Optional[float],
-        silence_trim: bool,
-        squelch_enabled: bool,
         agc_enabled: bool,
         dc_radius: float = 0.995,
         agc_target_dbfs: float = -12.0,
@@ -29,12 +26,8 @@ class SSBDecoder(Decoder):
         if sideband not in {"usb", "lsb"}:
             raise ValueError("sideband must be 'usb' or 'lsb'")
         self._sideband = sideband
-        self._squelch_dbfs = squelch_dbfs
-        self._silence_trim = silence_trim
-        self._squelch_enabled = squelch_enabled
         self._agc_enabled = agc_enabled
         self._dc_blocker = DCBlocker(radius=dc_radius)
-        self._squelch: Optional[SquelchGate] = None
         self._last_stats: Optional[DecoderStats] = None
         self._intermediates: Dict[str, tuple[np.ndarray, float]] = {}
         self._sample_rate = 0.0
@@ -42,18 +35,10 @@ class SSBDecoder(Decoder):
         self._agc_decay = agc_decay
 
     def setup(self, sample_rate: float) -> None:
-        if self._squelch_enabled:
-            self._squelch = SquelchGate(
-                sample_rate=sample_rate,
-                threshold_dbfs=self._squelch_dbfs,
-                silence_trim=self._silence_trim,
-            )
-        else:
-            self._squelch = None
         self._sample_rate = sample_rate
 
     def process(self, samples: np.ndarray) -> tuple[np.ndarray, Optional[DecoderStats]]:
-        if self._squelch is None and self._sample_rate == 0.0:
+        if self._sample_rate == 0.0:
             raise RuntimeError("Decoder.setup(sample_rate) must be called before processing data.")
         if self._sideband == "lsb":
             analytic = np.conj(samples)
@@ -62,24 +47,20 @@ class SSBDecoder(Decoder):
         baseband = analytic.real.astype(np.float32, copy=False)
         dc_audio = self._dc_blocker.process(baseband)
         processed = self._apply_agc(dc_audio) if self._agc_enabled else dc_audio
-        if self._squelch is not None:
-            gated, threshold, dbfs, dropped = self._squelch.process(processed)
-        else:
-            gated = processed
-            rms = math.sqrt(float(np.mean(processed.astype(np.float64) ** 2)) + 1e-18)
-            dbfs = 20.0 * math.log10(rms + 1e-12)
-            threshold = self._squelch_dbfs if self._squelch_dbfs is not None else dbfs
-            dropped = False
-        stats = DecoderStats(rms_dbfs=dbfs, gate_threshold_dbfs=threshold, dropped=dropped)
+        rms = math.sqrt(float(np.mean(processed.astype(np.float64) ** 2)) + 1e-18)
+        dbfs = 20.0 * math.log10(rms + 1e-12)
+        stats = DecoderStats(rms_dbfs=dbfs)
         self._last_stats = stats
         if samples.size:
-            self._intermediates = {
+            intermediates: Dict[str, tuple[np.ndarray, float]] = {
                 "analytic": (analytic.copy(), self._sample_rate),
                 "dc_block": (dc_audio.copy(), self._sample_rate),
-                "agc" if self._agc_enabled else "audio_pre_gate": (processed.copy(), self._sample_rate),
-                "audio": (gated.copy(), self._sample_rate),
             }
-        return gated, stats
+            if self._agc_enabled:
+                intermediates["agc"] = (processed.copy(), self._sample_rate)
+            intermediates["audio"] = (processed.copy(), self._sample_rate)
+            self._intermediates = intermediates
+        return processed, stats
 
     def finalize(self) -> None:
         return

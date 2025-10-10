@@ -7,7 +7,12 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .processing import ProcessingCancelled, ProcessingConfig, ProcessingPipeline
+from .processing import (
+    ProcessingCancelled,
+    ProcessingConfig,
+    ProcessingPipeline,
+    ProcessingResult,
+)
 from .preview import run_preview
 from .progress import TqdmProgressSink
 
@@ -42,6 +47,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target RF frequency in Hz.",
     )
     parser.add_argument(
+        "--tf",
+        dest="extra_target_freqs",
+        type=positive_float,
+        action="append",
+        default=None,
+        help="Additional target RF frequency in Hz. May be supplied up to four times.",
+    )
+    parser.add_argument(
         "--bw",
         dest="bandwidth",
         type=positive_float,
@@ -74,24 +87,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_float,
         default=300.0,
         help="FM de-emphasis time constant in microseconds (default: 300).",
-    )
-    parser.add_argument(
-        "--squelch",
-        dest="squelch_dbfs",
-        type=float,
-        help="Squelch threshold in dBFS. If omitted, threshold adapts to noise.",
-    )
-    parser.add_argument(
-        "--silence-trim",
-        dest="silence_trim",
-        action="store_true",
-        help="Drop chunks that fall below squelch threshold.",
-    )
-    parser.add_argument(
-        "--no-squelch",
-        dest="squelch_enabled",
-        action="store_false",
-        help="Disable squelch gating (default: enabled).",
     )
     parser.add_argument(
         "--no-agc",
@@ -215,7 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable debug logging.",
     )
-    parser.set_defaults(squelch_enabled=True, agc_enabled=True)
+    parser.set_defaults(agc_enabled=True)
     return parser
 
 
@@ -231,27 +226,51 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    base_kwargs = dict(
-        target_freq=args.target_freq or 0.0,
+    extra_target_freqs = list(args.extra_target_freqs or [])
+    frequencies: list[float] = []
+    if args.target_freq is not None:
+        frequencies.append(args.target_freq)
+    if not frequencies and extra_target_freqs:
+        frequencies.append(extra_target_freqs.pop(0))
+    frequencies.extend(extra_target_freqs)
+
+    if len(frequencies) > 5:
+        parser.error("At most five target frequencies are supported per run.")
+    seen: list[float] = []
+    for freq in frequencies:
+        for prior in seen:
+            if math.isclose(freq, prior, rel_tol=0.0, abs_tol=0.5):
+                parser.error("Duplicate target frequencies are not allowed.")
+        seen.append(freq)
+
+    def annotate_path(base: Optional[Path], freq: float, total: int) -> Optional[Path]:
+        if base is None or total <= 1:
+            return base
+        freq_tag = int(round(freq))
+        return base.with_name(f"{base.stem}_{freq_tag}{base.suffix}")
+
+    shared_kwargs = dict(
         bandwidth=args.bandwidth,
         center_freq=args.center_freq,
         center_freq_source="cli" if args.center_freq is not None else None,
         demod_mode=args.demod,
         fs_ch_target=args.fs_ch,
         deemph_us=args.deemph_us,
-        squelch_dbfs=args.squelch_dbfs,
-        silence_trim=args.silence_trim,
-        squelch_enabled=args.squelch_enabled,
         agc_enabled=args.agc_enabled,
-        output_path=args.output_path,
-        dump_iq_path=args.dump_iq,
         chunk_size=args.chunk_size,
         filter_block=args.filter_block,
         iq_order=args.iq_order,
         probe_only=args.probe_only,
         mix_sign_override=args.mix_sign,
-        plot_stages_path=args.plot_stages,
         fft_workers=args.fft_workers,
+    )
+    base_kwargs = dict(shared_kwargs)
+    base_kwargs.update(
+        target_freq=frequencies[0] if frequencies else 0.0,
+        extra_target_freqs=frequencies[1:],
+        output_path=args.output_path,
+        dump_iq_path=args.dump_iq,
+        plot_stages_path=args.plot_stages,
     )
 
     if args.benchmark and args.interactive:
@@ -260,6 +279,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.benchmark:
         from .benchmark import run_benchmark
 
+        benchmark_kwargs = dict(base_kwargs)
+        benchmark_kwargs.pop("extra_target_freqs", None)
         try:
             return run_benchmark(
                 seconds=args.benchmark_seconds,
@@ -267,7 +288,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 freq_offset=args.benchmark_offset,
                 center_freq=args.center_freq,
                 target_freq=args.target_freq,
-                base_kwargs=base_kwargs,
+                base_kwargs=benchmark_kwargs,
             )
         except Exception as exc:
             LOG.error("Benchmark failed: %s", exc)
@@ -276,6 +297,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
 
     progress_sink = None
+    configured_configs: list[ProcessingConfig] = []
 
     launch_gui = args.interactive or (not args.cli and not args.benchmark)
 
@@ -291,7 +313,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 base_kwargs=base_kwargs,
                 snapshot_seconds=args.interactive_seconds,
             )
-            config = session.config
+            configured_configs = list(session.configs)
             progress_sink = session.progress_sink
         except KeyboardInterrupt:
             LOG.info("Interactive session cancelled.")
@@ -304,73 +326,128 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         if args.input_path is None:
             parser.error("--in is required in CLI mode.")
-        if args.target_freq is None:
-            parser.error("--ft is required in CLI mode.")
-        config = ProcessingConfig(
-            in_path=args.input_path,
-            **base_kwargs,
-        )
+        if not frequencies:
+            parser.error("Provide at least one --ft/--tf target frequency in CLI mode.")
 
     if args.preview_seconds is not None:
         if launch_gui:
             LOG.warning("--preview is ignored in interactive mode; use the GUI preview button instead.")
         else:
-            try:
-                preview_sink = TqdmProgressSink()
-            except RuntimeError as exc:
-                LOG.warning("Progress reporting disabled: %s", exc)
-                preview_sink = None
-            try:
-                _, preview_path = run_preview(
-                    config,
-                    args.preview_seconds,
-                    progress_sink=preview_sink,
+            total = len(frequencies)
+
+            for index, freq in enumerate(frequencies, start=1):
+                freq_output = annotate_path(args.output_path, freq, total)
+                freq_dump = annotate_path(args.dump_iq, freq, total)
+                freq_plot = annotate_path(args.plot_stages, freq, total)
+                config = ProcessingConfig(
+                    in_path=args.input_path,
+                    target_freq=freq,
+                    output_path=freq_output,
+                    dump_iq_path=freq_dump,
+                    plot_stages_path=freq_plot,
+                    **shared_kwargs,
                 )
-            except ProcessingCancelled:
-                LOG.info("Preview cancelled by user.")
-                return 0
-            except Exception as exc:
-                LOG.error("Preview failed: %s", exc)
-                if args.verbose:
-                    LOG.exception("Preview error details")
-                return 1
-            LOG.info("Preview written to %s", preview_path)
+                LOG.info(
+                    "=== Previewing target %.0f Hz (%d/%d) ===",
+                    freq,
+                    index,
+                    total,
+                )
+                try:
+                    preview_sink = TqdmProgressSink()
+                except RuntimeError as exc:
+                    LOG.warning("Progress reporting disabled: %s", exc)
+                    preview_sink = None
+                try:
+                    _, preview_path = run_preview(
+                        config,
+                        args.preview_seconds,
+                        progress_sink=preview_sink,
+                    )
+                except ProcessingCancelled:
+                    LOG.info("Preview cancelled by user.")
+                    return 0
+                except Exception as exc:
+                    LOG.error("Preview failed for %.0f Hz: %s", freq, exc)
+                    if args.verbose:
+                        LOG.exception("Preview error details")
+                    return 1
+                LOG.info("Preview written to %s", preview_path)
             return 0
 
-    pipeline = ProcessingPipeline(config)
-    if progress_sink is None:
-        try:
-            progress_sink = TqdmProgressSink()
-        except RuntimeError as exc:
-            LOG.warning("Progress reporting disabled: %s", exc)
-            progress_sink = None
-    try:
-        result = pipeline.run(progress_sink=progress_sink)
-    except ProcessingCancelled:
-        LOG.info("Processing cancelled by user.")
+    if not launch_gui:
+        total = len(frequencies)
+        configured_configs = []
+        for freq in frequencies:
+            freq_output = annotate_path(args.output_path, freq, total)
+            freq_dump = annotate_path(args.dump_iq, freq, total)
+            freq_plot = annotate_path(args.plot_stages, freq, total)
+            config = ProcessingConfig(
+                in_path=args.input_path,
+                target_freq=freq,
+                output_path=freq_output,
+                dump_iq_path=freq_dump,
+                plot_stages_path=freq_plot,
+                **shared_kwargs,
+            )
+            configured_configs.append(config)
+    total = len(configured_configs)
+    if total == 0:
+        LOG.info("No target frequencies to process.")
         return 0
-    except Exception as exc:  # pragma: no cover - ensure user friendly exit
-        LOG.error("Processing failed: %s", exc)
-        if args.verbose:
-            LOG.exception("Debug traceback")
-        return 1
+
+    results: list[tuple[ProcessingConfig, ProcessingResult]] = []
+    for index, config in enumerate(configured_configs, start=1):
+        LOG.info(
+            "=== Processing target %.0f Hz (%d/%d) ===",
+            config.target_freq,
+            index,
+            total,
+        )
+        pipeline = ProcessingPipeline(config)
+        if launch_gui and index == 1 and progress_sink is not None:
+            sink = progress_sink
+            progress_sink = None
+        else:
+            try:
+                sink = TqdmProgressSink()
+            except RuntimeError as exc:
+                LOG.warning("Progress reporting disabled: %s", exc)
+                sink = None
+        try:
+            result = pipeline.run(progress_sink=sink)
+        except ProcessingCancelled:
+            LOG.info("Processing cancelled by user.")
+            return 0
+        except Exception as exc:  # pragma: no cover - ensure user friendly exit
+            LOG.error("Processing failed for %.0f Hz: %s", config.target_freq, exc)
+            if args.verbose:
+                LOG.exception("Debug traceback")
+            return 1
+        results.append((config, result))
 
     if args.probe_only:
-        info = result.sample_rate_probe
-        print(
-            f"Sample rate: {info.value:.2f} Hz (ffprobe={info.ffprobe}, header={info.header}, wave={info.wave})"
-        )
-        print(
-            f"Center frequency: {result.center_freq:.0f} Hz, target: {result.target_freq:.0f} Hz, "
-            f"offset: {result.freq_offset:.0f} Hz"
-        )
-        print(
-            f"Channel decimation: {result.decimation} -> {result.fs_channel:.2f} Hz, mixer sign {result.mix_sign}"
-        )
+        for config, result in results:
+            info = result.sample_rate_probe
+            print(
+                f"[{int(round(config.target_freq))}] Sample rate: {info.value:.2f} Hz "
+                f"(ffprobe={info.ffprobe}, header={info.header}, wave={info.wave})"
+            )
+            print(
+                f"[{int(round(config.target_freq))}] Center frequency: {result.center_freq:.0f} Hz, "
+                f"target: {result.target_freq:.0f} Hz, offset: {result.freq_offset:.0f} Hz"
+            )
+            print(
+                f"[{int(round(config.target_freq))}] Channel decimation: {result.decimation} "
+                f"-> {result.fs_channel:.2f} Hz, mixer sign {result.mix_sign}"
+            )
     else:
-        if result.audio_peak > 0:
-            peak_db = 20.0 * math.log10(result.audio_peak)
-            print(f"Audio peak level: {peak_db:.2f} dBFS")
+        for config, result in results:
+            if result.audio_peak > 0:
+                peak_db = 20.0 * math.log10(result.audio_peak)
+                print(
+                    f"[{int(round(config.target_freq))}] Audio peak level: {peak_db:.2f} dBFS"
+                )
 
     return 0
 

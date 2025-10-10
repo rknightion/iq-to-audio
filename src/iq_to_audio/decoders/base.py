@@ -12,8 +12,6 @@ class DecoderStats:
     """Runtime statistics from a decoder stage."""
 
     rms_dbfs: float
-    gate_threshold_dbfs: float
-    dropped: bool
 
 
 class Decoder(ABC):

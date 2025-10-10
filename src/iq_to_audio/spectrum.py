@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional, Tuple
 
 import numpy as np
+from scipy import fft as sp_fft
 
 LOG = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ def compute_psd(
     """Compute a single-sided PSD (dBFS) for complex samples.
 
     The implementation mirrors the legacy helper in visualize.py but optionally
-    leverages multi-threaded FFTs when supported by NumPy.
+    leverages SciPy's multi-threaded FFTs when available.
     """
     if samples.size == 0:
         raise ValueError("Cannot compute PSD for an empty signal.")
@@ -32,8 +33,8 @@ def compute_psd(
     win_power = np.sum(window ** 2) / use.size
     windowed = np.asarray(use, dtype=np.complex128) * window
     spectrum = _fft_dispatch(windowed, nfft, fft_workers)
-    spectrum = np.fft.fftshift(spectrum)
-    freqs = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / sample_rate))
+    spectrum = sp_fft.fftshift(spectrum)
+    freqs = sp_fft.fftshift(sp_fft.fftfreq(nfft, d=1.0 / sample_rate))
     scale = (use.size * sample_rate * win_power) + _NUMPY_EPS
     psd = spectrum * np.conj(spectrum) / scale
     psd_db = 10.0 * np.log10(np.abs(psd) + _NUMPY_EPS)
@@ -130,10 +131,10 @@ def _fft_dispatch(
 ) -> np.ndarray:
     if fft_workers and fft_workers > 1:
         try:
-            return np.fft.fft(samples, n=nfft, workers=fft_workers)
+            return sp_fft.fft(samples, n=nfft, workers=fft_workers)
         except TypeError:
-            return np.fft.fft(samples, n=nfft)
-    return np.fft.fft(samples, n=nfft)
+            return sp_fft.fft(samples, n=nfft)
+    return sp_fft.fft(samples, n=nfft)
 
 
 class _SlidingFFT:
@@ -149,8 +150,8 @@ class _SlidingFFT:
         self.fft_workers = fft_workers if fft_workers and fft_workers > 1 else None
         self.window = np.hanning(self.nfft).astype(np.float64)
         self.win_power = np.sum(self.window ** 2) / self.nfft
-        self.freqs = np.fft.fftshift(
-            np.fft.fftfreq(self.nfft, d=1.0 / self.sample_rate)
+        self.freqs = sp_fft.fftshift(
+            sp_fft.fftfreq(self.nfft, d=1.0 / self.sample_rate)
         ).astype(np.float64)
 
     def psd(self, samples: np.ndarray) -> np.ndarray:
@@ -160,7 +161,7 @@ class _SlidingFFT:
             )
         windowed = np.asarray(samples, dtype=np.complex128) * self.window
         spectrum = _fft_dispatch(windowed, self.nfft, self.fft_workers)
-        spectrum = np.fft.fftshift(spectrum)
+        spectrum = sp_fft.fftshift(spectrum)
         scale = (self.nfft * self.sample_rate * self.win_power) + _NUMPY_EPS
         psd = spectrum * np.conj(spectrum) / scale
         return 10.0 * np.log10(np.abs(psd) + _NUMPY_EPS)
