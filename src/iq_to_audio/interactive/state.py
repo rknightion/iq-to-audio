@@ -53,6 +53,13 @@ class InteractiveState:
     bandwidth_hz: float | None = None
     agc_enabled: bool = True
     preferred_agc: bool = True
+    input_format_choice: str = "auto"
+    detected_format: str | None = None
+    input_format_source: str = ""
+    input_format_message: str = "Select a recording to detect input format."
+    input_format_error: str = ""
+    sample_rate_override: float | None = None
+    sample_rate_source: str = ""
     output_dir: Path | None = None
     output_hint: str = "Select a recording to preview output location."
     nfft: int = 262_144
@@ -117,6 +124,30 @@ class InteractiveState:
         self.waterfall_floor = int(kwargs.get("waterfall_floor", self.waterfall_floor))
         self.agc_enabled = bool(kwargs.get("agc_enabled", True))
         self.preferred_agc = self.agc_enabled
+        manual_container = kwargs.get("input_container")
+        manual_format = kwargs.get("input_format")
+        if manual_format:
+            container = str(manual_container) if manual_container else "wav"
+            self.input_format_choice = f"{container}:{manual_format}"
+            self.input_format_source = kwargs.get("input_format_source", "manual")
+        else:
+            self.input_format_choice = "auto"
+            self.input_format_source = kwargs.get("input_format_source", "")
+        manual_rate = kwargs.get("input_sample_rate")
+        if manual_rate:
+            try:
+                rate = float(manual_rate)
+            except (TypeError, ValueError):
+                rate = None
+            if rate and rate > 0:
+                self.sample_rate_override = rate
+                self.sample_rate_source = "manual"
+            else:
+                self.sample_rate_override = None
+                self.sample_rate_source = ""
+        else:
+            self.sample_rate_override = None
+            self.sample_rate_source = ""
 
     def update_center(self, center: float, source: str) -> None:
         self.center_freq = center
@@ -151,6 +182,71 @@ class InteractiveState:
         self.agc_enabled = enabled
         self.base_kwargs["agc_enabled"] = enabled
         self.preferred_agc = enabled
+
+    def set_detected_format(
+        self,
+        format_key: str | None,
+        *,
+        source: str,
+        message: str | None,
+        error: str | None,
+    ) -> None:
+        self.detected_format = format_key
+        self.input_format_source = source if format_key else ""
+        if format_key:
+            if self.input_format_choice == "auto":
+                self.input_format_message = message or "Input format detected."
+            self.input_format_error = ""
+            if self.input_format_choice == "auto":
+                self.base_kwargs.pop("input_format", None)
+                self.base_kwargs.pop("input_container", None)
+                self.base_kwargs["input_format_source"] = source
+        else:
+            if self.input_format_choice == "auto":
+                self.input_format_message = message or "Unable to detect input format."
+                self.input_format_error = error or ""
+                self.base_kwargs.pop("input_format", None)
+                self.base_kwargs.pop("input_container", None)
+                self.base_kwargs.pop("input_format_source", None)
+            else:
+                self.input_format_error = ""
+
+    def set_manual_format(self, container: str, codec: str) -> None:
+        key = f"{container}:{codec}"
+        self.input_format_choice = key
+        self.base_kwargs["input_format"] = codec
+        self.base_kwargs["input_container"] = container
+        self.base_kwargs["input_format_source"] = "manual"
+        self.input_format_error = ""
+        self.input_format_message = f"Manual override: {container.upper()} / {codec}"
+
+    def clear_manual_format(self) -> None:
+        self.input_format_choice = "auto"
+        self.base_kwargs.pop("input_format", None)
+        self.base_kwargs.pop("input_container", None)
+        if self.detected_format:
+            self.base_kwargs["input_format_source"] = self.input_format_source
+            if not self.input_format_message:
+                self.input_format_message = "Input format detected."
+        else:
+            self.base_kwargs.pop("input_format_source", None)
+            self.input_format_message = "Auto detection pending."
+            self.input_format_error = ""
+
+    def set_sample_rate_override(self, value: float | None) -> None:
+        if value is None or value <= 0:
+            self.sample_rate_override = None
+            self.sample_rate_source = ""
+            self.base_kwargs.pop("input_sample_rate", None)
+            return
+        self.sample_rate_override = float(value)
+        self.sample_rate_source = "manual"
+        self.base_kwargs["input_sample_rate"] = self.sample_rate_override
+
+    def set_sample_rate_detected(self, value: float, source: str) -> None:
+        self.sample_rate = value
+        if not self.sample_rate_override:
+            self.sample_rate_source = source
 
     def resolved_output_dir(self) -> Path | None:
         if self.output_dir is not None:
