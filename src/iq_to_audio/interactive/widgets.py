@@ -215,3 +215,22 @@ class PanelGroup(QtWidgets.QGroupBox):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
         self.setLayout(layout)
+
+
+class LockedSplitter(QtWidgets.QSplitter):
+    """QSplitter that prevents dragging particular handles."""
+
+    def __init__(
+        self,
+        orientation: Qt.Orientation,
+        *,
+        locked_handles: set[int] | None = None,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(orientation, parent)
+        self._locked_handles = locked_handles or set()
+
+    def moveSplitter(self, pos: int, handle: int) -> None:  # type: ignore[override]  # noqa: N802
+        if handle in self._locked_handles:
+            return
+        super().moveSplitter(pos, handle)

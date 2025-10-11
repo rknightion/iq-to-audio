@@ -45,7 +45,7 @@ from .panels import (
     WaterfallOptionsPanel,
 )
 from .state import COLOR_THEMES, InteractiveState
-from .widgets import PanelGroup, SpanController, WaterfallWindow
+from .widgets import LockedSplitter, PanelGroup, SpanController, WaterfallWindow
 from .workers import PreviewWorker, SnapshotJob, SnapshotWorker
 
 LOG = logging.getLogger(__name__)
