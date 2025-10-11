@@ -10,8 +10,9 @@ from typing import Any
 import numpy as np
 from PySide6 import QtCore
 
+from ..input_formats import resolve_input_format
 from ..preview import run_preview
-from ..probe import probe_sample_rate
+from ..probe import SampleRateProbe, probe_sample_rate
 from ..processing import ProcessingCancelled, ProcessingConfig, tune_chunk_size
 from ..spectrum import WaterfallResult, streaming_waterfall
 from ..utils import detect_center_frequency
@@ -42,8 +43,22 @@ def gather_snapshot(
     progress_cb: Callable[[float, float], None] | None = None,
 ) -> SnapshotData:
     """Stream a preview segment of IQ data for interactive spectrum display."""
-    probe = probe_sample_rate(config.in_path)
-    sample_rate = probe.value
+    input_spec, _source = resolve_input_format(
+        config.in_path,
+        requested=config.input_format,
+        container_hint=config.input_container,
+    )
+    manual_rate = config.input_sample_rate
+    if manual_rate is not None and manual_rate <= 0:
+        raise ValueError("Input sample rate override must be positive.")
+    if input_spec.container == "raw":
+        if manual_rate is None:
+            raise ValueError("Raw IQ inputs require a sample rate override before previewing.")
+        sample_rate = float(manual_rate)
+        probe = SampleRateProbe(ffprobe=None, header=None, wave=sample_rate)
+    else:
+        probe = probe_sample_rate(config.in_path)
+        sample_rate = float(manual_rate) if manual_rate is not None else probe.value
 
     center_freq = config.center_freq
     if center_freq is None:
@@ -70,7 +85,14 @@ def gather_snapshot(
     def _chunk_iter() -> Iterator[np.ndarray]:
         nonlocal retain_pos, consumed, last_report
         remaining = total_samples
-        with IQReader(config.in_path, chunk_size, config.iq_order) as reader:
+        reader_sample_rate = sample_rate if input_spec.container == "raw" else None
+        with IQReader(
+            config.in_path,
+            chunk_size,
+            config.iq_order,
+            input_spec,
+            sample_rate=reader_sample_rate,
+        ) as reader:
             for block in reader:
                 if remaining <= 0:
                     break
@@ -146,8 +168,22 @@ def compute_full_psd(
     fft_workers: int | None,
     status_cb: Callable[[str], None] | None = None,
 ) -> SnapshotData:
-    probe = probe_sample_rate(config.in_path)
-    sample_rate = probe.value
+    input_spec, _source = resolve_input_format(
+        config.in_path,
+        requested=config.input_format,
+        container_hint=config.input_container,
+    )
+    manual_rate = config.input_sample_rate
+    if manual_rate is not None and manual_rate <= 0:
+        raise ValueError("Input sample rate override must be positive.")
+    if input_spec.container == "raw":
+        if manual_rate is None:
+            raise ValueError("Raw IQ inputs require a sample rate override before previewing.")
+        sample_rate = float(manual_rate)
+        probe = SampleRateProbe(ffprobe=None, header=None, wave=sample_rate)
+    else:
+        probe = probe_sample_rate(config.in_path)
+        sample_rate = float(manual_rate) if manual_rate is not None else probe.value
     center_freq = config.center_freq
     if center_freq is None:
         detection = detect_center_frequency(config.in_path)
@@ -164,8 +200,8 @@ def compute_full_psd(
         file_size = config.in_path.stat().st_size
     except OSError:
         file_size = 0
-    header_bytes = 44
-    frame_bytes = 4
+    header_bytes = 44 if input_spec.container == "wav" else 0
+    frame_bytes = input_spec.bytes_per_frame
     payload_bytes = max(file_size - header_bytes, 0)
     estimated_total_samples = payload_bytes // frame_bytes if payload_bytes > 0 else 0
     estimated_chunks = int(math.ceil(estimated_total_samples / chunk_samples)) if estimated_total_samples else 0
@@ -180,7 +216,14 @@ def compute_full_psd(
     def _chunk_iter() -> Iterator[np.ndarray]:
         nonlocal consumed
         chunk_index = 0
-        with IQReader(config.in_path, chunk_samples, config.iq_order) as reader:
+        reader_sample_rate = sample_rate if input_spec.container == "raw" else None
+        with IQReader(
+            config.in_path,
+            chunk_samples,
+            config.iq_order,
+            input_spec,
+            sample_rate=reader_sample_rate,
+        ) as reader:
             for block in reader:
                 if block is None or block.size == 0:
                     break
