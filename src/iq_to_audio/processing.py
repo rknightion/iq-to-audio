@@ -36,22 +36,26 @@ class ProcessingConfig:
     in_path: Path
     target_freq: float = 0.0
     bandwidth: float = 12_500.0
-    center_freq: Optional[float] = None
-    center_freq_source: Optional[str] = None
+    center_freq: float | None = None
+    center_freq_source: str | None = None
     demod_mode: str = "nfm"
     fs_ch_target: float = 96_000.0
     deemph_us: float = 300.0
     agc_enabled: bool = True
-    output_path: Optional[Path] = None
-    dump_iq_path: Optional[Path] = None
+    output_path: Path | None = None
+    dump_iq_path: Path | None = None
     chunk_size: int = 1_048_576  # complex samples per block (~0.1 s @ 10 MS/s)
     filter_block: int = 65_536
     iq_order: str = "iq"
     probe_only: bool = False
-    mix_sign_override: Optional[int] = None
-    plot_stages_path: Optional[Path] = None
-    fft_workers: Optional[int] = None
-    max_input_seconds: Optional[float] = None
+    mix_sign_override: int | None = None
+    plot_stages_path: Path | None = None
+    fft_workers: int | None = None
+    max_input_seconds: float | None = None
+    input_container: str | None = None
+    input_format: str | None = None
+    input_format_source: str | None = None
+    input_sample_rate: float | None = None
 
 
 def tune_chunk_size(sample_rate: float, requested: int) -> int:
