@@ -1,12 +1,16 @@
 import signal
 from pathlib import Path
 
-import pytest
-
 import numpy as np
+import pytest
 from PySide6 import QtWidgets
 
-from iq_to_audio.interactive import InteractiveWindow, SnapshotData, StatusProgressSink, _SigintRelay
+from iq_to_audio.interactive import (
+    InteractiveWindow,
+    SnapshotData,
+    StatusProgressSink,
+    _SigintRelay,
+)
 from iq_to_audio.probe import SampleRateProbe
 
 
@@ -119,6 +123,28 @@ def test_preview_action_syncs_with_button(qapp):
         app._set_preview_enabled(False)
         assert not preview_button.isEnabled()
         assert not toolbar_preview.isEnabled()
+    finally:
+        app.close()
+
+
+def test_agc_toggle_updates_state(qapp):
+    app = make_app()
+    try:
+        rp = app.recording_panel
+        assert rp is not None
+        agc = rp.agc_check
+        assert agc is not None
+        assert agc.isChecked()
+        agc.click()
+        QtWidgets.QApplication.processEvents()
+        assert not agc.isChecked()
+        assert not app.state.agc_enabled
+        assert app.state.base_kwargs.get("agc_enabled") is False
+        agc.click()
+        QtWidgets.QApplication.processEvents()
+        assert agc.isChecked()
+        assert app.state.agc_enabled
+        assert app.state.base_kwargs.get("agc_enabled") is True
     finally:
         app.close()
 
