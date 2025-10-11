@@ -54,14 +54,21 @@ uv run iq-to-audio --help
 src/iq_to_audio/
   cli.py              # Argument parsing, entry point
   processing.py       # Core pipeline: IQReader, OverlapSaveFIR, Decimator
-  interactive.py      # PySide6 GUI (Qt6 + Matplotlib)
+  interactive/
+    __init__.py       # Re-exports for public API
+    app.py            # PySide6 main window orchestration
+    models.py         # Dataclasses shared across UI modules
+    panels.py         # Control pane widgets and layouts
+    state.py          # Session state container and defaults
+    widgets.py        # Custom Qt widgets (waterfall, span selector, group boxes)
+    workers.py        # Snapshot and preview background jobs
   preview.py          # Short preview runs before full processing
   probe.py            # Auto-detect sample rate via ffprobe
   utils.py            # Filename parsing (center freq extraction)
   spectrum.py         # FFT/PSD computation, waterfall
   progress.py         # Tqdm/Qt progress sinks
   benchmark.py        # Synthetic signal throughput testing
-  visualize.py        # Matplotlib helpers (deprecated in favor of interactive.py)
+  visualize.py        # Matplotlib helpers (deprecated in favor of interactive/)
   decoders/
     base.py           # Decoder ABC
     nfm.py            # Narrowband FM
@@ -74,7 +81,9 @@ tests/
 
 **Key files:**
 - `processing.py`: Start here for pipeline changes
-- `interactive.py`: Qt6 UI logic (recently migrated from Tkinter)
+- `interactive/app.py`: Qt6 UI composition and event wiring
+- `interactive/workers.py`: Snapshot & preview threading helpers
+- `interactive/state.py`: Shared session state container
 - `decoders/`: Add new demodulators here via `Decoder` ABC
 - `cli.py`: CLI argument definitions
 - `README.md`: User-facing docs
@@ -105,12 +114,13 @@ with IQReader(config.in_path, chunk_size, config.iq_order) as reader:
 
 **Qt signal/slot threading:**
 ```python
-# interactive.py lines 2431-2435
-class _InteractiveApp(QMainWindow):
-    status_signal = Signal(str, bool)  # message, is_error
-    
-    def __init__(self):
-        self.status_signal.connect(self._set_status_ui)
+# interactive/app.py
+class InteractiveWindow(QMainWindow):
+    status_update_signal = Signal(str, bool)
+
+    def __init__(self, *, base_kwargs: dict[str, Any], initial_path: Path | None, snapshot_seconds: float):
+        super().__init__()
+        self.status_update_signal.connect(self._apply_status_message)
 ```
 
 ## Bad Examples (avoid)
@@ -217,7 +227,7 @@ Before opening a PR:
 
 **Modularity:** Decoders implement `Decoder` ABC (`setup`, `process`, `finalize`, `intermediates`). Add new modes under `decoders/` without touching `processing.py` pipeline.
 
-**No code duplication:** DSP logic lives in `processing.py` or `decoders/*`, consumed by both `cli.py` and `interactive.py`. UI-specific code (Qt widgets, Matplotlib canvas) stays isolated in `interactive.py`.
+**No code duplication:** DSP logic lives in `processing.py` or `decoders/*`, consumed by both `cli.py` and the `interactive/` package. UI-specific code (Qt widgets, Matplotlib canvas) stays isolated within `interactive/` modules.
 
 **Squelch/trimming:** Custom NumPy implementation in `squelch.py`—no external tools. Adaptive squelch tracks noise floor with exponential smoothing; silence trimming operates on edges only.
 
