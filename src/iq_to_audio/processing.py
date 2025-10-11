@@ -8,15 +8,16 @@ import queue
 import shutil
 import subprocess
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional
 
 import numpy as np
 from scipy import fft as sp_fft
 from scipy import signal
 
 from .decoders import create_decoder
+from .input_formats import InputFormatSpec, resolve_input_format
 from .probe import SampleRateProbe, probe_sample_rate
 from .progress import PhaseState, ProgressSink, ProgressTracker
 from .utils import detect_center_frequency
@@ -78,34 +79,76 @@ def tune_chunk_size(sample_rate: float, requested: int) -> int:
 
 
 class IQReader:
-    """Stream IQ samples from an SDR++ baseband WAV using ffmpeg."""
+    """Stream IQ samples from SDR baseband recordings using ffmpeg."""
 
-    def __init__(self, path: Path, chunk_size: int, iq_order: str):
+    def __init__(
+        self,
+        path: Path,
+        chunk_size: int,
+        iq_order: str,
+        input_format: InputFormatSpec,
+        *,
+        sample_rate: float | None = None,
+    ):
         self.path = path
         self.chunk_size = chunk_size
-        self.proc: Optional[subprocess.Popen] = None
         self.iq_order = iq_order
-        self.frame_bytes = 4  # 2 channels * int16
+        self.input_format = input_format
+        self.sample_rate = sample_rate
+        self.proc: subprocess.Popen | None = None
+        self.frame_bytes = 8  # float32 stereo output
+        self.input_bytes_per_frame = input_format.bytes_per_frame
 
-    def __enter__(self) -> "IQReader":
+    def __enter__(self) -> IQReader:
         if not shutil.which("ffmpeg"):
             raise RuntimeError(FFMPEG_HINT)
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostats",
-            "-loglevel",
-            "error",
-            "-ignore_length",
-            "1",
-            "-i",
-            str(self.path),
-            "-f",
-            "s16le",
-            "-ac",
-            "2",
-            "-",
-        ]
+        cmd: list[str]
+        if self.input_format.container == "raw":
+            if self.sample_rate is None or self.sample_rate <= 0:
+                raise ValueError(
+                    "Raw IQ inputs require a sample rate override. Provide --input-sample-rate or set it in the GUI."
+                )
+            sample_rate = int(round(self.sample_rate))
+            fmt = self.input_format.ffmpeg_input_format
+            if fmt is None:
+                raise ValueError(f"Unsupported raw input format: {self.input_format.label}")
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-loglevel",
+                "error",
+                "-f",
+                fmt,
+                "-ac",
+                "2",
+                "-ar",
+                str(sample_rate),
+                "-i",
+                str(self.path),
+                "-f",
+                "f32le",
+                "-ac",
+                "2",
+                "-",
+            ]
+        else:
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-loglevel",
+                "error",
+                "-ignore_length",
+                "1",
+                "-i",
+                str(self.path),
+                "-f",
+                "f32le",
+                "-ac",
+                "2",
+                "-",
+            ]
         try:
             self.proc = subprocess.Popen(
                 cmd,
@@ -135,7 +178,7 @@ class IQReader:
                 break
             yield block
 
-    def read_block(self) -> Optional[np.ndarray]:
+    def read_block(self) -> np.ndarray | None:
         if not self.proc or not self.proc.stdout:
             raise RuntimeError("IQReader has not been entered.")
 
@@ -158,12 +201,10 @@ class IQReader:
         if not buffer:
             return None
 
-        raw = np.frombuffer(buffer, dtype="<i2")
+        raw = np.frombuffer(buffer, dtype="<f4")
         i_samples, q_samples = self._extract_iq(raw)
-        iq = i_samples.astype(np.float32) / 32768.0 + 1j * (
-            q_samples.astype(np.float32) / 32768.0
-        )
-        return iq
+        iq = i_samples.astype(np.float32, copy=False) + 1j * q_samples.astype(np.float32, copy=False)
+        return iq.astype(np.complex64, copy=False)
 
     def _extract_iq(self, raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         if self.iq_order not in {"iq", "qi", "iq_inv", "qi_inv"}:
