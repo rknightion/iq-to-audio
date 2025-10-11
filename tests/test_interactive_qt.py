@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import soundfile as sf
 from PySide6 import QtWidgets
 
 from iq_to_audio.interactive import (
@@ -55,6 +56,10 @@ def test_window_initialization(qapp):
         assert app.preview_splitter is not None
         assert len(app.preview_splitter.sizes()) == 2
         assert sum(app.preview_splitter.sizes()) > 0
+        assert app.recording_panel is not None
+        assert app.recording_panel.format_combo.count() >= 1
+        assert app.channel_panel is not None
+        assert app.channel_panel.sample_rate_entry is not None
     finally:
         app.close()
 
@@ -66,6 +71,33 @@ def test_status_signal_updates_label(qapp):
         QtWidgets.QApplication.processEvents()
         assert app.status_panel is not None
         assert app.status_panel.status_label.text() == "Testing status"
+    finally:
+        app.close()
+
+
+def test_format_combo_manual_override(qapp, tmp_path):
+    app = make_app()
+    try:
+        path = tmp_path / "sample.wav"
+        data = np.zeros((32, 2), dtype=np.float32)
+        sf.write(path, data, samplerate=48_000, subtype="PCM_16")
+        app._set_selected_path(path)
+        QtWidgets.QApplication.processEvents()
+        assert app.recording_panel is not None
+        combo = app.recording_panel.format_combo
+        assert combo.itemData(combo.currentIndex()) == "auto"
+        manual_index = combo.findData("wav:pcm_s16le")
+        assert manual_index >= 0
+        combo.setCurrentIndex(manual_index)
+        QtWidgets.QApplication.processEvents()
+        assert app.state.input_format_choice == "wav:pcm_s16le"
+        assert app.state.base_kwargs.get("input_format") == "pcm_s16le"
+        assert app.state.base_kwargs.get("input_format_source") == "manual"
+        auto_index = combo.findData("auto")
+        assert auto_index >= 0
+        combo.setCurrentIndex(auto_index)
+        QtWidgets.QApplication.processEvents()
+        assert app.state.input_format_choice == "auto"
     finally:
         app.close()
 
