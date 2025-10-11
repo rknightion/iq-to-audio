@@ -54,6 +54,12 @@ QT_DEPENDENCY_HINT = (
     "PySide6 is required for --interactive. Install it via `uv pip install PySide6 PySide6-Addons`."
 )
 
+LEFT_PANEL_WIDTH = 640
+PREVIEW_PANEL_MIN_WIDTH = 720
+CONTROLS_PANEL_MIN_WIDTH = 360
+MIN_WINDOW_HEIGHT = 780
+MIN_WINDOW_WIDTH = LEFT_PANEL_WIDTH + PREVIEW_PANEL_MIN_WIDTH
+
 
 class _SigintRelay:
     """Bridge SIGINT (Ctrl+C) into a graceful Qt application quit."""
@@ -187,20 +193,26 @@ class InteractiveWindow(QMainWindow):
     def _configure_window(self) -> None:
         self.setWindowTitle("IQ to Audio — Interactive Mode")
         self.resize(1480, 900)
-        self.setMinimumSize(1280, 760)
+        self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
 
     def _build_ui(self) -> None:
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = LockedSplitter(Qt.Orientation.Horizontal, locked_handles={1})
         splitter.setObjectName("interactiveMainSplitter")
         splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(1)
 
         options_scroll = QtWidgets.QScrollArea()
         options_scroll.setWidgetResizable(True)
         options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        options_scroll.setMinimumWidth(520)
-        options_scroll.setMaximumWidth(560)
+        options_scroll.setMinimumWidth(LEFT_PANEL_WIDTH)
+        options_scroll.setMaximumWidth(LEFT_PANEL_WIDTH)
+        options_scroll.setSizePolicy(
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
+        )
 
         options_container = QWidget()
+        options_container.setMinimumWidth(LEFT_PANEL_WIDTH)
+        options_container.setMaximumWidth(LEFT_PANEL_WIDTH)
         options_layout = QtWidgets.QVBoxLayout(options_container)
         options_layout.setContentsMargins(16, 16, 16, 16)
         options_layout.setSpacing(14)
@@ -209,6 +221,17 @@ class InteractiveWindow(QMainWindow):
         self.channel_panel = ChannelPanel(self.state)
         self.targets_panel = TargetsPanel(self.state)
         self.status_panel = StatusPanel()
+
+        for panel in (self.recording_panel, self.channel_panel, self.targets_panel, self.status_panel):
+            if panel is not None:
+                panel.setMinimumWidth(LEFT_PANEL_WIDTH - 32)
+                panel.setMaximumWidth(LEFT_PANEL_WIDTH - 32)
+                panel.setSizePolicy(
+                    QtWidgets.QSizePolicy(
+                        QtWidgets.QSizePolicy.Policy.Fixed,
+                        QtWidgets.QSizePolicy.Policy.Preferred,
+                    )
+                )
 
         options_layout.addWidget(self.recording_panel)
         options_layout.addWidget(self.channel_panel)
@@ -224,6 +247,7 @@ class InteractiveWindow(QMainWindow):
         preview_splitter.setChildrenCollapsible(False)
 
         preview_container = QWidget()
+        preview_container.setMinimumWidth(PREVIEW_PANEL_MIN_WIDTH)
         preview_layout = QtWidgets.QVBoxLayout(preview_container)
         preview_layout.setContentsMargins(16, 16, 16, 16)
         preview_layout.setSpacing(14)
@@ -240,6 +264,7 @@ class InteractiveWindow(QMainWindow):
         preview_layout.addWidget(self.spectrum_panel, stretch=4)
 
         controls_container = QWidget()
+        controls_container.setMinimumWidth(CONTROLS_PANEL_MIN_WIDTH)
         controls_layout = QtWidgets.QVBoxLayout(controls_container)
         controls_layout.setContentsMargins(16, 0, 16, 16)
         controls_layout.setSpacing(14)
@@ -256,8 +281,8 @@ class InteractiveWindow(QMainWindow):
         preview_splitter.setStretchFactor(1, 2)
 
         splitter.addWidget(preview_splitter)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 7)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
         self.setCentralWidget(splitter)
         self.main_splitter = splitter
