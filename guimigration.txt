@@ -8,6 +8,12 @@ Current State: Fully functional Tk-based interactive spectrum viewer
 
 NOTE: Detailed instructions for completed migration steps have been removed. Refer to the checklist below for status and outstanding work.
 
+Latest Update (2025-10-11):
+- Split the interactive window into an options panel and live preview pane with a Qt splitter.
+- Added a command toolbar, keyboard shortcuts, and a status progress bar for preview runs.
+- Tuned splitter defaults and added vertical resizing so options and preview controls are adjustable.
+- Added a SIGINT bridge so Ctrl+C exits the Qt session cleanly without macOS crash popups.
+
 ================================================================================
 SECTION 13: MIGRATION EXECUTION CHECKLIST
 ================================================================================
