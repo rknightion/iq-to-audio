@@ -242,7 +242,7 @@ class ComplexOscillator:
 class OverlapSaveFIR:
     """FFT-based FIR filter suitable for long filters and streaming data."""
 
-    def __init__(self, taps: np.ndarray, block_size: int, *, workers: Optional[int] = None):
+    def __init__(self, taps: np.ndarray, block_size: int, *, workers: int | None = None):
         if block_size <= 0:
             raise ValueError("block_size must be positive")
         self.taps = taps.astype(np.complex128)
@@ -307,7 +307,7 @@ class Decimator:
 
 
 class IQDebugWriter:
-    def __init__(self, path: Optional[Path], sample_rate: float):
+    def __init__(self, path: Path | None, sample_rate: float):
         self.path = path
         self.sample_rate = sample_rate
         self.fd = open(path, "wb") if path else None
@@ -371,8 +371,8 @@ class AudioWriter:
         except OSError as exc:  # pragma: no cover - runtime failure launching ffmpeg
             raise RuntimeError(f"Failed to launch ffmpeg: {exc}") from exc
         self.peak = 0.0
-        self._queue: queue.SimpleQueue[Optional[bytes]] = queue.SimpleQueue()
-        self._error: Optional[BaseException] = None
+        self._queue: queue.SimpleQueue[bytes | None] = queue.SimpleQueue()
+        self._error: BaseException | None = None
         self._closed = False
         self._writer = threading.Thread(
             target=self._drain,
