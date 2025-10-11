@@ -21,6 +21,16 @@ class RecordingPanel(PanelGroup):
         file_row.addWidget(self.browse_button)
         layout.addLayout(file_row)
 
+        format_row = QtWidgets.QHBoxLayout()
+        format_row.addWidget(QtWidgets.QLabel("Input format:"))
+        self.format_combo = QtWidgets.QComboBox()
+        self.format_combo.setMinimumWidth(220)
+        format_row.addWidget(self.format_combo)
+        self.format_status_label = QtWidgets.QLabel(state.input_format_message)
+        self.format_status_label.setWordWrap(True)
+        format_row.addWidget(self.format_status_label, stretch=1)
+        layout.addLayout(format_row)
+
         center_row = QtWidgets.QHBoxLayout()
         center_row.addWidget(QtWidgets.QLabel("Center freq (Hz):"))
         self.center_entry = QtWidgets.QLineEdit(
