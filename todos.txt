@@ -1,14 +1,43 @@
-- Offer a web-based spectrum viewer (Dash/Panel) as an alternative to the Tk GUI for headless remote use.
-
 - Publish SNR/quality metrics post-run to help users compare decoder configurations.
+- the line "MAX_PREVIEW_SAMPLES = 8_000_000  # Complex samples retained in memory for previews (~64 MB)." what is it used for? can we increase this?
 
 
-  * Capture benchmarking harness (CLI flag + synthetic captures) so future LLM-assisted changes can validate throughput regressions automatically.
+interactive.py modularisation:
+- Modularize interactive GUI to reduce file size and clarify responsibilities.
+	Summary: `interactive.py` is ~2,860 lines with intertwined GUI layout, threading, preview DSP, and Matplotlib glue. Splitting along functional seams will keep context windows manageable, make tests more granular, and lower the risk of regressions when editing.
+	Phase 0 – Baseline & Safety Nets
+		* Capture current behavior: record a short screen capture / notes on GUI flows and save representative PSD/waterfall previews for comparison.
+		* Ensure focused regression tests exist: extend `tests/test_interactive_qt.py` with smoke coverage for launching the window without running the event loop, plus serializer tests for `SnapshotData`.
+		* Establish quick checks: `uv run ruff check src/iq_to_audio/interactive.py`, `uv run --with dev pytest -k interactive`, and a manual `uv run iq-to-audio --interactive` smoke test.
+	Phase 1 – Carve out package scaffolding
+		* Create `src/iq_to_audio/interactive/__init__.py` and move the current module into submodules (`app.py`, `models.py`, `widgets.py`, `workers.py`, `plotting.py`).
+		* Preserve public API (`launch_interactive_session`, `interactive_select`) via re-exports to avoid downstream churn.
+	Phase 2 – Extract passive data/state objects
+		* Relocate `SnapshotData`, `InteractiveOutcome`, `InteractiveSessionResult`, `StatusProgressSink`, and helper dataclasses into `models.py`.
+		* Add unit tests for serialization-free helpers (e.g., `_waterfall_to_tuple`) to keep logic verified outside of Qt.
+	Phase 3 – Split UI widgets and layout concerns
+		* Move `_ScrollableFrame`, `_SpanController`, and `_WaterfallWindow` into `widgets.py`, transitioning to dedicated `QWidget` subclasses where possible.
+		* Refactor `_build_ui` into composable panel builders (recording panel, demod options, spectrum panel) housed in a new `panels.py` or `widgets.py`.
+		* Introduce a light presenter/state object (e.g., `InteractiveState`) that the panels read/write instead of mutating `self` attributes everywhere.
+	Phase 4 – Isolate async/worker logic
+		* Convert preview/snapshot threads into explicit worker classes (consider `QtCore.QThread` or `concurrent.futures.ThreadPoolExecutor`) inside `workers.py` with typed callbacks/signals.
+		* Move `_start_snapshot_thread`, `_preview_thread` handling, and pipeline cancellation helpers into the worker layer; expose high-level intents (`request_snapshot`, `request_preview`).
+		* Centralize Qt signal definitions in `signals.py` (or within the worker module) to keep thread-safe messaging disciplined.
+	Phase 5 – Recompose the main window
+		* Rebuild `_InteractiveApp` (now `interactive.app.InteractiveWindow`) to stitch together state + panels + workers using dependency injection.
+		* Keep method surface small: UI event handlers delegate to state methods or worker invocations; plotting lives in `plotting.py`.
+		* Ensure timezone-sensitive logic (file paths, output hints) migrates cleanly by adding focused unit tests around `_resolve_output_path` equivalents.
+	Phase 6 – Update integration points
+		* Adjust `interactive_select` and CLI entry points to import from the new package structure.
+		* Refresh `AGENTS.md`/README snippets that reference module paths; add a short architecture note describing the new layout.
+		* Expand test coverage: add fixtures mocking workers so GUI tests do not spawn threads; verify waterfall selection still updates `SelectionResult`.
+	Phase 7 – Cleanup & verification
+		* Remove dead imports and inline utilities that now live elsewhere; run `uv run ruff check --fix src/iq_to_audio/interactive` and `uv run ruff format src/iq_to_audio/interactive`.
+		* Re-run benchmark/preview manual tests to confirm no regressions: CLI flow, interactive snapshot, preview DSP, cancel mid-run.
+		* Document the new module map in `AGENTS.md` and `todos.txt` outcome notes; consider enabling per-module AGENTS guidance under `interactive/` if editors support nested files.
+	Follow-ups / Nice-to-haves
+		* Evaluate introducing dependency injection or a light event bus once modules settle.
+		* After the split, consider migrating raw threads to Qt’s signal/slot friendly `QRunnable`/`QThreadPool` for better lifecycle management.
+		* For long-term maintainability, add API-level typings (Protocol for workers) and incremental tests for each widget class.
 
 
-
-
-
-
-  Something is up with our progress bar. While it does update I saw it get to 2% I then got completed (this was on the preview path I should add) and trhe file was generated but our preview box stayed there and when I closed it it closed the whole app.
-  Also, we should add a box to select a destination for the outputs right now they're saved in the same place as the source location but users might want a different destination for the processed files (both previews and final processing both can go to the same output dir)
