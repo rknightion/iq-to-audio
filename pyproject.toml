@@ -70,3 +70,47 @@ ignore = [
 quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.14"
+
+# Your repo uses a src/ layout — make imports resolve cleanly in editors/CI.
+mypy_path = ["src"]
+namespace_packages = true
+
+# Make output readable and avoid silent config typos.
+show_error_codes = true
+pretty = true
+color_output = true
+warn_unused_configs = true
+
+# “Sane, not strict” checks:
+# - Don’t force annotations everywhere yet…
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+# - …but still type-check bodies of untyped functions to catch obvious bugs.
+check_untyped_defs = true
+
+# Common foot-gun protections that aren’t noisy.
+no_implicit_optional = true
+strict_equality = true
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+
+# Third-party libs that are light on stubs — don’t let them spam you.
+[[tool.mypy.overrides]]
+module = [
+  "PySide6.*",
+  "soundfile",
+  "soxr",
+  "matplotlib.*",
+]
+ignore_missing_imports = true
+
+# Keep tests relaxed so you can focus typings on library code first.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+check_untyped_defs = false
+disallow_untyped_defs = false

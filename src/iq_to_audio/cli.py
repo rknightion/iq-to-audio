@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import argparse
-import math
 import logging
+import math
 import sys
 from pathlib import Path
-from typing import Optional
 
 from .input_formats import parse_user_format
+from .preview import run_preview
 from .processing import (
     ProcessingCancelled,
     ProcessingConfig,
     ProcessingPipeline,
     ProcessingResult,
 )
-from .preview import run_preview
 from .progress import TqdmProgressSink
 
 LOG = logging.getLogger("iq_to_audio")
@@ -72,9 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--demod",
         dest="demod",
-        choices=["nfm", "am", "usb", "lsb", "ssb"],
+        choices=["nfm", "am", "usb", "lsb", "ssb", "none"],
         default="nfm",
-        help="Demodulator to use (nfm, am, usb, lsb, ssb=alias for usb). Default: nfm.",
+        help="Demodulator to use (nfm, am, usb, lsb, ssb=alias for usb, none=no demodulation). Default: nfm.",
     )
     parser.add_argument(
         "--deemph",
@@ -221,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -235,9 +234,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     frequencies: list[float] = list(args.target_freqs or [])
 
-    input_format_value: Optional[str] = None
-    input_container: Optional[str] = None
-    input_format_source: Optional[str] = None
+    input_format_value: str | None = None
+    input_container: str | None = None
+    input_format_source: str | None = None
     if args.input_format:
         try:
             container, codec = parse_user_format(args.input_format, default_container=None)
@@ -256,32 +255,32 @@ def main(argv: Optional[list[str]] = None) -> int:
                 parser.error("Duplicate target frequencies are not allowed.")
         seen.append(freq)
 
-    def annotate_path(base: Optional[Path], freq: float, total: int) -> Optional[Path]:
+    def annotate_path(base: Path | None, freq: float, total: int) -> Path | None:
         if base is None or total <= 1:
             return base
         freq_tag = int(round(freq))
         return base.with_name(f"{base.stem}_{freq_tag}{base.suffix}")
 
-    shared_kwargs = dict(
-        bandwidth=args.bandwidth,
-        center_freq=args.center_freq,
-        center_freq_source="cli" if args.center_freq is not None else None,
-        demod_mode=args.demod,
-        fs_ch_target=args.fs_ch,
-        deemph_us=args.deemph_us,
-        agc_enabled=args.agc_enabled,
-        chunk_size=args.chunk_size,
-        filter_block=args.filter_block,
-        iq_order=args.iq_order,
-        probe_only=args.probe_only,
-        mix_sign_override=args.mix_sign,
-        fft_workers=args.fft_workers,
-        input_format=input_format_value,
-        input_container=input_container,
-        input_format_source=input_format_source,
-        input_sample_rate=args.input_sample_rate,
-    )
-    base_kwargs = dict(shared_kwargs)
+    shared_kwargs = {
+        "bandwidth": args.bandwidth,
+        "center_freq": args.center_freq,
+        "center_freq_source": "cli" if args.center_freq is not None else None,
+        "demod_mode": args.demod,
+        "fs_ch_target": args.fs_ch,
+        "deemph_us": args.deemph_us,
+        "agc_enabled": args.agc_enabled,
+        "chunk_size": args.chunk_size,
+        "filter_block": args.filter_block,
+        "iq_order": args.iq_order,
+        "probe_only": args.probe_only,
+        "mix_sign_override": args.mix_sign,
+        "fft_workers": args.fft_workers,
+        "input_format": input_format_value,
+        "input_container": input_container,
+        "input_format_source": input_format_source,
+        "input_sample_rate": args.input_sample_rate,
+    }
+    base_kwargs = shared_kwargs.copy()
     base_kwargs.update(
         target_freq=frequencies[0] if frequencies else 0.0,
         target_freqs=list(frequencies),
@@ -462,9 +461,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         for config, result in results:
             if result.audio_peak > 0:
                 peak_db = 20.0 * math.log10(result.audio_peak)
-                print(
-                    f"[{int(round(config.target_freq))}] Audio peak level: {peak_db:.2f} dBFS"
-                )
+                mode = (config.demod_mode or "").lower()
+                if mode == "none":
+                    print(
+                        f"[{int(round(config.target_freq))}] IQ slice peak magnitude: {peak_db:.2f} dBFS"
+                    )
+                else:
+                    print(
+                        f"[{int(round(config.target_freq))}] Audio peak level: {peak_db:.2f} dBFS"
+                    )
 
     return 0
 

@@ -40,6 +40,7 @@ from .models import (
 )
 from .panels import (
     ChannelPanel,
+    DemodPanel,
     RecordingPanel,
     SpectrumOptionsPanel,
     StatusPanel,
@@ -71,6 +72,37 @@ def _format_spec_map() -> dict[str, InputFormatSpec]:
 def _format_label(key: str) -> str:
     spec = _format_spec_map().get(key)
     return spec.label if spec else key
+
+
+DEMOD_OPTIONS: list[tuple[str, str, str]] = [
+    (
+        "nfm",
+        "NFM — Narrowband FM",
+        "Voice scanners and public safety (≈12.5 kHz).",
+    ),
+    (
+        "am",
+        "AM — Amplitude Modulation",
+        "Airband and legacy AM broadcasts.",
+    ),
+    (
+        "usb",
+        "USB — Upper Sideband",
+        "Single-sideband (marine, ham voice).",
+    ),
+    (
+        "lsb",
+        "LSB — Lower Sideband",
+        "HF single-sideband voice.",
+    ),
+    (
+        "none",
+        "No Demodulation (IQ slice)",
+        "Write tuned complex IQ using the original format.",
+    ),
+]
+
+_DEMOD_LOOKUP = {value: (label, description) for value, label, description in DEMOD_OPTIONS}
 
 
 class _SigintRelay:
@@ -176,9 +208,21 @@ class InteractiveWindow(QMainWindow):
         self.toolbar: NavigationToolbar2QT | None = None
         self.ax_main = None
         self.span_controller: SpanController | None = None
+        self._hover_cid: int | None = None
+        self._press_cid: int | None = None
+        self._release_cid: int | None = None
+        self._hover_line = None
+        self._hover_text = None
+        self._selection_text = None
+        self._hover_theme: dict[str, str] = {}
+        self._press_event_data: dict[str, float] | None = None
+        self._last_hover_freq: float | None = None
+        self._scroll_cid: int | None = None
+        self._freq_limits: tuple[float, float] | None = None
 
         self.recording_panel: RecordingPanel | None = None
         self.channel_panel: ChannelPanel | None = None
+        self.demod_panel: DemodPanel | None = None
         self.targets_panel: TargetsPanel | None = None
         self.status_panel: StatusPanel | None = None
         self.spectrum_panel: PanelGroup | None = None
@@ -197,6 +241,8 @@ class InteractiveWindow(QMainWindow):
         self._build_actions()
         self._update_format_options()
         self._refresh_format_status_label()
+        self._refresh_demod_description()
+        self._apply_demod_constraints()
         self._refresh_sample_rate_label()
         self._update_status_controls()
         self._apply_initial_splitter_sizes()
@@ -238,10 +284,17 @@ class InteractiveWindow(QMainWindow):
 
         self.recording_panel = RecordingPanel(self.state)
         self.channel_panel = ChannelPanel(self.state)
+        self.demod_panel = DemodPanel(self.state, DEMOD_OPTIONS)
         self.targets_panel = TargetsPanel(self.state)
         self.status_panel = StatusPanel()
 
-        for panel in (self.recording_panel, self.channel_panel, self.targets_panel, self.status_panel):
+        for panel in (
+            self.recording_panel,
+            self.channel_panel,
+            self.demod_panel,
+            self.targets_panel,
+            self.status_panel,
+        ):
             if panel is not None:
                 panel.setMinimumWidth(LEFT_PANEL_WIDTH - 32)
                 panel.setMaximumWidth(LEFT_PANEL_WIDTH - 32)
@@ -254,6 +307,7 @@ class InteractiveWindow(QMainWindow):
 
         options_layout.addWidget(self.recording_panel)
         options_layout.addWidget(self.channel_panel)
+        options_layout.addWidget(self.demod_panel)
         options_layout.addWidget(self.targets_panel)
         options_layout.addStretch(1)
         options_layout.addWidget(self.status_panel)
@@ -346,7 +400,13 @@ class InteractiveWindow(QMainWindow):
         self.toolbar_widget = toolbar
 
     def _connect_panel_signals(self) -> None:
-        if not self.recording_panel or not self.channel_panel or not self.targets_panel or not self.status_panel:
+        if (
+            not self.recording_panel
+            or not self.channel_panel
+            or not self.demod_panel
+            or not self.targets_panel
+            or not self.status_panel
+        ):
             return
 
         rp = self.recording_panel
@@ -368,9 +428,13 @@ class InteractiveWindow(QMainWindow):
         cp.bandwidth_entry.editingFinished.connect(self._on_bandwidth_changed)
         cp.sample_rate_entry.editingFinished.connect(self._on_sample_rate_override)
 
+        dp = self.demod_panel
+        dp.mode_combo.currentIndexChanged.connect(self._on_demod_changed)
+
         tp = self.targets_panel
         for index, entry in enumerate(tp.entries):
             entry.editingFinished.connect(lambda idx=index, field=entry: self._on_target_edit(idx, field.text()))
+        tp.clear_button.clicked.connect(self._on_clear_targets)
 
         sp = self.status_panel
         sp.preview_button.clicked.connect(self._on_preview_clicked)
@@ -499,6 +563,32 @@ class InteractiveWindow(QMainWindow):
         self._update_format_options()
         self._refresh_format_status_label()
 
+    def _refresh_demod_description(self) -> None:
+        if not self.demod_panel:
+            return
+        combo = self.demod_panel.mode_combo
+        current = combo.findData(self.state.demod_mode)
+        combo.blockSignals(True)
+        if current >= 0 and combo.currentIndex() != current:
+            combo.setCurrentIndex(current)
+        combo.blockSignals(False)
+        description = _DEMOD_LOOKUP.get(self.state.demod_mode, ("", ""))[1]
+        self.demod_panel.description_label.setText(description)
+
+    def _apply_demod_constraints(self) -> None:
+        if not self.recording_panel:
+            return
+        checkbox = self.recording_panel.agc_check
+        checkbox.blockSignals(True)
+        if self.state.demod_mode.lower() == "none":
+            self.state.apply_agc_override(False)
+            checkbox.setChecked(False)
+            checkbox.setEnabled(False)
+        else:
+            checkbox.setEnabled(True)
+            checkbox.setChecked(self.state.agc_enabled)
+        checkbox.blockSignals(False)
+
     def _update_sample_rate_from_probe(self, path: Path) -> None:
         try:
             probe = probe_sample_rate(path)
@@ -554,6 +644,42 @@ class InteractiveWindow(QMainWindow):
         self._update_format_options()
         self._refresh_format_status_label()
         self._refresh_sample_rate_label()
+
+    def _on_demod_changed(self, index: int) -> None:
+        if not self.demod_panel:
+            return
+        value = self.demod_panel.mode_combo.itemData(index)
+        if value is None:
+            return
+        mode = str(value)
+        if mode == self.state.demod_mode:
+            self._refresh_demod_description()
+            self._apply_demod_constraints()
+            return
+        previous_pref = self.state.preferred_agc
+        self.state.set_demod_mode(mode)
+        if mode.lower() == "none":
+            if previous_pref is not None:
+                self.state.preferred_agc = previous_pref
+            self.state.apply_agc_override(False)
+            if self.recording_panel:
+                checkbox = self.recording_panel.agc_check
+                checkbox.blockSignals(True)
+                checkbox.setChecked(False)
+                checkbox.setEnabled(False)
+                checkbox.blockSignals(False)
+            self._set_status("No demodulation: tuned IQ slices will be written.", error=False)
+        else:
+            desired = previous_pref if previous_pref is not None else True
+            self.state.set_agc_enabled(desired)
+            if self.recording_panel:
+                checkbox = self.recording_panel.agc_check
+                checkbox.blockSignals(True)
+                checkbox.setEnabled(True)
+                checkbox.setChecked(self.state.agc_enabled)
+                checkbox.blockSignals(False)
+        self._refresh_demod_description()
+        self._apply_demod_constraints()
 
     def _on_format_changed(self, index: int) -> None:
         if not self.recording_panel:
@@ -640,6 +766,13 @@ class InteractiveWindow(QMainWindow):
                     action.setEnabled(preview_ready)
         self.status_panel.confirm_button.setEnabled(self.state.selection is not None)
         self.status_panel.stop_button.setEnabled(self._active_preview_worker is not None)
+        if self.recording_panel:
+            detect_enabled = (
+                self.state.selected_path is not None
+                and self._active_preview_worker is None
+                and self._active_pipeline is None
+            )
+            self.recording_panel.detect_button.setEnabled(detect_enabled)
 
     def _set_status(self, message: str, *, error: bool) -> None:
         self.status_update_signal.emit(message, error)
@@ -675,10 +808,11 @@ class InteractiveWindow(QMainWindow):
                 self.state.sample_rate_source = ""
             self._clear_format_detection()
             self._refresh_sample_rate_label()
+            self._update_status_controls()
             return
         self._auto_detect_format(path, announce=False)
-        if path is not None:
-            self._auto_detect_center(path, announce=True)
+        self._auto_detect_center(path, announce=True, force=True, preserve_manual=False)
+        self._update_status_controls()
 
     def _on_file_text_changed(self, text: str) -> None:
         if not text:
@@ -700,7 +834,10 @@ class InteractiveWindow(QMainWindow):
         if self.state.selected_path is None:
             self._set_status("Select an input recording before detecting center frequency.", error=True)
             return
-        self._auto_detect_center(self.state.selected_path, announce=True)
+        if self._active_preview_worker is not None or self._active_pipeline is not None:
+            self._set_status("Center detection is unavailable while processing is active.", error=True)
+            return
+        self._auto_detect_center(self.state.selected_path, announce=True, force=True, preserve_manual=True)
 
     def _on_center_manual(self) -> None:
         if not self.recording_panel:
@@ -805,19 +942,68 @@ class InteractiveWindow(QMainWindow):
             )
 
     def _on_target_edit(self, index: int, text: str) -> None:
-        text = text.strip()
-        if index >= len(self.state.target_text):
+        if index >= self.state.max_target_freqs:
             return
-        self.state.target_text[index] = text
-        freqs = []
-        for raw in self.state.target_text:
-            freq = self._parse_float(raw)
-            if freq is not None and freq > 0:
-                if any(math.isclose(freq, other, rel_tol=0.0, abs_tol=0.5) for other in freqs):
-                    continue
-                freqs.append(freq)
-        self.state.set_target_frequencies(freqs)
+        self._sync_state_targets_from_entries()
         self._update_offset_label()
+
+    def _sync_state_targets_from_entries(self) -> None:
+        if not self.targets_panel:
+            return
+        texts = [entry.text().strip() for entry in self.targets_panel.entries]
+        padded = list(texts)
+        if len(padded) < self.state.max_target_freqs:
+            padded.extend([""] * (self.state.max_target_freqs - len(padded)))
+        self.state.target_text = padded[: self.state.max_target_freqs]
+        freqs: list[float] = []
+        for raw in texts:
+            freq = self._parse_float(raw)
+            if freq is None or freq <= 0:
+                continue
+            if any(abs(freq - other) < 0.5 for other in freqs):
+                continue
+            freqs.append(freq)
+        self.state.set_target_frequencies(freqs)
+        self._update_status_controls()
+
+    def _insert_target_frequency(self, freq: float, *, announce: bool = False) -> bool:
+        if not self.targets_panel or freq <= 0:
+            return False
+        rounded = float(round(freq))
+        existing = [
+            self._parse_float(entry.text()) for entry in self.targets_panel.entries if entry is not None
+        ]
+        if any(value is not None and abs(value - rounded) < 0.5 for value in existing):
+            if announce:
+                self._set_status(f"{rounded:.0f} Hz is already in the target list.", error=False)
+            return False
+        next_index: int | None = None
+        for idx, value in enumerate(existing):
+            if value is None or value <= 0:
+                next_index = idx
+                break
+        if next_index is None:
+            if announce:
+                self._set_status("All target slots are filled. Clear targets to add more.", error=True)
+            return False
+        entry = self.targets_panel.entries[next_index]
+        entry.blockSignals(True)
+        entry.setText(f"{rounded:.0f}")
+        entry.blockSignals(False)
+        self._sync_state_targets_from_entries()
+        if announce:
+            self._set_status(f"Target {next_index + 1} set to {rounded:.0f} Hz.", error=False)
+        return True
+
+    def _on_clear_targets(self) -> None:
+        if not self.targets_panel:
+            return
+        for entry in self.targets_panel.entries:
+            entry.blockSignals(True)
+            entry.clear()
+            entry.blockSignals(False)
+        self._sync_state_targets_from_entries()
+        self._set_status("Cleared all target frequencies.", error=False)
 
     def _on_nfft_changed(self, value: str) -> None:
         nfft = int(self._parse_float(value) or self.state.nfft)
@@ -981,6 +1167,16 @@ class InteractiveWindow(QMainWindow):
         if psd_db.size == 0 or freqs.size == 0:
             self._set_status("Snapshot empty; nothing to display.", error=True)
             return
+        finite_freqs = freqs[np.isfinite(freqs)]
+        if finite_freqs.size == 0:
+            self._set_status("Snapshot frequencies invalid; nothing to display.", error=True)
+            return
+        freq_min = float(finite_freqs.min())
+        freq_max = float(finite_freqs.max())
+        if not math.isfinite(freq_min) or not math.isfinite(freq_max):
+            self._set_status("Snapshot frequencies invalid; nothing to display.", error=True)
+            return
+        self._freq_limits = (freq_min, freq_max)
 
         if remember:
             self.state.snapshot_data = snapshot
@@ -1006,12 +1202,13 @@ class InteractiveWindow(QMainWindow):
             layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
 
+        self._teardown_canvas_events()
         self.figure.clear()
         ax = self.figure.add_subplot(111)
         theme = COLOR_THEMES.get(self.state.theme, COLOR_THEMES["contrast"])
         ax.plot(freqs, psd_db, color=theme.get("line", "#1f77b4"))
         ax.set_title(
-            "Drag to highlight a channel. Scroll or double-click to zoom. Use Preview/Confirm buttons."
+            "Click & Drag to select a channel & BW. Click again to save target frequency. Scroll or double-click to zoom."
         )
         if FuncFormatter is not None:
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f"{x / 1e6:.3f}"))
@@ -1055,6 +1252,7 @@ class InteractiveWindow(QMainWindow):
             initial=SelectionResult(initial_center, initial_bw),
             on_change=self._on_span_changed,
         )
+        self._setup_canvas_interactions(ax, theme)
         self._on_span_changed(self.span_controller.selection)
 
         if snapshot.waterfall is not None:
@@ -1062,12 +1260,204 @@ class InteractiveWindow(QMainWindow):
 
         self._update_status_controls()
 
+    def _setup_canvas_interactions(self, ax, theme: dict[str, str]) -> None:
+        if self.canvas is None:
+            return
+        self._hover_theme = {
+            "fg": theme.get("fg", "black"),
+            "line": theme.get("line", "#1f77b4"),
+            "face": theme.get("face", "white"),
+        }
+        hover_color = self._hover_theme["line"]
+        self._hover_line = ax.axvline(ax.get_xlim()[0], color=hover_color, ls="--", lw=1.0, alpha=0.6)
+        self._hover_line.set_visible(False)
+        bbox_args = {
+            "boxstyle": "round,pad=0.3",
+            "facecolor": self._hover_theme["face"],
+            "edgecolor": "none",
+            "alpha": 0.85,
+        }
+        label_kwargs = {
+            "transform": ax.transAxes,
+            "fontsize": 10,
+            "bbox": bbox_args,
+        }
+        self._hover_text = ax.text(
+            0.02,
+            0.96,
+            "",
+            color=self._hover_theme["fg"],
+            ha="left",
+            va="top",
+            **label_kwargs,
+        )
+        self._hover_text.set_visible(False)
+        self._selection_text = ax.text(
+            0.98,
+            0.96,
+            "",
+            color=self._hover_theme["fg"],
+            ha="right",
+            va="top",
+            **label_kwargs,
+        )
+        self._selection_text.set_visible(True)
+        self._last_hover_freq = None
+        if self.canvas:
+            self._hover_cid = self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
+            self._press_cid = self.canvas.mpl_connect("button_press_event", self._on_canvas_press)
+            self._release_cid = self.canvas.mpl_connect("button_release_event", self._on_canvas_release)
+            self._scroll_cid = self.canvas.mpl_connect("scroll_event", self._on_canvas_scroll)
+        self._update_selection_label()
+
+    def _teardown_canvas_events(self) -> None:
+        if self.canvas is not None:
+            for cid in (self._hover_cid, self._press_cid, self._release_cid):
+                if cid is None:
+                    continue
+                with contextlib.suppress(Exception):
+                    self.canvas.mpl_disconnect(cid)
+            if self._scroll_cid is not None:
+                with contextlib.suppress(Exception):
+                    self.canvas.mpl_disconnect(self._scroll_cid)
+        self._hover_cid = None
+        self._press_cid = None
+        self._release_cid = None
+        self._scroll_cid = None
+        self._hover_line = None
+        self._hover_text = None
+        self._selection_text = None
+        self._hover_theme = {}
+        self._press_event_data = None
+        self._last_hover_freq = None
+        self._freq_limits = None
+
+    def _on_canvas_motion(self, event) -> None:
+        if event.inaxes != self.ax_main or event.xdata is None:
+            self._last_hover_freq = None
+            self._set_hover_visible(None)
+            return
+        freq = float(event.xdata)
+        self._last_hover_freq = freq
+        self._set_hover_visible(freq)
+
+    def _on_canvas_press(self, event) -> None:
+        if event.button != 1 or getattr(event, "dblclick", False):
+            self._press_event_data = None
+            return
+        if event.inaxes != self.ax_main or event.xdata is None:
+            self._press_event_data = None
+            return
+        self._press_event_data = {"freq": float(event.xdata)}
+
+    def _on_canvas_release(self, event) -> None:
+        if event.button != 1 or getattr(event, "dblclick", False):
+            self._press_event_data = None
+            return
+        if self._press_event_data is None:
+            return
+        if event.inaxes != self.ax_main or event.xdata is None:
+            self._press_event_data = None
+            return
+        start_freq = self._press_event_data.get("freq")
+        self._press_event_data = None
+        if start_freq is None:
+            return
+        end_freq = float(event.xdata)
+        delta = abs(end_freq - start_freq)
+        threshold = max(750.0, 0.001 * (self.state.sample_rate or 0.0))
+        if delta > threshold:
+            return
+        self._insert_target_frequency(end_freq, announce=True)
+
+    def _on_canvas_scroll(self, event) -> None:
+        if self.ax_main is None or event.inaxes != self.ax_main or event.xdata is None:
+            return
+        step = float(event.step)
+        if step == 0.0:
+            return
+        direction = 1.0 if step > 0 else -1.0
+        magnitude = max(1.0, abs(step))
+        base_scale = 1.2
+        scale = base_scale ** (0.5 * magnitude)
+        cur_xlim = self.ax_main.get_xlim()
+        width = cur_xlim[1] - cur_xlim[0]
+        if width <= 0:
+            return
+        new_width = width / scale if direction > 0 else width * scale
+        center = float(event.xdata)
+        left_fraction = (center - cur_xlim[0]) / width if width else 0.5
+        right_fraction = (cur_xlim[1] - center) / width if width else 0.5
+        new_left = center - left_fraction * new_width
+        new_right = center + right_fraction * new_width
+        if self._freq_limits is not None:
+            freq_min, freq_max = self._freq_limits
+            max_width = freq_max - freq_min
+            if max_width <= 0:
+                return
+            if new_width >= max_width:
+                new_left, new_right = freq_min, freq_max
+            else:
+                if new_left < freq_min:
+                    shift = freq_min - new_left
+                    new_left = freq_min
+                    new_right = min(freq_max, new_right + shift)
+                if new_right > freq_max:
+                    shift = new_right - freq_max
+                    new_right = freq_max
+                    new_left = max(freq_min, new_left - shift)
+                new_left = max(new_left, freq_min)
+                new_right = min(new_right, freq_max)
+        if math.isclose(new_left, new_right):
+            return
+        if new_right - new_left <= 0:
+            return
+        self.ax_main.set_xlim(new_left, new_right)
+        if self.canvas:
+            self.canvas.draw_idle()
+
+    def _set_hover_visible(self, freq: float | None) -> None:
+        if self._hover_line is None or self._hover_text is None:
+            return
+        if freq is None:
+            if self._hover_line.get_visible() or self._hover_text.get_visible():
+                self._hover_line.set_visible(False)
+                self._hover_text.set_visible(False)
+                if self.canvas:
+                    self.canvas.draw_idle()
+            return
+        self._hover_line.set_xdata([freq, freq])
+        label = f"Cursor: {freq / 1e6:.6f} MHz"
+        if self._hover_text.get_text() != label:
+            self._hover_text.set_text(label)
+        if not self._hover_line.get_visible():
+            self._hover_line.set_visible(True)
+        if not self._hover_text.get_visible():
+            self._hover_text.set_visible(True)
+        if self.canvas:
+            self.canvas.draw_idle()
+
+    def _update_selection_label(self) -> None:
+        if self._selection_text is None:
+            return
+        if not self.state.selection:
+            self._selection_text.set_text("Selection: —")
+        else:
+            center = self.state.selection.center_freq
+            bandwidth = self.state.selection.bandwidth
+            label = f"Selection: {center / 1e6:.6f} MHz • BW {bandwidth / 1e3:.1f} kHz"
+            if self._selection_text.get_text() != label:
+                self._selection_text.set_text(label)
+        if self.canvas:
+            self.canvas.draw_idle()
+
     def _on_span_changed(self, selection: SelectionResult) -> None:
         self.state.selection = selection
         self.state.set_bandwidth(selection.bandwidth)
         if self.channel_panel:
             self.channel_panel.bandwidth_entry.setText(f"{selection.bandwidth:.0f}")
         self._update_offset_label()
+        self._update_selection_label()
         self._update_status_controls()
 
     def _update_offset_label(self) -> None:
@@ -1375,7 +1765,13 @@ class InteractiveWindow(QMainWindow):
                     entry.blockSignals(True)
                     entry.setText(f"{fallback:.0f}")
                     entry.blockSignals(False)
-                self.state.set_target_frequencies(frequencies)
+                    self._sync_state_targets_from_entries()
+                    frequencies = list(self.state.target_freqs)
+                else:
+                    self.state.set_target_frequencies(frequencies)
+                    self.state.target_text = [f"{freq:.0f}" for freq in frequencies]
+                    if len(self.state.target_text) < self.state.max_target_freqs:
+                        self.state.target_text.extend([""] * (self.state.max_target_freqs - len(self.state.target_text)))
             else:
                 raise ValueError("Enter at least one target frequency before running DSP.")
 
@@ -1432,11 +1828,37 @@ class InteractiveWindow(QMainWindow):
     # Utility helpers
     # ------------------------------------------------------------------
 
-    def _auto_detect_center(self, path: Path, *, announce: bool) -> None:
-        if self.state.center_source in {"manual", "provided"} and self.state.center_freq:
+    def _auto_detect_center(
+        self,
+        path: Path,
+        *,
+        announce: bool,
+        force: bool = False,
+        preserve_manual: bool = False,
+    ) -> None:
+        previous_center = self.state.center_freq
+        previous_source = self.state.center_source
+        if (
+            not force
+            and previous_source in {"manual", "provided"}
+            and previous_center
+            and previous_center > 0
+        ):
             return
         detection = detect_center_frequency(path)
         if detection.value is None:
+            if (
+                preserve_manual
+                and previous_source in {"manual", "provided"}
+                and previous_center
+                and previous_center > 0
+            ):
+                if announce:
+                    self._set_status(
+                        "Unable to detect center frequency; keeping manual value.",
+                        error=True,
+                    )
+                return
             self.state.center_freq = None
             self.state.center_source = "unavailable"
             self.state.base_kwargs.pop("center_freq", None)

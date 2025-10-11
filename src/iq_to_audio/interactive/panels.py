@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt
 
@@ -86,6 +88,26 @@ class RecordingPanel(PanelGroup):
         self.set_layout(layout)
 
 
+class DemodPanel(PanelGroup):
+    def __init__(self, state: InteractiveState, options: Sequence[tuple[str, str, str]]) -> None:
+        super().__init__("Demodulation")
+        layout = QtWidgets.QVBoxLayout()
+
+        self.mode_combo = QtWidgets.QComboBox()
+        for value, label, _description in options:
+            self.mode_combo.addItem(label, value)
+        current_index = self.mode_combo.findData(state.demod_mode)
+        if current_index >= 0:
+            self.mode_combo.setCurrentIndex(current_index)
+        layout.addWidget(self.mode_combo)
+
+        self.description_label = QtWidgets.QLabel()
+        self.description_label.setWordWrap(True)
+        layout.addWidget(self.description_label)
+
+        self.set_layout(layout)
+
+
 class ChannelPanel(PanelGroup):
     def __init__(self, state: InteractiveState) -> None:
         super().__init__("Channel selection")
@@ -138,6 +160,16 @@ class TargetsPanel(PanelGroup):
         layout.setVerticalSpacing(8)
 
         self.entries: list[QtWidgets.QLineEdit] = []
+        self.helper_label = QtWidgets.QLabel(
+            "Click the spectrum preview to add target frequencies. "
+            "Selections will fill the next empty slot."
+        )
+        self.helper_label.setWordWrap(True)
+        self.helper_label.setStyleSheet("color: palette(windowText);")
+        self.clear_button = QtWidgets.QPushButton("Clear all targets")
+        self.clear_button.setAutoDefault(False)
+        self.clear_button.setMinimumWidth(160)
+
         per_row = 2
         labels = state.target_text or [""] * state.max_target_freqs
         for idx in range(state.max_target_freqs):
@@ -148,6 +180,10 @@ class TargetsPanel(PanelGroup):
             entry.setMinimumWidth(160)
             layout.addWidget(entry, row, col + 1)
             self.entries.append(entry)
+
+        rows = (state.max_target_freqs + per_row - 1) // per_row
+        layout.addWidget(self.helper_label, rows, 0, 1, per_row * 2)
+        layout.addWidget(self.clear_button, rows + 1, 0, 1, per_row * 2)
 
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)

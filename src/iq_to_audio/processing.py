@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import itertools
 import logging
 import math
@@ -13,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 from scipy import fft as sp_fft
 from scipy import signal
 
@@ -310,7 +313,7 @@ class IQDebugWriter:
     def __init__(self, path: Path | None, sample_rate: float):
         self.path = path
         self.sample_rate = sample_rate
-        self.fd = open(path, "wb") if path else None
+        self.fd = path.open("wb") if path else None
 
     def write(self, samples: np.ndarray) -> None:
         if not self.fd or samples.size == 0:
@@ -428,10 +431,8 @@ class AudioWriter:
             self._writer.join(timeout=10)
         if self.proc:
             if self.proc.stdin:
-                try:
+                with contextlib.suppress(Exception):  # pragma: no cover - defensive
                     self.proc.stdin.close()
-                except Exception:  # pragma: no cover - defensive
-                    pass
             self.proc.wait(timeout=10)
             if self.proc.stderr:
                 err = self.proc.stderr.read().decode("utf-8").strip()
@@ -441,6 +442,75 @@ class AudioWriter:
                 raise RuntimeError("ffmpeg writer failed") from self._error
             self.proc = None
 
+
+def _encode_iq_raw(samples: np.ndarray, codec: str) -> bytes:
+    interleaved = np.empty(samples.size * 2, dtype=np.float32)
+    interleaved[0::2] = samples.real
+    interleaved[1::2] = samples.imag
+    if codec == "pcm_f32le":
+        return interleaved.astype("<f4", copy=False).tobytes()
+    if codec == "pcm_s16le":
+        scaled = np.clip(interleaved, -1.0, 0.999969) * 32767.0
+        return scaled.astype("<i2", copy=False).tobytes()
+    if codec == "pcm_u8":
+        scaled = np.clip(interleaved, -1.0, 1.0)
+        return np.round((scaled + 1.0) * 127.5).astype(np.uint8, copy=False).tobytes()
+    raise ValueError(f"Unsupported raw codec {codec}")
+
+
+class IQSliceWriter:
+    """Write complex IQ slices while preserving container/codec."""
+
+    _WAV_SUBTYPES = {
+        "pcm_u8": "PCM_U8",
+        "pcm_s16le": "PCM_16",
+        "pcm_f32le": "FLOAT",
+    }
+
+    def __init__(self, output_path: Path, sample_rate: float, spec: InputFormatSpec):
+        self.output_path = output_path
+        self.sample_rate = float(sample_rate)
+        self.spec = spec
+        self.peak = 0.0
+        self._file: sf.SoundFile | None = None
+        self._fd: io.BufferedWriter | None = None
+        if spec.container == "wav":
+            subtype = self._WAV_SUBTYPES.get(spec.codec)
+            if subtype is None:
+                raise ValueError(f"Unsupported WAV codec for slices: {spec.codec}")
+            self._file = sf.SoundFile(
+                output_path,
+                mode="w",
+                samplerate=max(1, int(round(self.sample_rate))),
+                channels=2,
+                subtype=subtype,
+                format="WAV",
+            )
+        else:
+            self._fd = output_path.open("wb")
+
+    def write(self, samples: np.ndarray) -> None:
+        if samples.size == 0:
+            return
+        peak = float(np.max(np.abs(samples)))
+        if peak > self.peak:
+            self.peak = peak
+        if self.spec.container == "wav":
+            assert self._file is not None
+            interleaved = np.column_stack((samples.real, samples.imag)).astype(np.float32, copy=False)
+            self._file.write(interleaved)
+        else:
+            assert self._fd is not None
+            payload = _encode_iq_raw(samples, self.spec.codec)
+            self._fd.write(payload)
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+        if self._fd is not None:
+            self._fd.close()
+            self._fd = None
 
 def design_channel_filter(sample_rate: float, bandwidth: float, decimation: int) -> np.ndarray:
     guard = max(1_000.0, bandwidth * 0.5)
@@ -521,7 +591,7 @@ class ProcessingResult:
     audio_peak: float
 
 
-class ProcessingCancelled(RuntimeError):
+class ProcessingCancelled(RuntimeError):  # noqa: N818
     """Raised when processing is aborted early by user request."""
 
 
@@ -535,6 +605,10 @@ class ProcessingPipeline:
 
     def cancel(self) -> None:
         self._cancelled = True
+
+    def _is_pass_through_mode(self) -> bool:
+        mode = (self.config.demod_mode or "").lower()
+        return mode in {"none", "pass", "iq"}
 
     def _resolve_fft_workers(self) -> int | None:
         if self._resolved_fft_workers is not None:
@@ -574,6 +648,7 @@ class ProcessingPipeline:
                 self.config.input_format = spec.codec
         assert self._input_spec is not None
         input_spec = self._input_spec
+        pass_through = self._is_pass_through_mode()
 
         header_bytes = 44 if input_spec.container == "wav" else 0
         frame_bytes = input_spec.bytes_per_frame
@@ -627,10 +702,8 @@ class ProcessingPipeline:
                 last_status = message
 
         if progress_sink is not None:
-            try:
+            with contextlib.suppress(AttributeError):
                 progress_sink.set_cancel_callback(_request_cancel)
-            except AttributeError:
-                pass
 
         manual_rate = self.config.input_sample_rate
         if manual_rate is not None and manual_rate <= 0:
@@ -822,12 +895,14 @@ class ProcessingPipeline:
                 taps, self.config.filter_block, workers=fft_workers
             )
             decimator = Decimator(decimation)
-            decoder = create_decoder(
-                self.config.demod_mode,
-                deemph_us=self.config.deemph_us,
-                agc_enabled=self.config.agc_enabled,
-            )
-            decoder.setup(fs_channel)
+            decoder = None
+            if not pass_through:
+                decoder = create_decoder(
+                    self.config.demod_mode,
+                    deemph_us=self.config.deemph_us,
+                    agc_enabled=self.config.agc_enabled,
+                )
+                decoder.setup(fs_channel)
             iq_writer = IQDebugWriter(self.config.dump_iq_path, fs_channel)
 
             output_path = (
@@ -838,6 +913,13 @@ class ProcessingPipeline:
 
             stage_snapshots: dict[str, tuple[np.ndarray, float]] = {}
             processed_samples = 0
+            slice_writer: IQSliceWriter | None = None
+            audio_writer: AudioWriter | None = None
+            if not self.config.probe_only:
+                if pass_through:
+                    slice_writer = IQSliceWriter(output_path, fs_channel, input_spec)
+                else:
+                    audio_writer = AudioWriter(output_path, fs_channel)
 
             reader_sample_rate = sample_rate if input_spec.container == "raw" else None
             with IQReader(
@@ -873,7 +955,8 @@ class ProcessingPipeline:
                         stage_snapshots["input"] = (warmup.copy(), sample_rate)
                     tracker.advance("ingest", warmup.size)
                     report("Probe-only inspection complete")
-                    decoder.finalize()
+                    if decoder is not None:
+                        decoder.finalize()
                     iq_writer.close()
                     return ProcessingResult(
                         sample_rate_probe=probe,
@@ -887,7 +970,6 @@ class ProcessingPipeline:
                     )
 
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                audio_writer = AudioWriter(output_path, fs_channel)
                 try:
                     processed_samples = 0
                     for idx, raw_block in enumerate(itertools.chain((warmup,), iterator)):
@@ -934,31 +1016,40 @@ class ProcessingPipeline:
                             baseband_power,
                         )
 
-                        report(_status_text("demod", chunk=idx + 1))
-                        audio, stats = decoder.process(decimated)
-                        intermediates = decoder.intermediates()
-                        if intermediates:
-                            first_stage = next(iter(intermediates.values()))
-                            demod_len = float(first_stage[0].size)
+                        if pass_through:
+                            report(_status_text("demod", chunk=idx + 1))
+                            if slice_writer is None:
+                                raise RuntimeError("IQ slice writer missing during pass-through mode.")
+                            slice_writer.write(decimated)
+                            tracker.advance("demod", float(decimated.size))
                         else:
-                            demod_len = float(decimated.size)
-                        tracker.advance("demod", demod_len)
-                        if self.config.plot_stages_path and idx == 0 and intermediates:
-                            for name, (buf, rate) in intermediates.items():
-                                stage_snapshots[name] = (buf.copy(), rate)
-                        LOG.debug(
-                            "Demod chunk %d: %d samples, rms=%.2f dBFS",
-                            idx,
-                            int(demod_len),
-                            stats.rms_dbfs if stats else float("nan"),
-                        )
+                            report(_status_text("demod", chunk=idx + 1))
+                            if decoder is None or audio_writer is None:
+                                raise RuntimeError("Decoder or audio writer unavailable during demodulation.")
+                            audio, stats = decoder.process(decimated)
+                            intermediates = decoder.intermediates()
+                            if intermediates:
+                                first_stage = next(iter(intermediates.values()))
+                                demod_len = float(first_stage[0].size)
+                            else:
+                                demod_len = float(decimated.size)
+                            tracker.advance("demod", demod_len)
+                            if self.config.plot_stages_path and idx == 0 and intermediates:
+                                for name, (buf, rate) in intermediates.items():
+                                    stage_snapshots[name] = (buf.copy(), rate)
+                            LOG.debug(
+                                "Demod chunk %d: %d samples, rms=%.2f dBFS",
+                                idx,
+                                int(demod_len),
+                                stats.rms_dbfs if stats else float("nan"),
+                            )
 
-                        report(_status_text("encode", chunk=idx + 1))
-                        audio_writer.write(audio)
-                        _check_cancel(f"chunk {idx + 1} encode")
-                        if audio.size:
-                            duration = audio.size / max(fs_channel, 1e-9)
-                            tracker.advance("encode", duration * 48_000.0)
+                            report(_status_text("encode", chunk=idx + 1))
+                            audio_writer.write(audio)
+                            _check_cancel(f"chunk {idx + 1} encode")
+                            if audio.size:
+                                duration = audio.size / max(fs_channel, 1e-9)
+                                tracker.advance("encode", duration * 48_000.0)
                         if (
                             max_input_samples is not None
                             and processed_samples >= max_input_samples
@@ -967,9 +1058,13 @@ class ProcessingPipeline:
                             break
                 finally:
                     report(_status_text("finalize"))
-                    decoder.finalize()
+                    if decoder is not None:
+                        decoder.finalize()
                     iq_writer.close()
-                    audio_writer.close()
+                    if audio_writer is not None:
+                        audio_writer.close()
+                    if slice_writer is not None:
+                        slice_writer.close()
 
             if limit_exhausted and preview_seconds is not None:
                 processed_duration = (
@@ -988,10 +1083,19 @@ class ProcessingPipeline:
                 except Exception as exc:  # pragma: no cover - plotting errors logged
                     LOG.warning("Failed to save stage plots: %s", exc)
 
-            LOG.info(
-                "Audio peak level %.2f dBFS.",
-                20.0 * math.log10(max(audio_writer.peak, 1e-6)),
-            )
+            peak_source = 0.0
+            if pass_through and slice_writer is not None:
+                peak_source = slice_writer.peak
+                LOG.info(
+                    "IQ slice peak magnitude %.2f dBFS (complex).",
+                    20.0 * math.log10(max(slice_writer.peak, 1e-6)),
+                )
+            elif not pass_through and audio_writer is not None:
+                peak_source = audio_writer.peak
+                LOG.info(
+                    "Audio peak level %.2f dBFS.",
+                    20.0 * math.log10(max(audio_writer.peak, 1e-6)),
+                )
             report(_status_text("complete"))
 
             return ProcessingResult(
@@ -1002,7 +1106,7 @@ class ProcessingPipeline:
                 decimation=decimation,
                 fs_channel=fs_channel,
                 mix_sign=mix_sign,
-                audio_peak=audio_writer.peak,
+                audio_peak=peak_source,
             )
         except ProcessingCancelled:
             if not self.config.probe_only and output_path:
@@ -1016,4 +1120,20 @@ class ProcessingPipeline:
 
     def _default_output_path(self) -> Path:
         ft = int(self.config.target_freq)
+        if self._is_pass_through_mode():
+            spec = self._input_spec
+            in_suffix = self.config.in_path.suffix
+            wav_suffixes = {".wav", ".wave", ".wv", ".rf64"}
+            if spec and spec.container == "wav":
+                ext = in_suffix if in_suffix.lower() in wav_suffixes else ".wav"
+            elif spec and spec.container == "raw":
+                codec_ext = {
+                    "pcm_u8": ".cu8",
+                    "pcm_s16le": ".cs16",
+                    "pcm_f32le": ".cf32",
+                }.get(spec.codec, ".raw")
+                ext = in_suffix or codec_ext
+            else:
+                ext = in_suffix or ".wav"
+            return self.config.in_path.with_name(f"slice_{ft}{ext}")
         return self.config.in_path.with_name(f"audio_{ft}_48k.wav")

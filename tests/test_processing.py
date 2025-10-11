@@ -1,18 +1,23 @@
 from pathlib import Path
+
 import numpy as np
 import pytest
+import soundfile as sf
 
 from iq_to_audio.decoders.nfm import DeemphasisFilter, QuadratureDemod
+from iq_to_audio.input_formats import get_format
+from iq_to_audio.probe import SampleRateProbe
 from iq_to_audio.processing import (
     Decimator,
+    IQSliceWriter,
     ProcessingCancelled,
     ProcessingConfig,
     ProcessingPipeline,
+    _encode_iq_raw,
     choose_mix_sign,
     design_channel_filter,
 )
 from iq_to_audio.progress import ProgressSink
-from iq_to_audio.probe import SampleRateProbe
 from iq_to_audio.visualize import compute_psd
 
 TESTFILES = Path(__file__).resolve().parent.parent / "testfiles"
@@ -67,6 +72,32 @@ def test_compute_psd_output_shapes():
     freqs, psd = compute_psd(samples, sr, nfft=4096)
     assert freqs.shape == psd.shape
     assert np.isfinite(psd).all()
+
+
+def test_iq_slice_writer_raw_roundtrip(tmp_path):
+    spec = get_format("raw", "pcm_s16le")
+    path = tmp_path / "slice.cs16"
+    writer = IQSliceWriter(path, 48_000.0, spec)
+    samples = np.array([1.0 + 0.0j, -0.5 + 0.5j], dtype=np.complex64)
+    writer.write(samples)
+    writer.close()
+    payload = path.read_bytes()
+    expected = _encode_iq_raw(samples, "pcm_s16le")
+    assert payload == expected
+
+
+def test_iq_slice_writer_wav_roundtrip(tmp_path):
+    spec = get_format("wav", "pcm_s16le")
+    path = tmp_path / "slice.wav"
+    writer = IQSliceWriter(path, 32_000.0, spec)
+    samples = np.array([0.25 + 0.1j, -0.75 - 0.2j, 0.5 + 0j], dtype=np.complex64)
+    writer.write(samples)
+    writer.close()
+    data, sr = sf.read(path, always_2d=True)
+    assert sr == 32_000
+    assert data.shape == (samples.size, 2)
+    np.testing.assert_allclose(data[:, 0], samples.real, atol=1e-3)
+    np.testing.assert_allclose(data[:, 1], samples.imag, atol=1e-3)
 
 
 class _AutoCancelSink(ProgressSink):

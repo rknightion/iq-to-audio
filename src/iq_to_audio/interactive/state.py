@@ -53,6 +53,7 @@ class InteractiveState:
     bandwidth_hz: float | None = None
     agc_enabled: bool = True
     preferred_agc: bool = True
+    demod_mode: str = "nfm"
     input_format_choice: str = "auto"
     detected_format: str | None = None
     input_format_source: str = ""
@@ -124,6 +125,9 @@ class InteractiveState:
         self.waterfall_floor = int(kwargs.get("waterfall_floor", self.waterfall_floor))
         self.agc_enabled = bool(kwargs.get("agc_enabled", True))
         self.preferred_agc = self.agc_enabled
+        demod_mode = kwargs.get("demod_mode")
+        if isinstance(demod_mode, str) and demod_mode:
+            self.demod_mode = demod_mode
         manual_container = kwargs.get("input_container")
         manual_format = kwargs.get("input_format")
         if manual_format:
@@ -182,6 +186,14 @@ class InteractiveState:
         self.agc_enabled = enabled
         self.base_kwargs["agc_enabled"] = enabled
         self.preferred_agc = enabled
+
+    def apply_agc_override(self, enabled: bool) -> None:
+        self.agc_enabled = enabled
+        self.base_kwargs["agc_enabled"] = enabled
+
+    def set_demod_mode(self, mode: str) -> None:
+        self.demod_mode = mode
+        self.base_kwargs["demod_mode"] = mode
 
     def set_detected_format(
         self,
