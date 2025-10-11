@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from .input_formats import parse_user_format
 from .processing import (
     ProcessingCancelled,
     ProcessingConfig,
@@ -134,6 +135,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Interpretation of the stereo channels: iq (default), qi, iq_inv, qi_inv.",
     )
     parser.add_argument(
+        "--input-format",
+        dest="input_format",
+        type=str,
+        help="Override input encoding (wav-s16, wav-u8, wav-f32, raw-cu8, raw-cs16, raw-cf32).",
+    )
+    parser.add_argument(
+        "--input-sample-rate",
+        dest="input_sample_rate",
+        type=positive_float,
+        help="Manual input sample rate in Hz (used when headers are missing).",
+    )
+    parser.add_argument(
         "--mix-sign",
         dest="mix_sign",
         type=int,
@@ -222,6 +235,18 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     frequencies: list[float] = list(args.target_freqs or [])
 
+    input_format_value: Optional[str] = None
+    input_container: Optional[str] = None
+    input_format_source: Optional[str] = None
+    if args.input_format:
+        try:
+            container, codec = parse_user_format(args.input_format, default_container=None)
+        except ValueError as exc:
+            parser.error(f"--input-format: {exc}")
+        input_format_value = codec
+        input_container = container
+        input_format_source = "cli"
+
     if len(frequencies) > 5:
         parser.error("At most five target frequencies are supported per run.")
     seen: list[float] = []
@@ -251,6 +276,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         probe_only=args.probe_only,
         mix_sign_override=args.mix_sign,
         fft_workers=args.fft_workers,
+        input_format=input_format_value,
+        input_container=input_container,
+        input_format_source=input_format_source,
+        input_sample_rate=args.input_sample_rate,
     )
     base_kwargs = dict(shared_kwargs)
     base_kwargs.update(
