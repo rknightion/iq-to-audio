@@ -1,6 +1,6 @@
 # IQ to Audio
 
-Python CLI for extracting a narrowband FM (NFM) channel from large SDR++ baseband WAV recordings. The tool streams I/Q samples from disk, isolates the requested RF slice, demodulates to audio, and writes a mono 48 kHz WAV.
+Python CLI for extracting a narrowband FM (NFM) channel from large SDR++ baseband WAV recordings. The tool streams I/Q samples from disk, isolates the requested RF slices and then (optionally) demodulates to audio, and writes a mono 48 kHz WAV.
 
 ![IQ to Audio Screenshot](docs/ss.png)
 
