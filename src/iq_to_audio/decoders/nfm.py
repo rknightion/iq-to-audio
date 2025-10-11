@@ -20,7 +20,7 @@ class QuadratureDemod:
             return np.empty(0, dtype=np.float32)
         prevs = np.concatenate(([self.prev], samples[:-1]))
         prod = samples * np.conj(prevs)
-        demod = np.angle(prod).astype(np.float32)
+        demod = np.asarray(np.angle(prod), dtype=np.float32)
         self.prev = samples[-1]
         return demod
 
@@ -57,8 +57,10 @@ class DeemphasisFilter:
             samples.astype(np.float32, copy=False),
             zi=zi,
         )
-        self.state = float(zf[0])
-        return audio.astype(np.float32, copy=False)
+        audio_arr = np.asarray(audio, dtype=np.float32)
+        zf_arr = np.asarray(zf, dtype=np.float64)
+        self.state = float(zf_arr[0]) if zf_arr.size else 0.0
+        return audio_arr
 
 
 class NarrowbandFMDecoder(Decoder):

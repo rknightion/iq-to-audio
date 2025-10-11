@@ -5,7 +5,7 @@ from typing import Callable, Dict, Iterable, Optional
 try:  # pragma: no cover - tqdm is optional for programmatic use
     from tqdm import tqdm
 except ImportError:  # pragma: no cover - tests may run without tqdm installed
-    tqdm = None  # type: ignore[assignment]
+    tqdm = None
 
 
 @dataclass

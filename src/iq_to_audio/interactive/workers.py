@@ -312,7 +312,7 @@ class SnapshotWorker(QtCore.QRunnable):
         self.signals = WorkerSignals()
 
     @QtCore.Slot()
-    def run(self) -> None:  # type: ignore[override]
+    def run(self) -> None:
         self.signals.started.emit()
         try:
             if self.job.full_capture:
@@ -360,7 +360,7 @@ class PreviewWorker(QtCore.QRunnable):
         self.signals = WorkerSignals()
 
     @QtCore.Slot()
-    def run(self) -> None:  # type: ignore[override]
+    def run(self) -> None:
         self.signals.started.emit()
         outputs: list[Path] = []
         total = len(self.configs)

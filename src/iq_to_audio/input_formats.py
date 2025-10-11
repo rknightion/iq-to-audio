@@ -200,9 +200,9 @@ def detect_input_format(path: Path) -> InputFormatDetection:
         info = sf.info(str(path))
     except RuntimeError as exc:
         LOG.debug("soundfile header read failed for %s: %s", path, exc)
-        codec = _ffprobe_codec(path)
-        if codec:
-            return _codec_to_detection(codec, source="ffprobe")
+        codec_hint = _ffprobe_codec(path)
+        if codec_hint is not None:
+            return _codec_to_detection(codec_hint, source="ffprobe")
         return InputFormatDetection(
             spec=None,
             source="soundfile",
@@ -210,9 +210,9 @@ def detect_input_format(path: Path) -> InputFormatDetection:
         )
 
     subtype = (info.subtype or "").upper()
-    codec = _WAV_SUBTYPE_MAP.get(subtype)
-    if codec:
-        spec = get_format("wav", codec)
+    wav_codec = _WAV_SUBTYPE_MAP.get(subtype)
+    if wav_codec:
+        spec = get_format("wav", wav_codec)
         return InputFormatDetection(
             spec=spec,
             source=f"wav:{subtype.lower()}",
@@ -230,9 +230,9 @@ def detect_input_format(path: Path) -> InputFormatDetection:
             source=f"wav:{subtype.lower()}",
             error=f"Unsupported WAV subtype {subtype}. Export as PCM 16-bit or float32.",
         )
-    codec = _ffprobe_codec(path)
-    if codec:
-        return _codec_to_detection(codec, source="ffprobe")
+    codec_hint = _ffprobe_codec(path)
+    if codec_hint is not None:
+        return _codec_to_detection(codec_hint, source="ffprobe")
     return InputFormatDetection(
         spec=None,
         source="wav",

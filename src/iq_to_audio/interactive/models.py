@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,7 +9,7 @@ import numpy as np
 
 from ..probe import SampleRateProbe
 from ..processing import ProcessingConfig
-from ..progress import ProgressSink
+from ..progress import PhaseState, ProgressSink
 
 MAX_PREVIEW_SAMPLES = 8_000_000  # Complex samples retained in memory for previews (~64 MB).
 MAX_TARGET_FREQUENCIES = 5
@@ -65,7 +65,7 @@ class StatusProgressSink(ProgressSink):
         self._overall_completed = 0.0
         self._cancel_callback: Callable[[], None] | None = None
 
-    def start(self, phases, *, overall_total: float) -> None:  # type: ignore[override]
+    def start(self, phases: Iterable[PhaseState], *, overall_total: float) -> None:
         self._overall_total = max(overall_total, 0.0)
         self._overall_completed = 0.0
         self._status = "Processing…"
@@ -73,9 +73,9 @@ class StatusProgressSink(ProgressSink):
             self._progress_update(0.0)
         self._emit(highlight=True)
 
-    def advance(  # type: ignore[override]
+    def advance(
         self,
-        phase,
+        phase: PhaseState,
         delta: float,
         *,
         overall_completed: float,
@@ -87,16 +87,16 @@ class StatusProgressSink(ProgressSink):
         self._overall_total = max(self._overall_total, overall_total)
         self._emit(highlight=True)
 
-    def status(self, message: str) -> None:  # type: ignore[override]
+    def status(self, message: str) -> None:
         self._status = message
         self._emit(highlight=True)
 
-    def close(self) -> None:  # type: ignore[override]
+    def close(self) -> None:
         self._update("Processing complete.", False)
         if self._progress_update:
             self._progress_update(1.0)
 
-    def cancel(self) -> None:  # type: ignore[override]
+    def cancel(self) -> None:
         self._update("Cancelling…", True)
         if self._progress_update:
             self._progress_update(0.0)

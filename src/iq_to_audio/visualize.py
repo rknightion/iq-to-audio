@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
@@ -11,13 +11,17 @@ from .spectrum import compute_psd
 
 LOG = logging.getLogger(__name__)
 
+plt: Any
 try:  # Lazy import to avoid forcing matplotlib when unused.
     import matplotlib.pyplot as plt
-    from matplotlib.figure import Figure
-    from matplotlib.axes import Axes
 except ImportError:  # pragma: no cover - handled at runtime
-    plt = None  # type: ignore[assignment]
-    Figure = Axes = object  # type: ignore[assignment]
+    plt = None
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
+else:
+    Axes = Figure = Any
 
 
 def ensure_matplotlib() -> None:
@@ -127,13 +131,18 @@ def interactive_select_frequency(
             self.cid = self.fig.canvas.mpl_connect("button_press_event", self._on_click)
             from matplotlib.widgets import SpanSelector
 
+            selector_kwargs: dict[str, Any] = {"useblit": True}
             self.selector = SpanSelector(
                 self.ax,
                 onselect=self._on_select,
                 direction="horizontal",
-                useblit=True,
-                span_stays=True,
+                **selector_kwargs,
             )
+            if hasattr(self.selector, "span_stays"):
+                try:
+                    setattr(self.selector, "span_stays", True)
+                except Exception:
+                    LOG.debug("Unable to enable persistent span selection.")
             self.fig.canvas.mpl_connect("key_press_event", self._on_key)
 
         def _init_lines(self):

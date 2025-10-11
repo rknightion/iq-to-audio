@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 from scipy import fft as sp_fft
@@ -33,8 +34,11 @@ def compute_psd(
     win_power = np.sum(window ** 2) / use.size
     windowed = np.asarray(use, dtype=np.complex128) * window
     spectrum = _fft_dispatch(windowed, nfft, fft_workers)
-    spectrum = sp_fft.fftshift(spectrum)
-    freqs = sp_fft.fftshift(sp_fft.fftfreq(nfft, d=1.0 / sample_rate))
+    spectrum = np.asarray(sp_fft.fftshift(spectrum))
+    freqs = np.asarray(
+        sp_fft.fftshift(sp_fft.fftfreq(nfft, d=1.0 / sample_rate)),
+        dtype=np.float64,
+    )
     scale = (use.size * sample_rate * win_power) + _NUMPY_EPS
     psd = spectrum * np.conj(spectrum) / scale
     psd_db = 10.0 * np.log10(np.abs(psd) + _NUMPY_EPS)
@@ -49,7 +53,7 @@ class WaterfallResult:
 
 
 def streaming_waterfall(
-    chunks: Iterable[np.ndarray],
+    chunks: Iterable[np.ndarray | None],
     sample_rate: float,
     *,
     nfft: int,
@@ -90,7 +94,7 @@ def streaming_waterfall(
 
 
 def _sliding_windows(
-    chunks: Iterable[np.ndarray],
+    chunks: Iterable[np.ndarray | None],
     *,
     nfft: int,
     hop: int,
@@ -131,10 +135,10 @@ def _fft_dispatch(
 ) -> np.ndarray:
     if fft_workers and fft_workers > 1:
         try:
-            return sp_fft.fft(samples, n=nfft, workers=fft_workers)
+            return np.asarray(sp_fft.fft(samples, n=nfft, workers=fft_workers))
         except TypeError:
-            return sp_fft.fft(samples, n=nfft)
-    return sp_fft.fft(samples, n=nfft)
+            return np.asarray(sp_fft.fft(samples, n=nfft))
+    return np.asarray(sp_fft.fft(samples, n=nfft))
 
 
 class _SlidingFFT:
@@ -161,10 +165,11 @@ class _SlidingFFT:
             )
         windowed = np.asarray(samples, dtype=np.complex128) * self.window
         spectrum = _fft_dispatch(windowed, self.nfft, self.fft_workers)
-        spectrum = sp_fft.fftshift(spectrum)
+        spectrum = np.asarray(sp_fft.fftshift(spectrum))
         scale = (self.nfft * self.sample_rate * self.win_power) + _NUMPY_EPS
         psd = spectrum * np.conj(spectrum) / scale
-        return 10.0 * np.log10(np.abs(psd) + _NUMPY_EPS)
+        result = 10.0 * np.log10(np.abs(psd) + _NUMPY_EPS)
+        return np.asarray(result, dtype=np.float64)
 
 
 class _WaterfallAggregator:

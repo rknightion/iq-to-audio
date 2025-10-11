@@ -13,7 +13,10 @@ from typing import Any
 
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.text import Text
 from matplotlib.ticker import FuncFormatter
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Signal
@@ -197,7 +200,7 @@ class InteractiveWindow(QMainWindow):
         self.thread_pool = QtCore.QThreadPool.globalInstance()
         self._active_snapshot_worker: SnapshotWorker | None = None
         self._active_preview_worker: PreviewWorker | None = None
-        self._active_pipeline = None
+        self._active_pipeline: Any | None = None
         self._status_sink: StatusProgressSink | None = None
         self.progress_sink: ProgressSink | None = None
         self.result_configs: list[ProcessingConfig] | None = None
@@ -206,14 +209,14 @@ class InteractiveWindow(QMainWindow):
         self.figure: Figure | None = None
         self.canvas: FigureCanvasQTAgg | None = None
         self.toolbar: NavigationToolbar2QT | None = None
-        self.ax_main = None
+        self.ax_main: Axes | None = None
         self.span_controller: SpanController | None = None
         self._hover_cid: int | None = None
         self._press_cid: int | None = None
         self._release_cid: int | None = None
-        self._hover_line = None
-        self._hover_text = None
-        self._selection_text = None
+        self._hover_line: Line2D | None = None
+        self._hover_text: Text | None = None
+        self._selection_text: Text | None = None
         self._hover_theme: dict[str, str] = {}
         self._press_event_data: dict[str, float] | None = None
         self._last_hover_freq: float | None = None
@@ -406,8 +409,18 @@ class InteractiveWindow(QMainWindow):
             or not self.demod_panel
             or not self.targets_panel
             or not self.status_panel
+            or not self.spectrum_options_panel
+            or not self.waterfall_options_panel
         ):
             return
+
+        assert self.recording_panel is not None
+        assert self.channel_panel is not None
+        assert self.demod_panel is not None
+        assert self.targets_panel is not None
+        assert self.status_panel is not None
+        assert self.spectrum_options_panel is not None
+        assert self.waterfall_options_panel is not None
 
         rp = self.recording_panel
         rp.file_entry.textChanged.connect(self._on_file_text_changed)
@@ -935,9 +948,14 @@ class InteractiveWindow(QMainWindow):
         self.state.set_bandwidth(value)
         self.channel_panel.bandwidth_entry.setText(f"{self.state.bandwidth_hz:.0f}")
         self._set_status("Bandwidth updated.", error=False)
-        if self.span_controller:
+        if self.span_controller and self.state.bandwidth_hz is not None:
+            center = (
+                self.state.selection.center_freq
+                if self.state.selection is not None
+                else value
+            )
             self.span_controller.set_selection(
-                self.state.selection.center_freq if self.state.selection else value,
+                center,
                 self.state.bandwidth_hz,
             )
 
@@ -1105,6 +1123,10 @@ class InteractiveWindow(QMainWindow):
                 QMessageBox.critical(self, "Preview failed", str(exc))
             return
 
+        if self.status_panel is None:
+            return
+        assert self.status_panel is not None
+
         self._set_status(
             "Analyzing entire recording…" if self.state.full_snapshot else f"Gathering {snapshot_seconds:.2f} s snapshot…",
             error=False,
@@ -1161,7 +1183,7 @@ class InteractiveWindow(QMainWindow):
 
     def _render_snapshot(self, snapshot: SnapshotData, *, remember: bool) -> None:
         if self.spectrum_panel is None:
-            return
+            raise RuntimeError("Spectrum panel not initialized.")
         freqs = snapshot.center_freq + snapshot.freqs
         psd_db = snapshot.psd_db
         if psd_db.size == 0 or freqs.size == 0:
@@ -1185,19 +1207,28 @@ class InteractiveWindow(QMainWindow):
             self.figure = Figure(figsize=(9.0, 5.5))
         if self.canvas is None:
             self.canvas = FigureCanvasQTAgg(self.figure)
+        assert self.figure is not None
+        assert self.canvas is not None
         if self.toolbar is None and NavigationToolbar2QT is not None:
             self.toolbar = NavigationToolbar2QT(self.canvas, self)
             self.toolbar.setObjectName("spectrumToolbar")
 
+        if self.spectrum_panel is None:
+            raise RuntimeError("Spectrum panel not initialized.")
         layout = self.spectrum_panel.layout()
         if layout is None:
             layout = QtWidgets.QVBoxLayout()
             self.spectrum_panel.set_layout(layout)
+        managed_widgets = tuple(widget for widget in (self.toolbar, self.canvas) if widget is not None)
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+            if widget is None:
+                continue
+            if widget in managed_widgets:
+                widget.setParent(None)
+                continue
+            widget.deleteLater()
         if self.toolbar:
             layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
@@ -1223,6 +1254,8 @@ class InteractiveWindow(QMainWindow):
         ax.xaxis.label.set_color(theme.get("fg", "black"))
         ax.yaxis.label.set_color(theme.get("fg", "black"))
         ax.title.set_color(theme.get("fg", "black"))
+        ax.set_xlim(freq_min, freq_max)
+        self._freq_limits = (freq_min, freq_max)
 
         dynamic = max(20.0, float(self.state.dynamic_range))
         finite_vals = psd_db[np.isfinite(psd_db)]
@@ -1253,7 +1286,7 @@ class InteractiveWindow(QMainWindow):
             on_change=self._on_span_changed,
         )
         self._setup_canvas_interactions(ax, theme)
-        self._on_span_changed(self.span_controller.selection)
+        self._on_span_changed(self.span_controller.selection.as_selection())
 
         if snapshot.waterfall is not None:
             self._update_waterfall_display(snapshot.sample_rate, snapshot.center_freq, snapshot.waterfall)
@@ -1330,7 +1363,6 @@ class InteractiveWindow(QMainWindow):
         self._hover_theme = {}
         self._press_event_data = None
         self._last_hover_freq = None
-        self._freq_limits = None
 
     def _on_canvas_motion(self, event) -> None:
         if event.inaxes != self.ax_main or event.xdata is None:
@@ -1384,6 +1416,8 @@ class InteractiveWindow(QMainWindow):
         width = cur_xlim[1] - cur_xlim[0]
         if width <= 0:
             return
+        if self._freq_limits is None:
+            self._freq_limits = (float(cur_xlim[0]), float(cur_xlim[1]))
         new_width = width / scale if direction > 0 else width * scale
         center = float(event.xdata)
         left_fraction = (center - cur_xlim[0]) / width if width else 0.5
@@ -1487,7 +1521,7 @@ class InteractiveWindow(QMainWindow):
         freqs, times, matrix = waterfall
         floor = float(self.state.waterfall_floor)
         cmap = self.state.waterfall_cmap or "magma"
-        self.waterfall_window.update(
+        self.waterfall_window.update_plot(
             freqs=freqs,
             times=times,
             matrix=matrix,
@@ -1621,7 +1655,7 @@ class InteractiveWindow(QMainWindow):
         self._set_stop_enabled(False)
         self._cancel_active_pipeline()
 
-    def _register_preview_pipeline(self, pipeline) -> None:
+    def _register_preview_pipeline(self, pipeline: Any | None) -> None:
         self._active_pipeline = pipeline
 
     def _cancel_active_pipeline(self) -> None:
@@ -1664,7 +1698,7 @@ class InteractiveWindow(QMainWindow):
         if app:
             app.quit()
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]  # noqa: N802
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         self._on_close_session()
         event.accept()
 
@@ -1937,6 +1971,9 @@ def launch_interactive_session(
     qapp = QApplication.instance()
     if qapp is None:
         qapp = QApplication(sys.argv)
+
+    if not isinstance(qapp, QApplication):
+        raise RuntimeError("QApplication instance missing during launch.")
 
     sigint_relay: _SigintRelay | None = None
     try:

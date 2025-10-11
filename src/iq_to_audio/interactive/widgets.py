@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+from matplotlib.image import AxesImage
+from matplotlib.colorbar import Colorbar
 from matplotlib.widgets import SpanSelector
 from PySide6 import QtGui, QtWidgets
 from PySide6.QtCore import Qt
@@ -54,15 +56,16 @@ class WaterfallWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(central)
 
+        self.cid: int | None = None
         self.cid = self.figure.canvas.mpl_connect("button_press_event", self._on_click)
         self.freqs_hz: np.ndarray | None = None
         self.center_freq = 0.0
         self.sample_rate = 0.0
-        self.image = None
+        self.image: AxesImage | None = None
         self.alive = True
-        self._colorbar = None
+        self._colorbar: Colorbar | None = None
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]  # noqa: N802
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         self._handle_close()
         event.accept()
 
@@ -73,7 +76,7 @@ class WaterfallWindow(QtWidgets.QMainWindow):
                 self.figure.canvas.mpl_disconnect(self.cid)
         self._on_close()
 
-    def update(
+    def update_plot(
         self,
         *,
         freqs: np.ndarray,
@@ -98,7 +101,12 @@ class WaterfallWindow(QtWidgets.QMainWindow):
         vmin = peak - max(20.0, floor_db)
         vmax = peak
         freq_mhz = self.freqs_hz / 1e6
-        extent = [freq_mhz.min(), freq_mhz.max(), times.max(), times.min()]
+        extent = (
+            float(freq_mhz.min()),
+            float(freq_mhz.max()),
+            float(times.max()),
+            float(times.min()),
+        )
         self.image = self.ax.imshow(
             matrix,
             aspect="auto",
@@ -111,9 +119,10 @@ class WaterfallWindow(QtWidgets.QMainWindow):
         self.ax.set_xlabel("Frequency (MHz)")
         self.ax.set_ylabel("Time (s)")
         self.ax.set_title("Waterfall (newest at bottom)")
-        self._colorbar = self.figure.colorbar(
-            self.image, ax=self.ax, orientation="vertical", label="Power (dB)"
-        )
+        if self.image is not None:
+            self._colorbar = self.figure.colorbar(
+                self.image, ax=self.ax, orientation="vertical", label="Power (dB)"
+            )
         self.canvas.draw_idle()
 
     def _on_click(self, event) -> None:
@@ -232,7 +241,7 @@ class LockedSplitter(QtWidgets.QSplitter):
         super().__init__(orientation, parent)
         self._locked_handles = locked_handles or set()
 
-    def moveSplitter(self, pos: int, handle: int) -> None:  # type: ignore[override]  # noqa: N802
+    def moveSplitter(self, pos: int, handle: int) -> None:  # noqa: N802
         if handle in self._locked_handles:
             return
         super().moveSplitter(pos, handle)

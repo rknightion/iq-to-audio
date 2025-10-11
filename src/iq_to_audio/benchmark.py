@@ -5,7 +5,7 @@ import math
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Mapping, Optional
 
 import numpy as np
 import soundfile as sf
@@ -44,7 +44,7 @@ def run_benchmark(
     freq_offset: float,
     center_freq: Optional[float],
     target_freq: Optional[float],
-    base_kwargs: Dict[str, object],
+    base_kwargs: Mapping[str, object] | None,
 ) -> int:
     if seconds <= 0:
         raise ValueError("Benchmark duration must be positive.")
@@ -54,7 +54,8 @@ def run_benchmark(
     if abs(freq_offset) >= half_band:
         raise ValueError("Benchmark offset must be within half the sample rate.")
 
-    demod_mode = (base_kwargs.get("demod_mode") or "nfm").lower()
+    demod_value = (base_kwargs or {}).get("demod_mode")
+    demod_mode = demod_value.lower() if isinstance(demod_value, str) else "nfm"
 
     if center_freq is not None and target_freq is not None:
         offset = target_freq - center_freq
@@ -87,7 +88,7 @@ def run_benchmark(
             freq_offset=offset,
         )
 
-        kwargs = dict(base_kwargs)
+        kwargs: dict[str, Any] = dict(base_kwargs) if base_kwargs is not None else {}
         kwargs.update(
             {
                 "target_freq": target_freq,

@@ -69,3 +69,36 @@ def test_parse_user_format_variants(value: str, expected: tuple[str, str]):
 def test_parse_user_format_invalid():
     with pytest.raises(ValueError):
         parse_user_format("unknown-format", default_container=None)
+
+
+def test_detect_input_format_ffprobe_fallback(monkeypatch, tmp_path):
+    path = tmp_path / "fallback.wav"
+    path.write_bytes(b"not a real wav")
+
+    def fake_info(_path: str) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("iq_to_audio.input_formats.sf.info", fake_info)
+    monkeypatch.setattr("iq_to_audio.input_formats._ffprobe_codec", lambda _p: "pcm_s16le")
+
+    detection = detect_input_format(path)
+    assert detection.ok
+    assert detection.spec is not None
+    assert detection.spec.codec == "pcm_s16le"
+    assert detection.source.startswith("ffprobe")
+
+
+def test_detect_input_format_ffprobe_absent(monkeypatch, tmp_path):
+    path = tmp_path / "fallback_none.wav"
+    path.write_bytes(b"invalid")
+
+    def fake_info(_path: str) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("iq_to_audio.input_formats.sf.info", fake_info)
+    monkeypatch.setattr("iq_to_audio.input_formats._ffprobe_codec", lambda _p: None)
+
+    detection = detect_input_format(path)
+    assert not detection.ok
+    assert detection.spec is None
+    assert detection.error is not None

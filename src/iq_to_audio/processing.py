@@ -239,7 +239,8 @@ class ComplexOscillator:
         self.phase = (self.phase + sign * self.increment * samples.size) % (
             2.0 * np.pi
         )
-        return samples * osc
+        mixed = samples.astype(np.complex64, copy=False) * osc
+        return np.asarray(mixed, dtype=np.complex64)
 
 
 class OverlapSaveFIR:
@@ -266,7 +267,7 @@ class OverlapSaveFIR:
                 self.workers = None
             else:
                 self._fft_kwargs = {"workers": self.workers}
-        self.taps_fft = sp_fft.fft(padded_taps, **self._fft_kwargs)
+        self.taps_fft = np.asarray(sp_fft.fft(padded_taps, **self._fft_kwargs))
         self.state = np.zeros(self.overlap, dtype=np.complex64)
 
     def process(self, samples: np.ndarray) -> np.ndarray:
@@ -281,8 +282,8 @@ class OverlapSaveFIR:
             block = np.concatenate([self.state, seg]).astype(np.complex128)
             if block.size < self.fft_size:
                 block = np.pad(block, (0, self.fft_size - block.size))
-            spectrum = sp_fft.fft(block, **self._fft_kwargs)
-            filtered = sp_fft.ifft(spectrum * self.taps_fft, **self._fft_kwargs)
+            spectrum = np.asarray(sp_fft.fft(block, **self._fft_kwargs))
+            filtered = np.asarray(sp_fft.ifft(spectrum * self.taps_fft, **self._fft_kwargs))
             valid = filtered[self.overlap : self.overlap + seg.size]
             outputs.append(valid.astype(np.complex64))
             if self.overlap:
@@ -343,6 +344,7 @@ class AudioWriter:
                 self.input_rate,
                 self.ffmpeg_rate,
             )
+        self.proc: subprocess.Popen[bytes] | None = None
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -533,7 +535,7 @@ def design_channel_filter(sample_rate: float, bandwidth: float, decimation: int)
         window=("kaiser", beta),
         fs=sample_rate,
     )
-    return taps.astype(np.float64)
+    return np.asarray(taps, dtype=np.float64)
 
 
 def choose_mix_sign(

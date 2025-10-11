@@ -170,7 +170,7 @@ def _ffprobe_tags(path: Path) -> Dict[str, str]:
     return tags
 
 
-def _parse_frequency_text(text: str) -> Optional[float]:
+def _parse_frequency_text(text: Optional[str]) -> Optional[float]:
     if text is None:
         return None
     stripped = text.strip()

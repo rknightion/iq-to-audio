@@ -2,10 +2,1787 @@
 - the line "MAX_PREVIEW_SAMPLES = 8_000_000  # Complex samples retained in memory for previews (~64 MB)." now lives in `interactive/models.py` and feeds the new `InteractiveState.max_preview_samples`. It caps in-memory FFT capture to ~64 MB; revisit after profiling before increasing.
 
 
-We need to add to our fft graph an easy way for users to select frequencies that will be populated into the various target frequency boxes. 
-Previously users could do this by double clicking the graph however that's clunky when we have multible frequency boxes to add.
-What I propose as a suitable workaround is if we can surface the centre freqency on the graph as the user moves the mouse around it and then also show in the graph the actual selected centre frequency. Users should then be able to click that to populate the target frequency box. 
-Then, to select additional frequencies users can choose the next frequency in the graph and it populates box 2 and so on until all 5 boxes are filled. 
-Basically, if a frequency number exists in a box then when the user does whatever selection method you implement in the graph and confirms it it updates the next box that doesn't currently have a frequency in it.
-We should also add a clear all box below all the target frequencies so we can reset them and let users do it again.
-This could be finnekey to implement so do think carefully about it and my instructions can be varied as you see fit to provide a decent UX that clearly shows them how to select frequencies and populate the multible boxes. 
+==============================================================================
+                           PACKAGING RESEARCH
+==============================================================================
+
+Research Date: 2025-10-11
+Target: Cross-platform standalone executable (macOS, Windows, Linux; ARM64, AMD64)
+Goal: Double-click GUI launcher with embedded Python environment + uv dependency management
+Reference: ComfyUI-style portable distribution
+
+------------------------------------------------------------------------------
+RECOMMENDATION #1: PyInstaller + GitHub Actions (Production-Ready)
+------------------------------------------------------------------------------
+
+OVERVIEW:
+PyInstaller is the most mature, widely-used solution for Python app packaging.
+It bundles your Python app with a Python interpreter into a single executable
+or folder. Supports all major platforms and architectures. Best compatibility
+with PySide6/Qt apps. Can bundle ffmpeg binaries. GitHub Actions can automate
+multi-platform builds.
+
+PROS:
++ Most mature and battle-tested solution (used in thousands of projects)
++ Excellent PySide6/Qt support out-of-the-box
++ Simple to use - single command for basic packaging
++ Extensive documentation and community support (Stack Overflow, GitHub)
++ Works with virtually all Python packages (NumPy, SciPy, soundfile, etc.)
++ Can bundle external binaries (ffmpeg) easily via --add-binary flag
++ Cross-compilation not required - GitHub Actions handles all platforms
++ Produces reasonably sized executables (~50-150MB depending on dependencies)
++ Active development - latest version 6.16.0 (2025)
++ No C/Rust compiler required
++ Supports both --onefile (single exe) and --onedir (folder with exe + libs)
++ Can embed data files, icons, and other resources
++ Works with uv-managed projects (just needs requirements.txt or direct deps)
+
+CONS:
+- Slower startup time (~1-2 seconds) due to unpacking to temp directory
+- Larger executable size compared to Nuitka (no compilation optimization)
+- Antivirus false positives occasionally (common issue, solvable with code signing)
+- Must build on each target platform (Windows on Windows, macOS on macOS, etc.)
+- Bundled apps don't get performance improvements (interpreted Python still)
+
+IMPLEMENTATION STEPS:
+
+1. INSTALL PyInstaller in your project:
+   ```bash
+   uv add --dev pyinstaller
+   ```
+
+2. CREATE A BASIC SPEC FILE (auto-generated, then customized):
+   ```bash
+   uv run pyinstaller --name iq-to-audio \
+                       --windowed \
+                       --onedir \
+                       src/iq_to_audio/interactive/app.py
+   ```
+
+   This generates `iq-to-audio.spec` which you'll customize.
+
+3. CUSTOMIZE THE .spec FILE for ffmpeg bundling and resources:
+
+   ```python
+   # iq-to-audio.spec
+   # -*- mode: python ; coding: utf-8 -*-
+   import sys
+   from pathlib import Path
+   from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+   block_cipher = None
+
+   # Collect all PySide6 components
+   pyside6_datas = collect_data_files('PySide6')
+
+   # Add ffmpeg binaries (platform-specific paths)
+   ffmpeg_binaries = []
+   if sys.platform == 'win32':
+       ffmpeg_binaries = [
+           ('ffmpeg/bin/ffmpeg.exe', 'ffmpeg'),
+           ('ffmpeg/bin/ffprobe.exe', 'ffmpeg'),
+       ]
+   elif sys.platform == 'darwin':
+       ffmpeg_binaries = [
+           ('/opt/homebrew/bin/ffmpeg', 'ffmpeg'),  # ARM64
+           ('/opt/homebrew/bin/ffprobe', 'ffmpeg'),
+           # OR: ('/usr/local/bin/ffmpeg', 'ffmpeg'),  # x86_64
+       ]
+   else:  # Linux
+       ffmpeg_binaries = [
+           ('/usr/bin/ffmpeg', 'ffmpeg'),
+           ('/usr/bin/ffprobe', 'ffmpeg'),
+       ]
+
+   a = Analysis(
+       ['src/iq_to_audio/cli.py'],  # Entry point
+       pathex=[],
+       binaries=ffmpeg_binaries,
+       datas=pyside6_datas,
+       hiddenimports=[
+           'PySide6.QtCore',
+           'PySide6.QtWidgets',
+           'PySide6.QtGui',
+           'numpy',
+           'scipy',
+           'soundfile',
+           'soxr',
+           'matplotlib',
+       ],
+       hookspath=[],
+       hooksconfig={},
+       runtime_hooks=[],
+       excludes=[],
+       win_no_prefer_redirects=False,
+       win_private_assemblies=False,
+       cipher=block_cipher,
+       noarchive=False,
+   )
+
+   pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+   exe = EXE(
+       pyz,
+       a.scripts,
+       [],
+       exclude_binaries=True,
+       name='iq-to-audio',
+       debug=False,
+       bootloader_ignore_signals=False,
+       strip=False,
+       upx=True,
+       console=False,  # GUI app, no console window
+       disable_windowed_traceback=False,
+       target_arch=None,
+       codesign_identity=None,
+       entitlements_file=None,
+       icon='resources/icon.ico',  # Optional: add app icon
+   )
+
+   coll = COLLECT(
+       exe,
+       a.binaries,
+       a.zipfiles,
+       a.datas,
+       strip=False,
+       upx=True,
+       upx_exclude=[],
+       name='iq-to-audio',
+   )
+
+   # For macOS: Create .app bundle
+   if sys.platform == 'darwin':
+       app = BUNDLE(
+           coll,
+           name='iq-to-audio.app',
+           icon='resources/icon.icns',
+           bundle_identifier='com.yourname.iq-to-audio',
+           info_plist={
+               'NSPrincipalClass': 'NSApplication',
+               'NSHighResolutionCapable': 'True',
+           },
+       )
+   ```
+
+4. HANDLE FFMPEG RUNTIME PATH DETECTION:
+
+   Add this helper to your code (e.g., in utils.py):
+
+   ```python
+   import sys
+   import os
+   from pathlib import Path
+
+   def get_ffmpeg_path() -> Path:
+       """Get ffmpeg path, works in both dev and bundled PyInstaller app."""
+       if getattr(sys, 'frozen', False):
+           # Running in PyInstaller bundle
+           base_path = Path(sys._MEIPASS)
+           ffmpeg_name = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+           return base_path / 'ffmpeg' / ffmpeg_name
+       else:
+           # Running in development - use system ffmpeg
+           return Path('ffmpeg')  # Assumes ffmpeg is on PATH
+
+   def get_ffprobe_path() -> Path:
+       """Get ffprobe path for bundled or dev environments."""
+       if getattr(sys, 'frozen', False):
+           base_path = Path(sys._MEIPASS)
+           ffprobe_name = 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
+           return base_path / 'ffmpeg' / ffprobe_name
+       else:
+           return Path('ffprobe')
+   ```
+
+   Update your ffmpeg/ffprobe calls to use these paths:
+
+   ```python
+   from iq_to_audio.utils import get_ffmpeg_path, get_ffprobe_path
+
+   # In probe.py or wherever ffprobe is called:
+   result = subprocess.run(
+       [str(get_ffprobe_path()), '-v', 'quiet', '-print_format', 'json', ...],
+       ...
+   )
+   ```
+
+5. BUILD THE EXECUTABLE:
+   ```bash
+   uv run pyinstaller iq-to-audio.spec
+   ```
+
+   Output will be in `dist/iq-to-audio/` (folder) or `dist/iq-to-audio.exe` (if --onefile).
+
+6. TEST THE BUILD:
+   ```bash
+   # Windows
+   dist/iq-to-audio/iq-to-audio.exe --interactive
+
+   # macOS
+   open dist/iq-to-audio.app
+
+   # Linux
+   ./dist/iq-to-audio/iq-to-audio --interactive
+   ```
+
+7. GITHUB ACTIONS WORKFLOW for automated multi-platform builds:
+
+   Create `.github/workflows/build-release.yml`:
+
+   ```yaml
+   name: Build Releases
+
+   on:
+     push:
+       tags:
+         - 'v*'  # Trigger on version tags like v1.0.0
+
+   jobs:
+     build:
+       name: Build on ${{ matrix.os }}
+       runs-on: ${{ matrix.os }}
+       strategy:
+         matrix:
+           include:
+             - os: ubuntu-latest
+               platform: linux
+               arch: x86_64
+             - os: macos-13  # Intel
+               platform: macos
+               arch: x86_64
+             - os: macos-14  # Apple Silicon
+               platform: macos
+               arch: arm64
+             - os: windows-latest
+               platform: windows
+               arch: x86_64
+
+       steps:
+         - uses: actions/checkout@v4
+
+         - name: Install system dependencies (Ubuntu)
+           if: matrix.platform == 'linux'
+           run: |
+             sudo apt-get update
+             sudo apt-get install -y ffmpeg
+
+         - name: Install system dependencies (macOS)
+           if: matrix.platform == 'macos'
+           run: |
+             brew install ffmpeg
+
+         - name: Install system dependencies (Windows)
+           if: matrix.platform == 'windows'
+           run: |
+             choco install ffmpeg -y
+
+         - name: Set up Python
+           uses: actions/setup-python@v5
+           with:
+             python-version: '3.11'
+
+         - name: Install uv
+           run: |
+             curl -LsSf https://astral.sh/uv/install.sh | sh
+
+         - name: Install dependencies
+           run: |
+             uv sync
+             uv add --dev pyinstaller
+
+         - name: Build with PyInstaller
+           run: |
+             uv run pyinstaller iq-to-audio.spec
+
+         - name: Create distribution archive (Linux/macOS)
+           if: matrix.platform != 'windows'
+           run: |
+             cd dist
+             tar -czf iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz iq-to-audio/
+
+         - name: Create distribution archive (Windows)
+           if: matrix.platform == 'windows'
+           run: |
+             cd dist
+             Compress-Archive -Path iq-to-audio -DestinationPath iq-to-audio-windows-x86_64.zip
+
+         - name: Upload Release Asset
+           uses: softprops/action-gh-release@v1
+           with:
+             files: |
+               dist/iq-to-audio-*.tar.gz
+               dist/iq-to-audio-*.zip
+           env:
+             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+   ```
+
+8. OPTIONAL: CODE SIGNING (reduces antivirus false positives):
+
+   - Windows: Use SignTool with a code signing certificate
+   - macOS: Use codesign with Apple Developer ID
+   - See: https://pyinstaller.org/en/stable/usage.html#code-signing
+
+FFMPEG BUNDLING NOTES:
+- Option A (BUNDLED): Include ffmpeg binaries in --add-binary, increases app size by ~100MB
+- Option B (EXTERNAL): Document ffmpeg as external dependency, users install separately
+- Recommendation: Bundle ffmpeg for best UX, users don't need to install anything
+
+SIZE ESTIMATES:
+- Without ffmpeg: ~80-120MB (PySide6 + NumPy/SciPy are large)
+- With ffmpeg: ~180-220MB
+- Can reduce with UPX compression (--upx flag, already in spec)
+
+FURTHER READING:
+- PyInstaller docs: https://pyinstaller.org/en/stable/
+- PySide6 + PyInstaller: https://doc.qt.io/qtforpython-6/deployment/deployment-pyinstaller.html
+- Bundling data files: https://pyinstaller.org/en/stable/spec-files.html#adding-data-files
+
+------------------------------------------------------------------------------
+OPTION #2: Nuitka + pyside6-deploy (Performance-Optimized)
+------------------------------------------------------------------------------
+
+OVERVIEW:
+Nuitka is a Python-to-C compiler that compiles your entire application to native
+machine code. PySide6 officially supports Nuitka via `pyside6-deploy`, a wrapper
+tool. Results in faster startup and runtime performance compared to PyInstaller,
+but with longer build times and more complexity.
+
+PROS:
++ Significantly faster runtime performance (10-30% faster than CPython)
++ Faster cold startup (~instant vs 1-2s for PyInstaller)
++ Smaller executable size after optimization
++ Official Qt/PySide6 support via pyside6-deploy tool
++ No unpacking to temp directory (direct execution)
++ Better optimization for CPU-intensive DSP operations
++ Actively developed - Python 3.13 support added in 2024
++ Can exclude unused Qt modules (QtWebEngine, etc.) to reduce size
++ Native code reduces chance of decompilation
+
+CONS:
+- Requires C++ compiler on build machine (MSVC/Clang/GCC)
+- Much longer build times (10-30 minutes vs 1-2 minutes for PyInstaller)
+- More complex setup and debugging
+- Smaller community compared to PyInstaller
+- Potential compatibility issues with some dynamic imports
+- Must build on each target platform (no cross-compilation)
+- Can have issues with plugins that use ctypes or dynamic code generation
+
+IMPLEMENTATION STEPS:
+
+1. INSTALL DEPENDENCIES:
+   ```bash
+   # Install C++ compiler first:
+   # Windows: Install Visual Studio Build Tools
+   # macOS: xcode-select --install
+   # Linux: sudo apt install build-essential
+
+   uv add --dev nuitka
+   uv add --dev pyside6  # If not already added
+   ```
+
+2. USE pyside6-deploy (RECOMMENDED for PySide6 apps):
+   ```bash
+   uv run pyside6-deploy --name iq-to-audio \
+                         --mode onedir \
+                         --qt-plugins qml \
+                         src/iq_to_audio/interactive/app.py
+   ```
+
+   This creates a deployment config and builds the app.
+
+3. CUSTOMIZE DEPLOYMENT with pyside6deploy.yml:
+
+   Generated config file (edit as needed):
+
+   ```yaml
+   app:
+     title: iq-to-audio
+     project_dir: .
+     input_file: src/iq_to_audio/interactive/app.py
+     exec_directory: .
+     icon:
+
+   python:
+     packages:
+       - numpy
+       - scipy
+       - soundfile
+       - soxr
+       - matplotlib
+
+   qt:
+     qml_files:
+     excluded_qml_plugins:
+       - QtWebEngine
+       - QtTest
+       - QtSensors
+     modules:
+       - QtCore
+       - QtWidgets
+       - QtGui
+
+   nuitka:
+     mode: onedir  # or 'onefile'
+     extra_args:
+       - --follow-imports
+       - --include-package=iq_to_audio
+       - --enable-plugin=pyside6
+       - --disable-console  # GUI app
+   ```
+
+4. BUNDLE FFMPEG with Nuitka:
+
+   Add to nuitka extra_args in config:
+
+   ```yaml
+   nuitka:
+     extra_args:
+       - --include-data-dir=/usr/local/bin/ffmpeg=ffmpeg/
+       - --include-data-file=/usr/local/bin/ffprobe=ffmpeg/ffprobe
+       # Windows: --include-data-dir=C:/ffmpeg/bin=ffmpeg/
+   ```
+
+   Or use command line:
+   ```bash
+   uv run nuitka --standalone \
+                 --enable-plugin=pyside6 \
+                 --include-data-dir=ffmpeg/bin=ffmpeg \
+                 --disable-console \
+                 --onedir \
+                 src/iq_to_audio/interactive/app.py
+   ```
+
+5. RUNTIME PATH HANDLING (same as PyInstaller):
+
+   Use the same `get_ffmpeg_path()` helper shown in Option #1.
+   Nuitka also supports `sys._MEIPASS` for bundled resources.
+
+6. BUILD THE APPLICATION:
+   ```bash
+   uv run pyside6-deploy
+   ```
+
+   Or with raw Nuitka:
+   ```bash
+   uv run python -m nuitka --standalone \
+                           --enable-plugin=pyside6 \
+                           --onedir \
+                           --output-dir=dist \
+                           src/iq_to_audio/interactive/app.py
+   ```
+
+7. GITHUB ACTIONS (similar to PyInstaller):
+
+   Add C++ compiler installation steps:
+
+   ```yaml
+   - name: Install C++ compiler (Ubuntu)
+     if: matrix.platform == 'linux'
+     run: sudo apt-get install -y build-essential
+
+   - name: Install C++ compiler (macOS)
+     if: matrix.platform == 'macos'
+     run: xcode-select --install
+
+   - name: Install C++ compiler (Windows)
+     if: matrix.platform == 'windows'
+     uses: microsoft/setup-msbuild@v1
+
+   - name: Build with Nuitka
+     run: uv run pyside6-deploy
+   ```
+
+PERFORMANCE EXPECTATIONS:
+- Startup time: <500ms (vs 1-2s for PyInstaller)
+- DSP operations: 10-30% faster (benefits NumPy/SciPy loops)
+- Build time: 15-30 minutes (vs 2-5 minutes for PyInstaller)
+
+FFMPEG BUNDLING:
+- Same as PyInstaller - bundle or document as external dependency
+- Nuitka's --include-data-dir handles binary bundling
+
+SIZE ESTIMATES:
+- Without ffmpeg: ~60-100MB (smaller than PyInstaller due to optimization)
+- With ffmpeg: ~160-200MB
+
+FURTHER READING:
+- Nuitka docs: https://nuitka.net/user-documentation/user-manual.html
+- PySide6 + Nuitka: https://doc.qt.io/qtforpython-6/deployment/deployment-nuitka.html
+- pyside6-deploy: https://doc.qt.io/qtforpython-6/deployment/deployment-pyside6-deploy.html
+
+
+-----DSP Post Processing-------
+
+
+
+----TESTING-----
+
+## COMPREHENSIVE TESTING STRATEGY & IMPLEMENTATION GUIDE
+
+### EXECUTIVE SUMMARY
+This document outlines a comprehensive testing strategy for the iq-to-audio project, covering unit tests,
+integration tests, GUI testing, performance benchmarking, and CI/CD integration. Each section includes
+actionable implementation details, code examples, and references to support agentic implementation.
+
+---
+
+### 1. CURRENT TEST COVERAGE ANALYSIS
+
+**Existing test files:**
+- tests/test_processing.py - Core DSP pipeline (Decimator, IQReader, filters, cancellation)
+- tests/test_interactive_qt.py - GUI initialization, signals, state management, SIGINT handling
+- tests/test_cli_integration.py - End-to-end CLI workflows (NFM, AM, SSB, multi-target, preview)
+- tests/test_input_formats.py - Format detection and parsing (WAV/raw)
+- tests/test_utils.py - Center frequency detection from filenames/metadata
+- tests/test_benchmark.py - Benchmark smoke test
+
+**Test data assets:**
+- testfiles/fc-132334577Hz-ft-132300000-AM.wav (386MB, 2.5MHz SR, 40s, pcm_s16le)
+- testfiles/fc-456834049Hz-ft-455837500-ft2-456872500-NFM.wav (403MB, similar specs)
+
+**Modules LACKING dedicated test coverage:**
+- decoders/am.py - AM demodulator (tested only via CLI integration)
+- decoders/base.py - Decoder ABC interface
+- decoders/common.py - DCBlocker DSP utility
+- interactive/models.py - Dataclass definitions for UI state
+- interactive/widgets.py - Custom Qt widgets (WaterfallWindow, SpanSelector, GroupBox)
+- interactive/workers.py - Background snapshot/preview threading
+- preview.py - Preview orchestration logic
+- progress.py - ProgressSink ABC implementations
+- spectrum.py - FFT/PSD/waterfall computation (_SlidingFFT, _WaterfallAggregator)
+- visualize.py - Matplotlib helpers (marked deprecated, low priority)
+
+**Priority gaps for unit testing:**
+1. spectrum.py - Critical DSP logic, complex windowing/FFT aggregation
+2. decoders/common.py - DCBlocker state machine affects all decoders
+3. preview.py - Orchestrates short runs, path generation
+4. interactive/workers.py - Threading/signal interactions
+5. progress.py - ProgressSink implementations (TqdmSink, StatusProgressSink)
+
+---
+
+### 2. GUI TESTING WITH pytest-qt
+
+**Framework: pytest-qt** (latest: July 2025)
+- PyPI: https://pypi.org/project/pytest-qt/
+- Docs: https://pytest-qt.readthedocs.io/en/latest/
+- GitHub: https://github.com/pytest-dev/pytest-qt
+
+**Key capabilities:**
+- `qtbot` fixture for simulating user interactions (clicks, keystrokes, signals)
+- Automatic capture of qDebug/qWarning/qCritical messages
+- `waitSignal()` and `waitSignals()` to block until Qt signals emit
+- Headless execution via QT_QPA_PLATFORM=offscreen (no display needed)
+- Exceptions in virtual methods/slots automatically fail tests
+
+**Installation:**
+```bash
+uv add --dev pytest-qt
+```
+
+**Example: Testing waterfall widget interactions**
+```python
+# tests/test_waterfall_widget.py
+import numpy as np
+import pytest
+from PySide6 import QtWidgets
+from iq_to_audio.interactive.widgets import WaterfallWindow
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    yield app
+
+def test_waterfall_click_emits_frequency(qtbot, qapp):
+    """Verify waterfall window emits selected frequency on click."""
+    selected_freqs = []
+    closed = []
+
+    window = WaterfallWindow(
+        parent=None,
+        on_select=lambda freq: selected_freqs.append(freq),
+        on_close=lambda: closed.append(True)
+    )
+    qtbot.addWidget(window)
+
+    # Populate with synthetic waterfall data
+    freqs = np.linspace(-50_000, 50_000, 256)
+    times = np.linspace(0, 1.0, 100)
+    matrix = np.random.uniform(-90, -20, (100, 256)).astype(np.float32)
+
+    window.update(
+        freqs=freqs, times=times, matrix=matrix,
+        center_freq=100_000_000.0, sample_rate=2_500_000.0,
+        floor_db=60.0, cmap='viridis'
+    )
+    QtWidgets.QApplication.processEvents()
+
+    # Simulate click at center of plot (mocking mpl event)
+    window._on_click(type('Event', (), {'xdata': 100_000_000.0, 'inaxes': window.ax})())
+    assert len(selected_freqs) == 1
+    assert selected_freqs[0] == pytest.approx(100_000_000.0, abs=1000)
+
+    window.close()
+    QtWidgets.QApplication.processEvents()
+    assert closed == [True]
+
+def test_span_selector_updates_bandwidth(qtbot, qapp):
+    """Test span selector widget emits correct bandwidth on drag."""
+    from iq_to_audio.interactive.widgets import SpanSelection
+
+    # Use existing app fixture from test_interactive_qt.py as template
+    # Mock matplotlib SpanSelector interactions
+    # Verify SpanSelection.from_selection() conversion
+    pass  # Implement based on widget API
+```
+
+**Testing async operations with qtbot.waitSignal:**
+```python
+def test_snapshot_worker_emits_result(qtbot, qapp):
+    """Verify SnapshotWorker emits snapshot_ready signal on completion."""
+    from iq_to_audio.interactive.workers import SnapshotWorker
+    from iq_to_audio.interactive.models import SnapshotParams
+
+    params = SnapshotParams(
+        in_path=Path("testfiles/fc-132334577Hz-ft-132300000-AM.wav"),
+        seconds=0.5,
+        nfft=4096,
+        max_slices=100
+    )
+    worker = SnapshotWorker(params)
+
+    with qtbot.waitSignal(worker.snapshot_ready, timeout=5000) as blocker:
+        worker.run()
+
+    snapshot_data = blocker.args[0]
+    assert snapshot_data.sample_rate > 0
+    assert snapshot_data.freqs.size > 0
+    assert snapshot_data.psd_db.size == snapshot_data.freqs.size
+```
+
+**Additional test scenarios:**
+- Demod mode combo box changes disable/enable AGC checkbox
+- Target frequency insertion fills next empty slot (max 5)
+- Clear targets button resets all entries and state
+- Format combo manual override updates state.input_format_choice
+- Progress bar shows/hides during processing
+- Status label updates via status_update_signal
+- Scroll wheel zoom on spectrum canvas (mock scroll events)
+- Keyboard shortcuts (if implemented)
+
+**Reference:**
+- https://pytest-qt.readthedocs.io/en/latest/virtual_methods.html
+- https://ilmanzo.github.io/post/testing_pyside_gui_applications/
+
+---
+
+### 3. VISUAL REGRESSION TESTING
+
+**Challenge:** Qt native widgets aren't web-based, so traditional visual testing tools (Applitools, Percy)
+don't directly apply. Focus on screenshot comparison for regressions in plot rendering.
+
+**Recommended approach: pytest-image-snapshot**
+- PyPI: https://pypi.org/project/pytest-image-snapshot/
+- GitHub: https://github.com/bmihelac/pytest-image-snapshot
+- Uses pixelmatch for perceptual diff with anti-aliasing detection
+
+**Installation:**
+```bash
+uv add --dev pytest-image-snapshot
+```
+
+**Example: Spectrum plot visual regression**
+```python
+# tests/test_spectrum_visual.py
+import numpy as np
+import pytest
+from pathlib import Path
+from iq_to_audio.interactive.app import InteractiveWindow
+
+@pytest.fixture
+def image_snapshot(request):
+    """Fixture for image snapshot comparison."""
+    from pytest_image_snapshot import image_snapshot as _snapshot
+    return _snapshot(request)
+
+def test_spectrum_plot_baseline(qtbot, qapp, image_snapshot, tmp_path):
+    """Verify spectrum plot renders consistently (visual regression)."""
+    from iq_to_audio.interactive import SnapshotData
+    from iq_to_audio.probe import SampleRateProbe
+
+    app = InteractiveWindow(
+        base_kwargs={"demod_mode": "nfm", "agc_enabled": True, "bandwidth": 12_500.0},
+        initial_path=None,
+        snapshot_seconds=1.0
+    )
+    qtbot.addWidget(app)
+
+    # Create deterministic snapshot data (fixed seed)
+    rng = np.random.default_rng(42)
+    snapshot = SnapshotData(
+        path=Path("synthetic.wav"),
+        sample_rate=2_500_000.0,
+        center_freq=100_000_000.0,
+        probe=SampleRateProbe(ffprobe=2_500_000.0, header=2_500_000.0),
+        seconds=1.0,
+        mode="samples",
+        freqs=np.linspace(-1_250_000, 1_250_000, 2048),
+        psd_db=rng.uniform(-90.0, -20.0, 2048),
+        waterfall=None,
+        samples=None,
+        params={},
+        fft_frames=100
+    )
+
+    app._render_snapshot(snapshot, remember=True)
+    QtWidgets.QApplication.processEvents()
+
+    # Capture canvas to image
+    screenshot_path = tmp_path / "spectrum.png"
+    app.canvas.figure.savefig(screenshot_path, dpi=100)
+
+    # Compare against baseline (creates baseline on first run)
+    image_snapshot(screenshot_path.read_bytes(), threshold=0.01)  # 1% tolerance
+
+    app.close()
+```
+
+**Alternative: Manual screenshot diffing with pixelmatch-py**
+- GitHub: https://github.com/whtsky/pixelmatch-py
+```python
+from pixelmatch.contrib.PIL import pixelmatch
+from PIL import Image
+
+def test_waterfall_rendering(qtbot, tmp_path):
+    # Render waterfall to image
+    baseline = Image.open("tests/baselines/waterfall_reference.png")
+    current = Image.open(tmp_path / "waterfall_output.png")
+
+    diff = Image.new("RGBA", baseline.size)
+    mismatch = pixelmatch(baseline, current, diff, threshold=0.1)
+
+    assert mismatch < 50, f"Waterfall rendering changed: {mismatch} pixels differ"
+```
+
+**Caution:** Visual tests are fragile (font rendering, OS differences). Use sparingly for critical plots.
+Store baselines in `tests/visual_baselines/` and update intentionally.
+
+**References:**
+- https://github.com/bmihelac/pytest-image-snapshot
+- https://github.com/whtsky/pixelmatch-py
+
+---
+
+### 4. PROPERTY-BASED TESTING WITH HYPOTHESIS
+
+**Framework: Hypothesis** (for DSP invariants, edge cases)
+- Docs: https://hypothesis.readthedocs.io/
+- PyPI: https://pypi.org/project/hypothesis/
+
+**Installation:**
+```bash
+uv add --dev hypothesis
+```
+
+**Use cases for DSP testing:**
+1. **Decimator preserves continuity** - Output for concatenated chunks equals output for merged input
+2. **DCBlocker removes DC** - Mean of output is near zero for any input with DC offset
+3. **Filter stability** - No NaN/Inf outputs for any finite input
+4. **FFT frequency ordering** - fftshift produces monotonic frequency axis
+5. **AGC range** - Output always within [-1, 1] regardless of input scale
+
+**Example: Decimator property test**
+```python
+# tests/test_processing_properties.py
+import numpy as np
+from hypothesis import given, strategies as st
+from iq_to_audio.processing import Decimator
+
+@given(
+    factor=st.integers(min_value=2, max_value=20),
+    chunk1_size=st.integers(min_value=10, max_value=500),
+    chunk2_size=st.integers(min_value=10, max_value=500)
+)
+def test_decimator_continuity_property(factor, chunk1_size, chunk2_size):
+    """Decimator output for split chunks equals output for combined chunk."""
+    decimator1 = Decimator(factor)
+    decimator2 = Decimator(factor)
+
+    # Generate synthetic IQ samples
+    chunk1 = np.random.randn(chunk1_size).astype(np.complex64)
+    chunk2 = np.random.randn(chunk2_size).astype(np.complex64)
+    combined = np.concatenate([chunk1, chunk2])
+
+    # Path 1: Process separately
+    out1 = decimator1.process(chunk1)
+    out2 = decimator1.process(chunk2)
+    split_result = np.concatenate([out1, out2])
+
+    # Path 2: Process combined
+    combined_result = decimator2.process(combined)
+
+    # Results should match (accounting for state)
+    np.testing.assert_allclose(split_result, combined_result, rtol=1e-6)
+
+@given(
+    dc_offset=st.floats(min_value=-10.0, max_value=10.0, allow_nan=False),
+    ac_amplitude=st.floats(min_value=0.01, max_value=5.0),
+    sample_count=st.integers(min_value=100, max_value=5000)
+)
+def test_dcblocker_removes_dc_offset(dc_offset, ac_amplitude, sample_count):
+    """DCBlocker reduces DC component to near zero."""
+    from iq_to_audio.decoders.common import DCBlocker
+
+    # Generate signal with DC offset + AC component
+    t = np.arange(sample_count)
+    signal = dc_offset + ac_amplitude * np.sin(2 * np.pi * 0.01 * t)
+    signal = signal.astype(np.float32)
+
+    blocker = DCBlocker(radius=0.995)
+    filtered = blocker.process(signal)
+
+    # Output mean should be near zero (after transient)
+    steady_state = filtered[100:]  # Skip initial transient
+    assert abs(np.mean(steady_state)) < 0.1, "DC blocker failed to remove offset"
+
+@given(
+    nfft=st.sampled_from([256, 512, 1024, 2048, 4096]),
+    sample_rate=st.floats(min_value=1e3, max_value=10e6)
+)
+def test_psd_frequency_axis_monotonic(nfft, sample_rate):
+    """compute_psd returns monotonically increasing frequency axis."""
+    from iq_to_audio.spectrum import compute_psd
+
+    samples = np.random.randn(nfft).astype(np.complex64)
+    freqs, psd = compute_psd(samples, sample_rate, nfft=nfft)
+
+    # Frequency axis must be strictly increasing
+    assert np.all(np.diff(freqs) > 0), "Frequency axis not monotonic"
+
+    # Bounds check
+    assert freqs[0] >= -sample_rate / 2
+    assert freqs[-1] <= sample_rate / 2
+```
+
+**Advanced: Custom strategies for IQ data**
+```python
+from hypothesis import strategies as st
+
+@st.composite
+def iq_samples(draw, min_size=100, max_size=10000, max_amplitude=10.0):
+    """Generate complex IQ samples with configurable properties."""
+    size = draw(st.integers(min_value=min_size, max_value=max_size))
+    real = draw(st.lists(
+        st.floats(min_value=-max_amplitude, max_value=max_amplitude, allow_nan=False),
+        min_size=size, max_size=size
+    ))
+    imag = draw(st.lists(
+        st.floats(min_value=-max_amplitude, max_value=max_amplitude, allow_nan=False),
+        min_size=size, max_size=size
+    ))
+    return np.array(real, dtype=np.float32) + 1j * np.array(imag, dtype=np.float32)
+
+@given(samples=iq_samples(min_size=1000, max_amplitude=1.0))
+def test_nfm_decoder_bounded_output(samples):
+    """NFM decoder never produces outputs outside [-1, 1] with AGC."""
+    from iq_to_audio.decoders.nfm import NFMDecoder
+
+    decoder = NFMDecoder(deemph_us=300.0, agc_enabled=True)
+    decoder.setup(sample_rate=96_000.0)
+    audio, stats = decoder.process(samples.astype(np.complex64))
+
+    assert np.all(np.abs(audio) <= 1.0), "NFM+AGC output exceeded bounds"
+```
+
+**References:**
+- https://hypothesis.readthedocs.io/en/latest/numpy.html
+- https://hypothesis.works/articles/testing-scientific-code/
+
+---
+
+### 5. PERFORMANCE & BENCHMARK TESTING
+
+**Framework: pytest-benchmark**
+- PyPI: https://pypi.org/project/pytest-benchmark/
+- Docs: https://pytest-benchmark.readthedocs.io/
+
+**Installation:**
+```bash
+uv add --dev pytest-benchmark
+```
+
+**Key features:**
+- Automatic calibration and warmup rounds
+- Statistical analysis (min/max/mean/stddev/median)
+- Regression detection via `--benchmark-compare`
+- JSON export for CI tracking
+- cProfile integration with `--benchmark-cprofile`
+
+**Example: Benchmark DSP stages**
+```python
+# tests/test_dsp_performance.py
+import numpy as np
+import pytest
+from iq_to_audio.processing import Decimator
+from iq_to_audio.decoders.nfm import QuadratureDemod, DeemphasisFilter
+from iq_to_audio.spectrum import compute_psd
+
+@pytest.fixture
+def synthetic_iq():
+    """1M samples of complex IQ data."""
+    return np.random.randn(1_000_000).astype(np.complex64)
+
+def test_decimator_throughput(benchmark, synthetic_iq):
+    """Benchmark decimation performance (critical path)."""
+    decimator = Decimator(factor=10)
+    result = benchmark(decimator.process, synthetic_iq)
+    assert result.size == synthetic_iq.size // 10
+
+def test_quadrature_demod_throughput(benchmark):
+    """Benchmark NFM quadrature demodulation."""
+    samples = np.exp(1j * np.cumsum(np.random.randn(500_000) * 0.1)).astype(np.complex64)
+    demod = QuadratureDemod()
+    result = benchmark(demod.process, samples)
+    assert result.size == samples.size
+
+def test_psd_computation_throughput(benchmark, synthetic_iq):
+    """Benchmark FFT/PSD computation (interactive mode bottleneck)."""
+    result = benchmark(compute_psd, synthetic_iq[:262144], 2_500_000.0, nfft=4096)
+    freqs, psd = result
+    assert freqs.size == 4096
+
+@pytest.mark.parametrize("nfft", [1024, 4096, 16384, 65536])
+def test_psd_scaling_with_fft_size(benchmark, nfft):
+    """Measure PSD performance vs FFT size."""
+    samples = np.random.randn(nfft).astype(np.complex64)
+    benchmark.group = f"psd_nfft_{nfft}"
+    benchmark(compute_psd, samples, 1_000_000.0, nfft=nfft)
+```
+
+**Running benchmarks:**
+```bash
+# Initial baseline
+uv run pytest tests/test_dsp_performance.py --benchmark-autosave
+
+# Compare to baseline (fail if >5% regression)
+uv run pytest tests/test_dsp_performance.py --benchmark-compare=0001 --benchmark-compare-fail=min:5%
+
+# Profile slowest test
+uv run pytest tests/test_dsp_performance.py::test_psd_computation_throughput --benchmark-cprofile=tottime
+```
+
+**CI integration (GitHub Actions):**
+```yaml
+# .github/workflows/benchmark.yml
+- name: Run performance benchmarks
+  run: |
+    uv run pytest tests/test_dsp_performance.py --benchmark-json=benchmark_results.json
+
+- name: Store benchmark results
+  uses: benchmark-action/github-action-benchmark@v1
+  with:
+    tool: 'pytest'
+    output-file-path: benchmark_results.json
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+    auto-push: true
+```
+
+**Detecting regressions with Bencher:**
+- https://bencher.dev/learn/benchmarking/python/pytest-benchmark/
+- Tracks performance across PRs, alerts on degradation
+
+**References:**
+- https://pytest-benchmark.readthedocs.io/en/latest/usage.html
+- https://codspeed.io/blog/one-pytest-marker-to-track-the-performance-of-your-tests
+
+---
+
+### 6. TEST DATA STRATEGY
+
+**Current state:**
+- 2 real IQ captures (AM/NFM, ~400MB each, WAV format, pcm_s16le, 2.5MHz SR)
+- Tests use both real files and synthetic numpy data
+
+**Recommendations:**
+
+#### 6.1 Expand Synthetic Test Data Generation
+
+**Advantages:** Deterministic, fast, no storage overhead, covers edge cases
+**Disadvantages:** May miss real-world artifacts (multipath, ADC noise, interference)
+
+**Implement synthetic IQ generators:**
+```python
+# tests/conftest.py
+import numpy as np
+from pathlib import Path
+import soundfile as sf
+
+def generate_tone_iq(
+    freq_offset: float,
+    sample_rate: float,
+    duration: float,
+    amplitude: float = 0.5,
+    noise_floor_db: float = -60.0
+) -> np.ndarray:
+    """Generate clean tone at freq_offset Hz."""
+    n_samples = int(sample_rate * duration)
+    t = np.arange(n_samples) / sample_rate
+    tone = amplitude * np.exp(1j * 2.0 * np.pi * freq_offset * t)
+
+    # Add AWGN
+    noise_amplitude = amplitude * 10**(noise_floor_db / 20)
+    noise = noise_amplitude * (np.random.randn(n_samples) + 1j * np.random.randn(n_samples))
+
+    return (tone + noise).astype(np.complex64)
+
+def generate_nfm_iq(
+    carrier_offset: float,
+    sample_rate: float,
+    audio_freq: float,
+    deviation: float,
+    duration: float
+) -> np.ndarray:
+    """Generate NFM modulated signal."""
+    n_samples = int(sample_rate * duration)
+    t = np.arange(n_samples) / sample_rate
+
+    # Audio modulating signal
+    audio = np.sin(2.0 * np.pi * audio_freq * t)
+
+    # Frequency modulation
+    phase = 2.0 * np.pi * carrier_offset * t + deviation * np.cumsum(audio) / sample_rate
+    iq = np.exp(1j * phase).astype(np.complex64)
+
+    return iq
+
+@pytest.fixture
+def synthetic_am_iq(tmp_path):
+    """Generate synthetic AM signal as WAV file."""
+    carrier_offset = 5_000.0  # 5 kHz offset
+    sample_rate = 2_500_000.0
+    audio_freq = 1_000.0  # 1 kHz tone
+    modulation_depth = 0.8
+    duration = 1.0
+
+    n_samples = int(sample_rate * duration)
+    t = np.arange(n_samples) / sample_rate
+
+    # AM: carrier * (1 + m*audio)
+    audio = np.sin(2.0 * np.pi * audio_freq * t)
+    envelope = 1.0 + modulation_depth * audio
+    carrier = np.exp(1j * 2.0 * np.pi * carrier_offset * t)
+    iq = (envelope * carrier).astype(np.complex64)
+
+    # Write to WAV
+    path = tmp_path / "synthetic_am.wav"
+    interleaved = np.stack([iq.real, iq.imag], axis=1)
+    sf.write(path, interleaved, int(sample_rate), subtype='PCM_16')
+
+    return path
+```
+
+**Use in tests:**
+```python
+def test_am_decoder_recovers_tone(synthetic_am_iq):
+    from iq_to_audio.processing import ProcessingConfig, ProcessingPipeline
+
+    config = ProcessingConfig(
+        in_path=synthetic_am_iq,
+        target_freq=5_000.0,  # Match carrier offset
+        bandwidth=10_000.0,
+        center_freq=0.0,
+        demod_mode="am",
+        # ... other params
+    )
+    pipeline = ProcessingPipeline(config)
+    result = pipeline.run()
+
+    # Verify 1kHz tone present in demodulated audio
+    # (FFT on result.audio_output, check peak at 1kHz)
+```
+
+#### 6.2 Diversify Real IQ Test Files
+
+**Current gaps:**
+- No USB/LSB captures
+- No weak signals (low SNR)
+- No multi-signal scenarios (adjacent channels)
+- No malformed/corrupted files
+- Limited modulation types
+
+**Recommendations:**
+1. **Capture new test files** (if SDR hardware available):
+   - USB voice (amateur radio, 2-3kHz bandwidth)
+   - LSB voice
+   - Weak NFM signal (SNR ~5dB)
+   - Wide NFM broadcast (150kHz deviation)
+   - CW/morse code (for testing narrowband decoders)
+
+2. **Synthetic generation with GNU Radio**:
+   - Install GNU Radio: `brew install gnuradio` (macOS) or `apt install gnuradio` (Linux)
+   - Create flowgraph: noise source → filter → AM/FM modulator → file sink
+   - Export as .cf32 or .wav
+
+**Example GNU Radio Python script:**
+```python
+# generate_test_iq.py
+from gnuradio import gr, analog, blocks
+import numpy as np
+
+class TestIQGenerator(gr.top_block):
+    def __init__(self, output_path, sample_rate=2.5e6, duration=5.0):
+        gr.top_block.__init__(self)
+
+        n_samples = int(sample_rate * duration)
+
+        # Audio source (1kHz tone)
+        audio_src = analog.sig_source_f(sample_rate, analog.GR_SIN_WAVE, 1000, 0.5)
+
+        # NFM modulator
+        nfm_mod = analog.nbfm_tx(
+            audio_rate=int(sample_rate),
+            quad_rate=int(sample_rate),
+            tau=75e-6,
+            max_dev=5e3
+        )
+
+        # File sink
+        file_sink = blocks.file_sink(gr.sizeof_gr_complex, output_path)
+
+        self.connect(audio_src, nfm_mod, file_sink)
+
+if __name__ == "__main__":
+    tb = TestIQGenerator("testfiles/synthetic_nfm_tone.cf32")
+    tb.run()
+```
+
+Run: `python generate_test_iq.py` → produces `.cf32` file for testing
+
+3. **Store test vectors in Git LFS** (if files >100MB):
+```bash
+# Install Git LFS
+brew install git-lfs
+git lfs install
+
+# Track large test files
+git lfs track "testfiles/*.wav"
+git add .gitattributes testfiles/
+git commit -m "Add test IQ captures via LFS"
+```
+
+#### 6.3 Parameterized Testing with Real Files
+
+**Expand test_cli_integration.py coverage:**
+```python
+@pytest.mark.parametrize("test_file,demod,expected_rms_range", [
+    ("testfiles/fc-132334577Hz-ft-132300000-AM.wav", "am", (4e-5, 8e-5)),
+    ("testfiles/fc-456834049Hz-ft-455837500-ft2-456872500-NFM.wav", "nfm", (0.03, 0.04)),
+    ("testfiles/synthetic_usb_voice.wav", "usb", (0.01, 0.05)),  # When created
+    ("testfiles/synthetic_lsb_voice.wav", "lsb", (0.01, 0.05)),
+])
+def test_decoder_audio_quality_matrix(tmp_path, test_file, demod, expected_rms_range):
+    """Regression test: demodulated audio RMS within expected range."""
+    # Run pipeline, measure output RMS, assert in range
+    pass
+```
+
+**References:**
+- GNU Radio IQ tutorial: https://wiki.gnuradio.org/index.php/IQ_Complex_Tutorial
+- PySDR IQ files guide: https://pysdr.org/content/iq_files.html
+- SDRplay demo IQ files: https://www.sdrplay.com/iq-demo-files/
+
+---
+
+### 7. CI/CD INTEGRATION (GITHUB ACTIONS)
+
+#### 7.1 Headless Qt Testing Setup
+
+**Challenge:** PySide6 requires display server (X11/Wayland). GitHub Actions runners lack GUI.
+
+**Solution: Virtual framebuffer (xvfb)**
+
+**Required system packages (Ubuntu):**
+```yaml
+# .github/workflows/test.yml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb \
+            x11-utils \
+            libxkbcommon-x11-0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-xinerama0 \
+            libxcb-xfixes0 \
+            libegl1 \
+            libxcb-cursor0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run tests with xvfb
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          xvfb-run -a uv run pytest tests/ -v --tb=short
+```
+
+**Alternative: pytest-xvfb plugin** (auto-manages xvfb)
+```bash
+uv add --dev pytest-xvfb
+```
+Then in pytest.ini:
+```ini
+[pytest]
+xvfb_width = 1920
+xvfb_height = 1080
+xvfb_colordepth = 24
+```
+No manual xvfb-run needed—plugin handles it automatically.
+
+**Troubleshooting common issues:**
+- **ImportError: libEGL.so.1** → Install `libegl1`
+- **qt.qpa.plugin: Could not load Qt platform plugin** → Set `QT_QPA_PLATFORM=offscreen`
+- **Cannot open display** → Ensure xvfb is running before Qt import
+
+**References:**
+- pytest-qt troubleshooting: https://pytest-qt.readthedocs.io/en/latest/troubleshooting.html
+- GitHub Actions Qt setup: https://codito.in/xvfb-in-github-action/
+- Headless GUI testing: https://arbitrary-but-fixed.net/2022/01/21/headless-gui-github-actions.html
+
+#### 7.2 Complete CI Workflow Example
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg xvfb libxkbcommon-x11-0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-xinerama0 libxcb-xfixes0 libegl1 libxcb-cursor0
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: |
+          uv sync --dev
+
+      - name: Lint with ruff
+        run: |
+          uv run ruff check src/ tests/
+
+      - name: Type check with mypy
+        run: |
+          uv run mypy src/iq_to_audio --no-error-summary
+
+      - name: Run unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          xvfb-run -a uv run pytest tests/ -v --tb=short \
+            --cov=iq_to_audio --cov-report=xml --cov-branch
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+
+      - name: Run benchmarks
+        run: |
+          uv run pytest tests/test_dsp_performance.py --benchmark-json=bench.json
+
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        if: github.ref == 'refs/heads/main'
+        with:
+          tool: 'pytest'
+          output-file-path: bench.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+
+  macos-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run tests (native Qt on macOS)
+        run: |
+          uv run pytest tests/test_processing.py tests/test_cli_integration.py -v
+```
+
+#### 7.3 Coverage Reporting & Badge
+
+**Use pytest-cov to track coverage:**
+```bash
+uv add --dev pytest-cov
+uv run pytest --cov=iq_to_audio --cov-report=html --cov-branch
+```
+
+**View HTML report:**
+```bash
+open htmlcov/index.html
+```
+
+**Add coverage badge to README:**
+```markdown
+[![codecov](https://codecov.io/gh/yourusername/iq-to-audio/branch/main/graph/badge.svg)](https://codecov.io/gh/yourusername/iq-to-audio)
+```
+
+**Set coverage thresholds in pyproject.toml:**
+```toml
+[tool.pytest.ini_options]
+addopts = "--cov=iq_to_audio --cov-report=term-missing --cov-fail-under=80"
+```
+Fails CI if coverage drops below 80%.
+
+**References:**
+- pytest-cov docs: https://pytest-cov.readthedocs.io/
+- Codecov GitHub Action: https://github.com/codecov/codecov-action
+
+---
+
+### 8. MISSING TEST COVERAGE - IMPLEMENTATION ROADMAP
+
+**Priority 1: Core DSP modules (high risk, untested)**
+
+#### 8.1 spectrum.py - FFT/Waterfall Logic
+```python
+# tests/test_spectrum.py
+import numpy as np
+import pytest
+from iq_to_audio.spectrum import (
+    compute_psd, streaming_waterfall, _SlidingFFT, _WaterfallAggregator
+)
+
+def test_compute_psd_empty_input_raises():
+    with pytest.raises(ValueError, match="empty signal"):
+        compute_psd(np.array([], dtype=np.complex64), 48000.0)
+
+def test_compute_psd_output_shape():
+    samples = np.random.randn(8192).astype(np.complex64)
+    freqs, psd = compute_psd(samples, 1e6, nfft=4096)
+    assert freqs.shape == (4096,)
+    assert psd.shape == (4096,)
+    assert np.all(np.isfinite(psd))
+
+def test_sliding_fft_rejects_wrong_size():
+    fft = _SlidingFFT(sample_rate=1e6, nfft=1024, fft_workers=None)
+    with pytest.raises(ValueError, match="expected 1024"):
+        fft.psd(np.zeros(512, dtype=np.complex64))
+
+def test_waterfall_aggregator_downsamples():
+    agg = _WaterfallAggregator(max_slices=10)
+    for i in range(50):
+        agg.add(np.ones(256, dtype=np.float32) * i, float(i))
+    times, matrix = agg.finalize()
+    assert matrix.shape[0] <= 10  # Reduced to max_slices
+    assert matrix.shape[1] == 256
+
+def test_streaming_waterfall_integration():
+    # Generate 3 chunks of IQ
+    chunks = [np.random.randn(10000).astype(np.complex64) for _ in range(3)]
+    freqs, avg_psd, waterfall, frames = streaming_waterfall(
+        chunks, sample_rate=1e6, nfft=1024, hop=256, max_slices=50
+    )
+    assert freqs.size == 1024
+    assert avg_psd.size == 1024
+    assert waterfall.matrix.shape[1] == 1024
+    assert frames > 0
+```
+
+#### 8.2 decoders/common.py - DCBlocker
+```python
+# tests/test_decoders_common.py
+import numpy as np
+from iq_to_audio.decoders.common import DCBlocker
+
+def test_dcblocker_radius_validation():
+    with pytest.raises(ValueError):
+        DCBlocker(radius=1.5)  # Out of range
+    with pytest.raises(ValueError):
+        DCBlocker(radius=0.0)
+
+def test_dcblocker_removes_dc():
+    blocker = DCBlocker(radius=0.995)
+    signal = np.ones(1000, dtype=np.float32) * 5.0  # Pure DC
+    filtered = blocker.process(signal)
+    assert abs(np.mean(filtered[100:])) < 0.05  # DC removed after transient
+
+def test_dcblocker_preserves_ac():
+    blocker = DCBlocker()
+    t = np.arange(1000) / 1000.0
+    signal = np.sin(2 * np.pi * 10 * t).astype(np.float32)
+    filtered = blocker.process(signal)
+    # AC amplitude should be preserved
+    np.testing.assert_allclose(np.max(filtered[50:]), 1.0, atol=0.1)
+
+def test_dcblocker_maintains_state():
+    blocker = DCBlocker()
+    chunk1 = np.ones(500, dtype=np.float32)
+    chunk2 = np.ones(500, dtype=np.float32) * 2.0
+    out1 = blocker.process(chunk1)
+    out2 = blocker.process(chunk2)
+    # Second chunk should not have discontinuity
+    assert abs(out2[0] - out1[-1]) < 1.0
+```
+
+#### 8.3 preview.py - Orchestration
+```python
+# tests/test_preview.py
+import pytest
+from pathlib import Path
+from iq_to_audio.preview import run_preview, _preview_output_path
+from iq_to_audio.processing import ProcessingConfig
+
+TESTFILES = Path(__file__).parent.parent / "testfiles"
+NFM_FIXTURE = TESTFILES / "fc-456834049Hz-ft-455837500-ft2-456872500-NFM.wav"
+
+def test_preview_output_path_generation():
+    config = ProcessingConfig(
+        in_path=Path("/tmp/recording.wav"),
+        target_freq=100_000_000.0,
+        output_path=Path("/tmp/out.wav"),
+        # ... minimal params
+    )
+    preview_path = _preview_output_path(config)
+    assert preview_path == Path("/tmp/out_preview.wav")
+
+def test_run_preview_validates_seconds():
+    config = ProcessingConfig(in_path=NFM_FIXTURE, target_freq=455_837_500.0, ...)
+    with pytest.raises(ValueError, match="positive"):
+        run_preview(config, seconds=-1.0)
+
+def test_run_preview_creates_output(tmp_path):
+    config = ProcessingConfig(
+        in_path=NFM_FIXTURE,
+        target_freq=455_837_500.0,
+        bandwidth=12_500.0,
+        demod_mode="nfm",
+        output_path=tmp_path / "out.wav",
+        # ... complete config
+    )
+    result, preview_path = run_preview(config, seconds=1.0)
+    assert preview_path.exists()
+    assert preview_path.stem.endswith("_preview")
+    assert result.audio_samples > 0
+```
+
+#### 8.4 interactive/workers.py - Threading
+```python
+# tests/test_interactive_workers.py
+import pytest
+from pathlib import Path
+from PySide6.QtCore import QObject
+from iq_to_audio.interactive.workers import SnapshotWorker
+from iq_to_audio.interactive.models import SnapshotParams
+
+@pytest.fixture(scope="session")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+def test_snapshot_worker_emits_ready(qtbot, qapp):
+    params = SnapshotParams(
+        in_path=Path("testfiles/fc-132334577Hz-ft-132300000-AM.wav"),
+        seconds=0.5,
+        nfft=2048,
+        max_slices=50,
+        fft_workers=1
+    )
+    worker = SnapshotWorker(params)
+
+    with qtbot.waitSignal(worker.snapshot_ready, timeout=10000) as blocker:
+        worker.run()
+
+    snapshot = blocker.args[0]
+    assert snapshot.freqs.size > 0
+    assert snapshot.psd_db.size == snapshot.freqs.size
+    assert snapshot.sample_rate > 0
+
+def test_snapshot_worker_emits_error_on_failure(qtbot, qapp):
+    params = SnapshotParams(
+        in_path=Path("/nonexistent.wav"),  # Invalid path
+        seconds=1.0, nfft=1024, max_slices=100
+    )
+    worker = SnapshotWorker(params)
+
+    with qtbot.waitSignal(worker.error_occurred, timeout=3000) as blocker:
+        worker.run()
+
+    error_msg = blocker.args[0]
+    assert "not found" in error_msg.lower() or "no such file" in error_msg.lower()
+```
+
+**Priority 2: Lower-risk utilities**
+
+- `progress.py`: Test TqdmSink and StatusProgressSink signal emissions
+- `interactive/models.py`: Validate dataclass defaults and conversions
+- `decoders/base.py`: Test ABC interface compliance (all decoders implement required methods)
+
+---
+
+### 9. ADVANCED TESTING TECHNIQUES
+
+#### 9.1 Mutation Testing (Optional)
+
+**Framework: mutmut** - Finds weak tests by mutating code and checking if tests catch changes
+```bash
+uv add --dev mutmut
+uv run mutmut run --paths-to-mutate=src/iq_to_audio
+uv run mutmut results  # View surviving mutations
+```
+
+If mutations survive, tests are insufficient. Example:
+```python
+# Original code
+if amplitude > 0.5:
+    return "clipping"
+
+# Mutant (mutmut changes > to >=)
+if amplitude >= 0.5:  # Test should fail if this change isn't caught
+    return "clipping"
+```
+
+#### 9.2 Fuzzing for Crash Discovery
+
+**Framework: atheris** (Python fuzzing with libFuzzer backend)
+```bash
+uv add --dev atheris
+```
+
+Example fuzzer:
+```python
+# fuzz_processing.py
+import atheris
+import sys
+from iq_to_audio.processing import Decimator
+
+@atheris.instrument_func
+def fuzz_decimator(data):
+    if len(data) < 4:
+        return
+
+    factor = int.from_bytes(data[:4], 'little') % 100 + 1
+    decimator = Decimator(factor)
+
+    # Convert remaining bytes to complex samples
+    samples = np.frombuffer(data[4:], dtype=np.uint8).astype(np.complex64)
+
+    try:
+        result = decimator.process(samples)
+    except ValueError:
+        pass  # Expected for invalid inputs
+
+atheris.Setup(sys.argv, fuzz_decimator)
+atheris.Fuzz()
+```
+
+Run: `uv run python fuzz_processing.py` (finds crashes/hangs)
+
+#### 9.3 Snapshot Testing for Data Structures
+
+**Framework: syrupy** (pytest snapshot plugin)
+```bash
+uv add --dev syrupy
+```
+
+Usage:
+```python
+def test_processing_config_defaults(snapshot):
+    """Ensure ProcessingConfig defaults don't change unintentionally."""
+    from iq_to_audio.processing import ProcessingConfig
+
+    config = ProcessingConfig(
+        in_path=Path("test.wav"),
+        target_freq=100e6,
+        bandwidth=12.5e3,
+        demod_mode="nfm"
+    )
+    assert config == snapshot  # Creates __snapshots__/test_file.ambr on first run
+```
+
+Any change to defaults fails test → explicit decision required.
+
+---
+
+### 10. TESTING BEST PRACTICES CHECKLIST
+
+**Before merging any PR:**
+- [ ] All modified modules have corresponding test coverage
+- [ ] `uv run ruff check --fix` passes on changed files
+- [ ] `uv run mypy <file>` clean for modified modules
+- [ ] `uv run pytest tests/test_<module>.py -v` passes
+- [ ] Coverage delta: `pytest --cov=iq_to_audio --cov-report=term-missing` (no decrease)
+- [ ] GUI changes: Add qtbot test in test_interactive_qt.py
+- [ ] DSP changes: Add property test with hypothesis (if applicable)
+- [ ] Performance-critical path: Add benchmark in test_dsp_performance.py
+- [ ] New decoder: Add integration test in test_cli_integration.py with synthetic IQ
+
+**Continuous improvement:**
+- Weekly: Review uncovered lines in coverage report, add targeted tests
+- Monthly: Run `mutmut` to detect weak tests
+- Per release: Update visual regression baselines if plots intentionally changed
+- After performance PR: Compare benchmarks with `--benchmark-compare`
+
+---
+
+### 11. QUICK REFERENCE - COMMANDS
+
+**Run all tests:**
+```bash
+uv run pytest tests/ -v
+```
+
+**Run specific test file:**
+```bash
+uv run pytest tests/test_spectrum.py -v
+```
+
+**Run with coverage:**
+```bash
+uv run pytest --cov=iq_to_audio --cov-report=html --cov-branch
+```
+
+**Run GUI tests headless:**
+```bash
+QT_QPA_PLATFORM=offscreen uv run pytest tests/test_interactive_qt.py
+```
+
+**Run benchmarks:**
+```bash
+uv run pytest tests/test_dsp_performance.py --benchmark-only
+```
+
+**Compare benchmarks:**
+```bash
+uv run pytest tests/test_dsp_performance.py --benchmark-compare=0001
+```
+
+**Property-based tests (verbose):**
+```bash
+uv run pytest tests/test_processing_properties.py -v --hypothesis-show-statistics
+```
+
+**Type check modified file:**
+```bash
+uv run mypy src/iq_to_audio/spectrum.py
+```
+
+**Lint and format:**
+```bash
+uv run ruff check --fix src/iq_to_audio/spectrum.py
+uv run ruff format src/iq_to_audio/spectrum.py
+```
+
+---
+
+### 12. ADDITIONAL RESOURCES
+
+**Documentation:**
+- pytest: https://docs.pytest.org/
+- pytest-qt: https://pytest-qt.readthedocs.io/
+- Hypothesis: https://hypothesis.readthedocs.io/
+- pytest-benchmark: https://pytest-benchmark.readthedocs.io/
+- PySide6 testing: https://doc.qt.io/qtforpython-6/tutorials/testing/testing.html
+
+**Articles & Tutorials:**
+- Headless Qt testing: https://ilmanzo.github.io/post/testing_pyside_gui_applications/
+- GitHub Actions Qt setup: https://codito.in/xvfb-in-github-action/
+- Property-based DSP testing: https://hypothesis.works/articles/testing-scientific-code/
+- pytest best practices: https://docs.pytest.org/en/stable/goodpractices.html
+
+**SDR/IQ Resources:**
+- PySDR (IQ files): https://pysdr.org/content/iq_files.html
+- GNU Radio tutorials: https://wiki.gnuradio.org/
+- SDRplay IQ samples: https://www.sdrplay.com/iq-demo-files/
+
+**CI/CD Examples:**
+- pytest-qt CI examples: https://github.com/pytest-dev/pytest-qt/tree/master/.github/workflows
+- Benchmark tracking: https://bencher.dev/docs/
+- Coverage with Codecov: https://docs.codecov.com/docs/quick-start
+
+---
+
+### 13. IMPLEMENTATION PRIORITY MATRIX
+
+| Priority | Module | Test Type | Estimated Effort | Risk if Untested |
+|----------|--------|-----------|------------------|------------------|
+| P0 | spectrum.py | Unit + Property | 4 hours | HIGH - FFT bugs silent |
+| P0 | decoders/common.py | Unit | 2 hours | HIGH - Affects all decoders |
+| P1 | preview.py | Integration | 2 hours | MEDIUM - User-facing errors |
+| P1 | interactive/workers.py | Qt signals | 3 hours | MEDIUM - Threading bugs |
+| P1 | progress.py | Unit | 1 hour | LOW - Simple interfaces |
+| P2 | interactive/widgets.py | Qt + Visual | 4 hours | MEDIUM - UI regressions |
+| P2 | decoders/am.py | Unit | 2 hours | LOW - Already in CLI tests |
+| P3 | visualize.py | Unit | 1 hour | LOW - Deprecated module |
+
+**Total implementation estimate: ~19 hours** (spread across 2-3 sprints)
+
+**Milestone 1 (Week 1):** P0 items + CI setup
+**Milestone 2 (Week 2):** P1 items + benchmark suite
+**Milestone 3 (Week 3):** P2 items + visual regression
+**Milestone 4 (Week 4):** Documentation, coverage >85%
+
+---
+
+END OF TESTING STRATEGY DOCUMENT

@@ -33,6 +33,22 @@ COLOR_THEMES: dict[str, dict[str, str]] = {
         "grid": ":",
         "grid_color": "#223347",
     },
+    "paper": {
+        "bg": "#f6f1e1",
+        "face": "#f6f1e1",
+        "line": "#b15d1c",
+        "fg": "#2f2a1d",
+        "grid": ":",
+        "grid_color": "#d7c9a0",
+    },
+    "aurora": {
+        "bg": "#061622",
+        "face": "#061622",
+        "line": "#6cf584",
+        "fg": "#c3f1ff",
+        "grid": "--",
+        "grid_color": "#1b3646",
+    },
 }
 
 
@@ -164,7 +180,7 @@ class InteractiveState:
         self.base_kwargs["snapshot_seconds"] = self.snapshot_seconds
 
     def set_target_frequencies(self, freqs: list[float]) -> None:
-        unique = []
+        unique: list[float] = []
         for freq in freqs:
             if freq <= 0:
                 continue
