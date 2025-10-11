@@ -529,13 +529,14 @@ class ProcessingPipeline:
     def __init__(self, config: ProcessingConfig):
         self.config = config
         self._cancelled = False
-        self._resolved_chunk_size: Optional[int] = None
-        self._resolved_fft_workers: Optional[int] = None
+        self._resolved_chunk_size: int | None = None
+        self._resolved_fft_workers: int | None = None
+        self._input_spec: InputFormatSpec | None = None
 
     def cancel(self) -> None:
         self._cancelled = True
 
-    def _resolve_fft_workers(self) -> Optional[int]:
+    def _resolve_fft_workers(self) -> int | None:
         if self._resolved_fft_workers is not None:
             return self._resolved_fft_workers
         configured = self.config.fft_workers
@@ -556,13 +557,29 @@ class ProcessingPipeline:
         self._resolved_chunk_size = chunk
         return chunk
 
-    def run(self, progress_sink: Optional[ProgressSink] = None) -> ProcessingResult:
+    def run(self, progress_sink: ProgressSink | None = None) -> ProcessingResult:
         tracker = ProgressTracker(progress_sink)
-        header_bytes = 44  # baseline WAV header size (approximate)
-        frame_bytes = 4  # 2 channels * int16
-        output_path: Optional[Path] = None
+        if self._input_spec is None:
+            spec, source = resolve_input_format(
+                self.config.in_path,
+                requested=self.config.input_format,
+                container_hint=self.config.input_container,
+            )
+            self._input_spec = spec
+            if not self.config.input_format_source:
+                self.config.input_format_source = source
+            if not self.config.input_container:
+                self.config.input_container = spec.container
+            if not self.config.input_format:
+                self.config.input_format = spec.codec
+        assert self._input_spec is not None
+        input_spec = self._input_spec
+
+        header_bytes = 44 if input_spec.container == "wav" else 0
+        frame_bytes = input_spec.bytes_per_frame
+        output_path: Path | None = None
         cancel_logged = False
-        last_status: Optional[str] = None
+        last_status: str | None = None
 
         def _request_cancel() -> None:
             self._cancelled = True
@@ -596,7 +613,7 @@ class ProcessingPipeline:
             "complete": "Processing complete",
         }
 
-        def _status_text(key: str, *, chunk: Optional[int] = None) -> str:
+        def _status_text(key: str, *, chunk: int | None = None) -> str:
             base = stage_labels.get(key, key)
             if chunk is None:
                 return base
@@ -615,19 +632,34 @@ class ProcessingPipeline:
             except AttributeError:
                 pass
 
+        manual_rate = self.config.input_sample_rate
+        if manual_rate is not None and manual_rate <= 0:
+            raise ValueError("Input sample rate override must be positive.")
+
         try:
-            probe = probe_sample_rate(self.config.in_path)
-            try:
-                sample_rate = probe.value
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    "Unable to determine input sample rate. Ensure ffprobe/ffmpeg is installed or the WAV header is valid."
-                ) from exc
+            if input_spec.container == "raw":
+                if manual_rate is None:
+                    raise ValueError(
+                        "Raw IQ inputs require --input-sample-rate (CLI) or a manual entry in the GUI."
+                    )
+                sample_rate = float(manual_rate)
+                probe = SampleRateProbe(ffprobe=None, header=None, wave=sample_rate)
+            else:
+                probe = probe_sample_rate(self.config.in_path)
+                if manual_rate is not None:
+                    sample_rate = float(manual_rate)
+                else:
+                    try:
+                        sample_rate = probe.value
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            "Unable to determine input sample rate automatically. Provide --input-sample-rate or enter it manually in the GUI."
+                        ) from exc
 
             preview_seconds = self.config.max_input_seconds
             if preview_seconds is not None and preview_seconds <= 0:
                 preview_seconds = None
-            max_input_samples: Optional[int] = None
+            max_input_samples: int | None = None
             if preview_seconds is not None and sample_rate > 0:
                 max_input_samples = max(
                     1, int(math.floor(preview_seconds * sample_rate))
@@ -807,7 +839,14 @@ class ProcessingPipeline:
             stage_snapshots: dict[str, tuple[np.ndarray, float]] = {}
             processed_samples = 0
 
-            with IQReader(self.config.in_path, chunk_size, self.config.iq_order) as reader:
+            reader_sample_rate = sample_rate if input_spec.container == "raw" else None
+            with IQReader(
+                self.config.in_path,
+                chunk_size,
+                self.config.iq_order,
+                input_spec,
+                sample_rate=reader_sample_rate,
+            ) as reader:
                 iterator = iter(reader)
                 warmup = next(iterator, None)
                 if warmup is None:
