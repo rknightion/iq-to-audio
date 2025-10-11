@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..input_formats import InputFormatSpec, detect_input_format, list_supported_formats
 from ..probe import probe_sample_rate
 from ..processing import ProcessingCancelled, ProcessingConfig
 from ..progress import ProgressSink
@@ -59,6 +61,16 @@ PREVIEW_PANEL_MIN_WIDTH = 720
 CONTROLS_PANEL_MIN_WIDTH = 360
 MIN_WINDOW_HEIGHT = 780
 MIN_WINDOW_WIDTH = LEFT_PANEL_WIDTH + PREVIEW_PANEL_MIN_WIDTH
+
+
+@lru_cache(maxsize=1)
+def _format_spec_map() -> dict[str, InputFormatSpec]:
+    return {spec.key: spec for spec in list_supported_formats()}
+
+
+def _format_label(key: str) -> str:
+    spec = _format_spec_map().get(key)
+    return spec.label if spec else key
 
 
 class _SigintRelay:
@@ -129,6 +141,10 @@ class InteractiveWindow(QMainWindow):
         "plot_stages_path",
         "fft_workers",
         "max_input_seconds",
+        "input_format",
+        "input_container",
+        "input_format_source",
+        "input_sample_rate",
     }
 
     def __init__(
@@ -179,6 +195,9 @@ class InteractiveWindow(QMainWindow):
         self._configure_window()
         self._build_ui()
         self._build_actions()
+        self._update_format_options()
+        self._refresh_format_status_label()
+        self._refresh_sample_rate_label()
         self._update_status_controls()
         self._apply_initial_splitter_sizes()
         self._update_output_hint()
@@ -343,9 +362,11 @@ class InteractiveWindow(QMainWindow):
         rp.output_entry.editingFinished.connect(self._on_output_dir_changed)
         rp.output_browse_button.clicked.connect(self._on_output_dir_browse)
         rp.agc_check.toggled.connect(self._on_agc_toggled)
+        rp.format_combo.currentIndexChanged.connect(self._on_format_changed)
 
         cp = self.channel_panel
         cp.bandwidth_entry.editingFinished.connect(self._on_bandwidth_changed)
+        cp.sample_rate_entry.editingFinished.connect(self._on_sample_rate_override)
 
         tp = self.targets_panel
         for index, entry in enumerate(tp.entries):
@@ -403,6 +424,190 @@ class InteractiveWindow(QMainWindow):
         self.state.output_hint = hint
         self.recording_panel.output_hint_label.setText(hint)
 
+    def _format_auto_text(self) -> str:
+        if self.state.detected_format:
+            label = _format_label(self.state.detected_format)
+            return f"Auto (Detected: {label})"
+        if self.state.input_format_error:
+            return "Auto (manual selection required)"
+        return "Auto (detect from file)"
+
+    def _update_format_options(self) -> None:
+        if not self.recording_panel:
+            return
+        combo = self.recording_panel.format_combo
+        order = {"pcm_u8": 0, "pcm_s16le": 1, "pcm_f32le": 2}
+        container_order = {"wav": 0, "raw": 1}
+        specs = sorted(
+            _format_spec_map().values(),
+            key=lambda spec: (container_order.get(spec.container, 99), order.get(spec.codec, 99)),
+        )
+        desired = self.state.input_format_choice if self.state.input_format_choice != "auto" else "auto"
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(self._format_auto_text(), "auto")
+        for spec in specs:
+            combo.addItem(spec.label, spec.key)
+        index = combo.findData(desired)
+        if index < 0:
+            index = 0
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
+    def _refresh_format_status_label(self) -> None:
+        if not self.recording_panel:
+            return
+        label_text = self.state.input_format_message
+        color = "red" if self.state.input_format_error else self.palette().color(QtGui.QPalette.ColorRole.WindowText).name()
+        self.recording_panel.format_status_label.setText(label_text)
+        self.recording_panel.format_status_label.setStyleSheet(f"color: {color};")
+
+    def _refresh_sample_rate_hint(self) -> None:
+        if not self.channel_panel:
+            return
+        if self.state.sample_rate_override:
+            hint = "Manual override active. Raw recordings require a valid sample rate."
+        elif self.state.sample_rate and self.state.sample_rate_source:
+            hint = f"Detected via {self.state.sample_rate_source}."
+        elif self.state.sample_rate:
+            hint = "Sample rate detected from metadata."
+        else:
+            hint = "Provide a sample rate override if auto-detection fails (raw or malformed WAV recordings)."
+        self.channel_panel.sample_rate_hint.setText(hint)
+
+    def _refresh_sample_rate_label(self) -> None:
+        if not self.channel_panel:
+            return
+        if self.state.sample_rate_override:
+            label = f"Sample rate: {self.state.sample_rate_override:,.0f} Hz (manual override)"
+        elif self.state.sample_rate:
+            label = f"Sample rate: {self.state.sample_rate:,.0f} Hz"
+            if self.state.sample_rate_source:
+                label += f" ({self.state.sample_rate_source})"
+        else:
+            label = "Sample rate: —"
+        self.channel_panel.sample_rate_label.setText(label)
+        self._refresh_sample_rate_hint()
+
+    def _clear_format_detection(self) -> None:
+        self.state.set_detected_format(
+            None,
+            source="",
+            message="Select a recording to detect input format.",
+            error=None,
+        )
+        self._update_format_options()
+        self._refresh_format_status_label()
+
+    def _update_sample_rate_from_probe(self, path: Path) -> None:
+        try:
+            probe = probe_sample_rate(path)
+        except Exception:  # pragma: no cover - defensive fallback
+            return
+        self.state.probe = probe
+        value = None
+        source = ""
+        if probe.ffprobe:
+            value = probe.ffprobe
+            source = "ffprobe"
+        elif probe.header:
+            value = probe.header
+            source = "header"
+        elif probe.wave:
+            value = probe.wave
+            source = "wave"
+        if value:
+            self.state.set_sample_rate_detected(float(value), source)
+            self._refresh_sample_rate_label()
+
+    def _auto_detect_format(self, path: Path, *, announce: bool) -> None:
+        detection = detect_input_format(path)
+        if detection.spec:
+            spec = detection.spec
+            message = detection.message or f"Detected {spec.label}."
+            self.state.set_detected_format(spec.key, source=detection.source, message=message, error=None)
+            if spec.container == "wav":
+                self._update_sample_rate_from_probe(path)
+                if announce:
+                    self._set_status(message, error=False)
+            else:
+                if announce:
+                    self._set_status(
+                        f"Detected {spec.label}. Provide a sample rate override if metadata is missing.",
+                        error=False,
+                    )
+                if not self.state.sample_rate_override:
+                    self._set_status(
+                        "Enter the capture sample rate in the Channel panel when metadata is unavailable.",
+                        error=True,
+                    )
+        else:
+            error = detection.error or "Unable to detect input format."
+            self.state.set_detected_format(
+                None,
+                source=detection.source,
+                message=error,
+                error=error,
+            )
+            if announce:
+                self._set_status(error, error=True)
+        self._update_format_options()
+        self._refresh_format_status_label()
+        self._refresh_sample_rate_label()
+
+    def _on_format_changed(self, index: int) -> None:
+        if not self.recording_panel:
+            return
+        value = self.recording_panel.format_combo.itemData(index)
+        if value is None:
+            return
+        if value == "auto":
+            if self.state.input_format_choice != "auto":
+                self.state.clear_manual_format()
+                if self.state.selected_path and self.state.selected_path.exists():
+                    self._auto_detect_format(self.state.selected_path, announce=False)
+                else:
+                    self._clear_format_detection()
+                self._update_format_options()
+                self._refresh_format_status_label()
+                self._set_status("Input format set to auto detection.", error=False)
+            return
+        if isinstance(value, str) and ":" in value:
+            container, codec = value.split(":", 1)
+            self.state.set_manual_format(container, codec)
+            label = _format_label(value)
+            self.state.input_format_message = f"Manual override: {label}"
+            self._set_status(f"Manual input format override set to {label}.", error=False)
+            self._update_format_options()
+            self._refresh_format_status_label()
+
+    def _on_sample_rate_override(self) -> None:
+        if not self.channel_panel:
+            return
+        text = self.channel_panel.sample_rate_entry.text().strip()
+        if not text:
+            if self.state.sample_rate_override:
+                self.state.set_sample_rate_override(None)
+                self._set_status("Sample rate override cleared.", error=False)
+                self._refresh_sample_rate_label()
+            else:
+                self.state.set_sample_rate_override(None)
+                self._refresh_sample_rate_label()
+            self.channel_panel.sample_rate_entry.setText("")
+            return
+        value = self._parse_float(text)
+        if value is None or value <= 0:
+            self._set_status("Sample rate override must be a positive number.", error=True)
+            self.channel_panel.sample_rate_entry.setText(
+                f"{self.state.sample_rate_override:.0f}" if self.state.sample_rate_override else ""
+            )
+            return
+        self.state.set_sample_rate_override(value)
+        self.state.sample_rate = value
+        self.channel_panel.sample_rate_entry.setText(f"{value:.0f}")
+        self._refresh_sample_rate_label()
+        self._set_status("Sample rate override applied.", error=False)
+
     def _apply_status_message(self, message: str, highlight: bool) -> None:
         if not self.status_panel:
             return
@@ -426,6 +631,8 @@ class InteractiveWindow(QMainWindow):
         if not self.status_panel:
             return
         preview_ready = self.state.snapshot_data is not None and self._active_preview_worker is None
+        if self.state.input_format_choice == "auto" and self.state.input_format_error:
+            preview_ready = False
         self.status_panel.preview_button.setEnabled(preview_ready)
         if self.toolbar_widget:
             for action in self.toolbar_widget.actions():
@@ -461,6 +668,15 @@ class InteractiveWindow(QMainWindow):
         if self.recording_panel:
             self.recording_panel.file_entry.setText(path.as_posix() if path else "")
         self._update_output_hint()
+        if path is None:
+            self.state.probe = None
+            if not self.state.sample_rate_override:
+                self.state.sample_rate = None
+                self.state.sample_rate_source = ""
+            self._clear_format_detection()
+            self._refresh_sample_rate_label()
+            return
+        self._auto_detect_format(path, announce=False)
         if path is not None:
             self._auto_detect_center(path, announce=True)
 
@@ -472,11 +688,13 @@ class InteractiveWindow(QMainWindow):
         if candidate.exists():
             self._set_selected_path(candidate)
             return
-        else:
-            self.state.selected_path = candidate
+        self.state.selected_path = candidate
         self._update_output_hint()
-        if candidate.exists():
-            self._auto_detect_center(candidate, announce=False)
+        self._clear_format_detection()
+        if not self.state.sample_rate_override:
+            self.state.sample_rate = None
+            self.state.sample_rate_source = ""
+        self._refresh_sample_rate_label()
 
     def _on_detect_center(self) -> None:
         if self.state.selected_path is None:
@@ -747,11 +965,10 @@ class InteractiveWindow(QMainWindow):
         if self.status_panel:
             self.status_panel.progress_bar.setVisible(False)
         self.state.snapshot_data = snapshot
-        self.state.sample_rate = snapshot.sample_rate
+        self.state.set_sample_rate_detected(snapshot.sample_rate, "preview")
         self.state.probe = snapshot.probe
         self.state.center_freq = snapshot.center_freq
-        if self.channel_panel:
-            self.channel_panel.sample_rate_label.setText(f"Sample rate: {snapshot.sample_rate:,.0f} Hz")
+        self._refresh_sample_rate_label()
         self._render_snapshot(snapshot, remember=True)
         self._set_status("Snapshot ready. Drag to select a channel.", error=False)
         self._update_status_controls()
@@ -1087,6 +1304,8 @@ class InteractiveWindow(QMainWindow):
     def _build_preview_config(self, *, require_targets: bool) -> ProcessingConfig:
         if self.state.selected_path is None:
             raise ValueError("Select an input recording first.")
+        if self.state.input_format_choice == "auto" and self.state.input_format_error:
+            raise ValueError("Input format not detected. Choose a format or fix the recording metadata before previewing.")
         center_value = self.state.center_freq
         if self.recording_panel:
             entered = self._parse_float(self.recording_panel.center_entry.text())
@@ -1124,6 +1343,8 @@ class InteractiveWindow(QMainWindow):
         return filtered
 
     def _build_configs(self, path: Path, center_override: float | None) -> list[ProcessingConfig]:
+        if self.state.input_format_choice == "auto" and self.state.input_format_error:
+            raise ValueError("Input format not detected. Choose a format before running DSP.")
         kwargs = dict(self.state.base_kwargs)
         kwargs["agc_enabled"] = self.state.agc_enabled
         center_value = self.state.center_freq
