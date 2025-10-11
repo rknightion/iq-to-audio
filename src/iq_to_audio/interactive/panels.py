@@ -96,6 +96,22 @@ class ChannelPanel(PanelGroup):
         )
         layout.addWidget(self.sample_rate_label)
 
+        sr_row = QtWidgets.QHBoxLayout()
+        sr_row.addWidget(QtWidgets.QLabel("Override (Hz):"))
+        self.sample_rate_entry = QtWidgets.QLineEdit(
+            f"{state.sample_rate_override:.0f}" if state.sample_rate_override else ""
+        )
+        self.sample_rate_entry.setPlaceholderText("Auto")
+        self.sample_rate_entry.setMinimumWidth(140)
+        self.sample_rate_entry.setMaximumWidth(200)
+        sr_row.addWidget(self.sample_rate_entry)
+        sr_row.addStretch(1)
+        layout.addLayout(sr_row)
+
+        self.sample_rate_hint = QtWidgets.QLabel("")
+        self.sample_rate_hint.setWordWrap(True)
+        layout.addWidget(self.sample_rate_hint)
+
         bandwidth_row = QtWidgets.QHBoxLayout()
         bandwidth_row.addWidget(QtWidgets.QLabel("Bandwidth (Hz):"))
         self.bandwidth_entry = QtWidgets.QLineEdit(
