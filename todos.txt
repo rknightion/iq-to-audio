@@ -1,6 +1,7 @@
 - Publish SNR/quality metrics post-run to help users compare decoder configurations.
 - the line "MAX_PREVIEW_SAMPLES = 8_000_000  # Complex samples retained in memory for previews (~64 MB)." now lives in `interactive/models.py` and feeds the new `InteractiveState.max_preview_samples`. It caps in-memory FFT capture to ~64 MB; revisit after profiling before increasing.
 
+
 We need to add to our fft graph an easy way for users to select frequencies that will be populated into the various target frequency boxes. 
 Previously users could do this by double clicking the graph however that's clunky when we have multible frequency boxes to add.
 What I propose as a suitable workaround is if we can surface the centre freqency on the graph as the user moves the mouse around it and then also show in the graph the actual selected centre frequency. Users should then be able to click that to populate the target frequency box. 
