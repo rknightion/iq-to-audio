@@ -2,6 +2,8 @@
 
 Python CLI for extracting a narrowband FM (NFM) channel from large SDR++ baseband WAV recordings. The tool streams I/Q samples from disk, isolates the requested RF slice, demodulates to audio, and writes a mono 48 kHz WAV.
 
+![IQ to Audio Screenshot](docs/ss.png)
+
 ## Features
 
 - Streams multi‑gigabyte SDR++ recordings without loading them into memory.
