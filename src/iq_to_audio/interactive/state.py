@@ -150,6 +150,7 @@ class InteractiveState:
     def set_agc_enabled(self, enabled: bool) -> None:
         self.agc_enabled = enabled
         self.base_kwargs["agc_enabled"] = enabled
+        self.preferred_agc = enabled
 
     def resolved_output_dir(self) -> Path | None:
         if self.output_dir is not None:

@@ -342,9 +342,7 @@ class InteractiveWindow(QMainWindow):
         rp.load_fft_button.clicked.connect(lambda: self._schedule_snapshot(auto=False))
         rp.output_entry.editingFinished.connect(self._on_output_dir_changed)
         rp.output_browse_button.clicked.connect(self._on_output_dir_browse)
-        rp.agc_check.stateChanged.connect(
-            lambda state: self._on_agc_toggled(state == Qt.CheckState.Checked)
-        )
+        rp.agc_check.toggled.connect(self._on_agc_toggled)
 
         cp = self.channel_panel
         cp.bandwidth_entry.editingFinished.connect(self._on_bandwidth_changed)
@@ -498,10 +496,8 @@ class InteractiveWindow(QMainWindow):
             )
             return
         self.state.update_center(value, "manual")
-        self.recording_panel.center_source_label.setText(
-            f"Center source: {self._describe_center_source(self.state.center_source)}"
-        )
         self._set_status("Center frequency updated.", error=False)
+        self._refresh_center_source_label()
 
     def _on_snapshot_changed(self) -> None:
         if not self.recording_panel:
@@ -562,7 +558,12 @@ class InteractiveWindow(QMainWindow):
         self._update_output_hint()
 
     def _on_agc_toggled(self, enabled: bool) -> None:
+        previous = self.state.agc_enabled
         self.state.set_agc_enabled(enabled)
+        if previous == enabled:
+            return
+        status = "Automatic gain control enabled." if enabled else "Automatic gain control disabled."
+        self._set_status(status, error=False)
         if self.recording_panel:
             self.recording_panel.agc_check.setChecked(enabled)
 
