@@ -193,7 +193,7 @@ class PanelGroup(QtWidgets.QGroupBox):
         super().__init__(title, parent)
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.setSizePolicy(
-            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Maximum)
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
         )
         self.setStyleSheet(
             """
@@ -201,12 +201,14 @@ class PanelGroup(QtWidgets.QGroupBox):
                 font-weight: 600;
                 border: 1px solid palette(mid);
                 border-radius: 8px;
-                margin-top: 16px;
+                margin-top: 20px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
+                subcontrol-position: top left;
                 left: 14px;
-                padding: 4px 6px;
+                top: 6px;
+                padding: 6px 10px;
             }
             """
         )
