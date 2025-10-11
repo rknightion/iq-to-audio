@@ -463,6 +463,8 @@ class InteractiveWindow(QMainWindow):
         if self.recording_panel:
             self.recording_panel.file_entry.setText(path.as_posix() if path else "")
         self._update_output_hint()
+        if path is not None:
+            self._auto_detect_center(path, announce=True)
 
     def _on_file_text_changed(self, text: str) -> None:
         if not text:
@@ -471,28 +473,18 @@ class InteractiveWindow(QMainWindow):
         candidate = Path(text).expanduser()
         if candidate.exists():
             self._set_selected_path(candidate)
+            return
         else:
             self.state.selected_path = candidate
         self._update_output_hint()
+        if candidate.exists():
+            self._auto_detect_center(candidate, announce=False)
 
     def _on_detect_center(self) -> None:
         if self.state.selected_path is None:
             self._set_status("Select an input recording before detecting center frequency.", error=True)
             return
-        detection = detect_center_frequency(self.state.selected_path)
-        if detection.value is None:
-            self._set_status("Unable to detect center frequency from file metadata.", error=True)
-            return
-        self.state.update_center(detection.value, detection.source or "metadata")
-        if self.recording_panel:
-            self.recording_panel.center_entry.setText(f"{detection.value:.0f}")
-            self.recording_panel.center_source_label.setText(
-                f"Center source: {self._describe_center_source(self.state.center_source)}"
-            )
-        self._set_status(
-            f"Center frequency detected ({self._describe_center_source(self.state.center_source)}).",
-            error=False,
-        )
+        self._auto_detect_center(self.state.selected_path, announce=True)
 
     def _on_center_manual(self) -> None:
         if not self.recording_panel:
@@ -1217,6 +1209,46 @@ class InteractiveWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Utility helpers
     # ------------------------------------------------------------------
+
+    def _auto_detect_center(self, path: Path, *, announce: bool) -> None:
+        if self.state.center_source in {"manual", "provided"} and self.state.center_freq:
+            return
+        detection = detect_center_frequency(path)
+        if detection.value is None:
+            self.state.center_freq = None
+            self.state.center_source = "unavailable"
+            self.state.base_kwargs.pop("center_freq", None)
+            self.state.base_kwargs["center_freq_source"] = "unavailable"
+            if self.recording_panel:
+                entry = self.recording_panel.center_entry
+                entry.blockSignals(True)
+                entry.clear()
+                entry.blockSignals(False)
+            self._refresh_center_source_label()
+            if announce:
+                self._set_status(
+                    "Unable to detect center frequency; enter a value before previewing.",
+                    error=True,
+                )
+            return
+        self.state.update_center(detection.value, detection.source or "metadata")
+        if self.recording_panel:
+            entry = self.recording_panel.center_entry
+            entry.blockSignals(True)
+            entry.setText(f"{detection.value:.0f}")
+            entry.blockSignals(False)
+        self._refresh_center_source_label()
+        if announce:
+            self._set_status(
+                f"Center frequency detected ({self._describe_center_source(self.state.center_source)}).",
+                error=False,
+            )
+
+    def _refresh_center_source_label(self) -> None:
+        if not self.recording_panel:
+            return
+        label = self._describe_center_source(self.state.center_source)
+        self.recording_panel.center_source_label.setText(f"Center source: {label}")
 
     @staticmethod
     def _parse_float(text: str) -> float | None:
