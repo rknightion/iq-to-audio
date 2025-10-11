@@ -976,7 +976,6 @@ class InteractiveWindow(QMainWindow):
             for action in self.toolbar_widget.actions():
                 if action.text().startswith("Preview"):
                     action.setEnabled(enabled)
-        self._update_status_controls()
 
     def _set_stop_enabled(self, enabled: bool) -> None:
         if not self.status_panel:

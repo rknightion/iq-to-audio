@@ -16,7 +16,7 @@ AI agent guidelines for the iq-to-audio SDR demodulation toolkit.
 - Don't use pip/pipx/conda—only `uv`
 - Don't mutate audio in-place—return new arrays from DSP stages
 - Don't add dependencies without justification
-- Don't duplicate processing logic between `cli.py` and `interactive.py`
+- Don't duplicate processing logic between `cli.py` and the `interactive/` package
 - Don't hard-code sample rates or frequencies - pull from config instead
 
 ## Commands
