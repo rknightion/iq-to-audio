@@ -30,7 +30,7 @@ jobs:
           - runner: windows-11-arm
             platform: windows
             arch: arm64
-          - runner: windows-11
+          - runner: windows-latest
             platform: windows
             arch: amd64
 
