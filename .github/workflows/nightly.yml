@@ -49,7 +49,7 @@ jobs:
             build_args: ""
 
           # macOS builds (both Intel and Apple Silicon)
-          - runner: macos-latest  # Intel runners
+          - runner: macos-13  # Intel runners
             platform: macos
             arch: x86_64
             build_args: "IQ_TO_AUDIO_TARGET_ARCH=x86_64"
