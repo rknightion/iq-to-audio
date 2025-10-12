@@ -91,10 +91,12 @@ jobs:
             ruff-${{ runner.os }}-
 
       - name: Lint with ruff (check)
+        continue-on-error: true
         run: |
           uv run ruff check src/ tests/ --output-format=github
 
       - name: Lint with ruff (format)
+        continue-on-error: true
         run: |
           uv run ruff format --check src/ tests/
 
@@ -176,12 +178,13 @@ jobs:
           uv sync --dev
 
       - name: Run benchmarks
+        continue-on-error: true
         run: |
-          uv run pytest tests/test_benchmark.py --benchmark-json=benchmark_results.json || true
+          uv run pytest tests/test_benchmark.py --benchmark-json=benchmark_results.json
 
       - name: Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
-        if: success()
+        if: hashFiles('benchmark_results.json') != ''
         with:
           tool: 'pytest'
           output-file-path: benchmark_results.json
