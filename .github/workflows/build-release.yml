@@ -49,9 +49,9 @@ jobs:
       - name: Generate platform icons
         run: uv run python tools/generate_app_icons.py
 
-      - name: Configure macOS codesign identity
-        if: runner.os == 'macOS' && secrets.MACOS_CODESIGN_IDENTITY != ''
-        run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=${{ secrets.MACOS_CODESIGN_IDENTITY }}" >> "$GITHUB_ENV"
+      # - name: Configure macOS codesign identity
+      #   if: runner.os == 'macOS' && secrets.MACOS_CODESIGN_IDENTITY != ''
+      #   run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=${{ secrets.MACOS_CODESIGN_IDENTITY }}" >> "$GITHUB_ENV"
 
       - name: Build application bundle
         run: |
