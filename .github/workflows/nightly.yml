@@ -149,6 +149,9 @@ jobs:
     needs: build-binaries
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event.inputs.upload_artifacts != 'false'
+    permissions:
+      contents: write
+      packages: read
 
     steps:
       - name: Download all artifacts
