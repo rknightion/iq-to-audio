@@ -3,7 +3,7 @@
 # Supports both CLI and GUI modes (GUI requires X11 forwarding)
 
 # Stage 1: Base image with system dependencies
-FROM python:3.13-slim AS base
+FROM python:3.14-slim AS base
 
 # Reduce apt noise and keep image small
 ARG DEBIAN_FRONTEND=noninteractive
