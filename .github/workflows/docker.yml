@@ -66,13 +66,32 @@ jobs:
             type=raw,value=nightly,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build and push Docker image
+        if: github.event_name != 'pull_request'
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          target: runtime
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+
+      - name: Build Docker image for pull requests
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
