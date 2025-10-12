@@ -25,12 +25,16 @@ dependencies = [
 
 [project.scripts]
 iq-to-audio = "iq_to_audio.cli:main"
+pyinstaller = "iq_to_audio.packaging.pyinstaller_wrapper:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.data-files]
+"" = ["packaging/pyinstaller/iq_to_audio_pyinstaller_patch.pth"]
 
 [dependency-groups]
 dev = [
@@ -109,6 +113,7 @@ module = [
   "matplotlib.*",
   "scipy.*",
   "tqdm",
+  "PyInstaller.*",
 ]
 ignore_missing_imports = true
 

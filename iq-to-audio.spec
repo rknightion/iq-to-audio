@@ -97,7 +97,7 @@ TARGET_ARCH = "universal2" if SYSTEM == "Darwin" else None
 
 WINDOWS_ICON = _optional_icon("iq_to_audio.ico")
 MAC_ICON = _optional_icon("iq_to_audio.icns")
-LINUX_ICON = _optional_icon("logo.png")
+LINUX_ICON = str(PROJECT_ROOT / "logo.png") if (PROJECT_ROOT / "logo.png").exists() else None
 
 MAC_ENTITLEMENTS_ENV = os.environ.get("IQ_TO_AUDIO_CODESIGN_ENTITLEMENTS")
 MAC_ENTITLEMENTS = (
