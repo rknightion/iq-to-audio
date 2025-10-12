@@ -163,7 +163,7 @@ jobs:
         run: ls -la artifacts/*
 
       - name: Create nightly tag
-        uses: actions/github-script@v6
+        uses: actions/github-script@v8
         with:
           script: |
             const tagName = 'nightly';
