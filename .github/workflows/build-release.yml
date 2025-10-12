@@ -41,7 +41,7 @@ jobs:
         uses: astral-sh/setup-uv@v3
 
       - name: Install FFmpeg
-        uses: FedericoCarboni/setup-ffmpeg@v2
+        uses: AnimMouse/setup-ffmpeg@v1
 
       - name: Install project dependencies
         run: uv sync --dev
