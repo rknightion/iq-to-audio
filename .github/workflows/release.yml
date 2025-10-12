@@ -1,0 +1,382 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for release (e.g., v1.0.0)'
+        required: true
+        type: string
+      draft:
+        description: 'Create as draft release'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  UV_CACHE_DIR: .uv_cache_ci
+
+jobs:
+  build-binaries:
+    name: Build ${{ matrix.platform }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds
+          - runner: ubuntu-latest
+            platform: linux
+            arch: x86_64
+            build_args: ""
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            build_args: ""
+
+          # Windows builds
+          - runner: windows-latest
+            platform: windows
+            arch: amd64
+            build_args: ""
+          - runner: windows-11-arm
+            platform: windows
+            arch: arm64
+            build_args: ""
+
+          # macOS builds (both Intel and Apple Silicon)
+          - runner: macos-13  # Intel runners
+            platform: macos
+            arch: x86_64
+            build_args: "IQ_TO_AUDIO_TARGET_ARCH=x86_64"
+          - runner: macos-latest  # ARM64 runners
+            platform: macos
+            arch: arm64
+            build_args: "IQ_TO_AUDIO_TARGET_ARCH=arm64"
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog generation
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v3
+        with:
+          path: .uv_cache_ci
+          key: uv-release-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-release-${{ runner.os }}-${{ matrix.arch }}-
+            uv-release-${{ runner.os }}-
+
+      - name: Install project dependencies
+        run: uv sync --dev
+
+      - name: Generate platform icons
+        run: uv run python tools/generate_app_icons.py
+
+      # macOS-specific: Import signing certificate
+      - name: Import macOS signing certificate
+        if: matrix.platform == 'macos' && env.MACOS_CODESIGN_CERT_BASE64 != ''
+        env:
+          MACOS_CODESIGN_CERT_BASE64: ${{ secrets.MACOS_CODESIGN_CERT_BASE64 }}
+          MACOS_CODESIGN_CERT_PASSWORD: ${{ secrets.MACOS_CODESIGN_CERT_PASSWORD }}
+        run: |
+          echo "$MACOS_CODESIGN_CERT_BASE64" | base64 --decode > /tmp/developerid.p12
+          security create-keychain -p "$RUNNER_TEMP" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$RUNNER_TEMP" build.keychain
+          security import /tmp/developerid.p12 -k build.keychain -P "$MACOS_CODESIGN_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$RUNNER_TEMP" build.keychain
+          rm /tmp/developerid.p12
+
+      - name: Configure macOS codesign identity
+        if: matrix.platform == 'macos' && env.MACOS_CODESIGN_IDENTITY != ''
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=$MACOS_CODESIGN_IDENTITY" >> "$GITHUB_ENV"
+
+      # Build application with platform-specific args
+      - name: Build application bundle
+        env: ${{ fromJSON(format('{{{0}}}', matrix.build_args || '')) }}
+        run: |
+          rm -rf build dist
+          ${{ matrix.build_args }} uv run pyinstaller iq-to-audio.spec
+        shell: bash
+
+      # macOS-specific: Codesign and notarize
+      - name: Codesign macOS app bundle
+        if: matrix.platform == 'macos' && env.IQ_TO_AUDIO_CODESIGN_IDENTITY != ''
+        run: |
+          codesign --deep --force --options runtime \
+            --sign "$IQ_TO_AUDIO_CODESIGN_IDENTITY" \
+            --timestamp \
+            dist/iq-to-audio.app
+
+          # Verify codesigning
+          codesign --verify --verbose=4 dist/iq-to-audio.app
+          spctl -a -vvv -t exec dist/iq-to-audio.app || true
+
+      - name: Notarize macOS app bundle
+        if: matrix.platform == 'macos' && env.MACOS_NOTARIZE_USER != ''
+        env:
+          MACOS_NOTARIZE_USER: ${{ secrets.MACOS_NOTARIZE_USER }}
+          MACOS_NOTARIZE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_PASSWORD }}
+          MACOS_NOTARIZE_TEAM_ID: ${{ secrets.MACOS_NOTARIZE_TEAM_ID }}
+        run: |
+          # Create zip for notarization
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent iq-to-audio.app iq-to-audio-notarize.zip
+
+          # Submit for notarization
+          xcrun notarytool submit iq-to-audio-notarize.zip \
+            --apple-id "$MACOS_NOTARIZE_USER" \
+            --password "$MACOS_NOTARIZE_PASSWORD" \
+            --team-id "$MACOS_NOTARIZE_TEAM_ID" \
+            --wait \
+            --timeout 30m
+
+          # Staple the notarization
+          xcrun stapler staple iq-to-audio.app
+
+          # Clean up temp file
+          rm iq-to-audio-notarize.zip
+          cd ..
+
+      # Test the built executable
+      - name: Test executable (Linux/macOS)
+        if: matrix.platform != 'windows'
+        run: |
+          if [ -d "dist/iq-to-audio.app" ]; then
+            # macOS app bundle
+            ./dist/iq-to-audio.app/Contents/MacOS/iq-to-audio --version
+            ./dist/iq-to-audio.app/Contents/MacOS/iq-to-audio --help
+          else
+            # Linux binary
+            ./dist/iq-to-audio/iq-to-audio --version
+            ./dist/iq-to-audio/iq-to-audio --help
+          fi
+
+      - name: Test executable (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          .\dist\iq-to-audio\iq-to-audio.exe --version
+          .\dist\iq-to-audio\iq-to-audio.exe --help
+
+      # Create platform-specific archives
+      - name: Create archive (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          cd dist
+          tar -czf ../iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz iq-to-audio
+          cd ..
+          # Generate checksums
+          sha256sum iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz > iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz.sha256
+
+      - name: Create archive (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\iq-to-audio -DestinationPath iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip
+          # Generate checksums
+          $hash = Get-FileHash -Path iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip -Algorithm SHA256
+          "$($hash.Hash.ToLower())  iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip" | Out-File -FilePath iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip.sha256
+
+      - name: Create archive (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          cd dist
+          # Create both .app.zip and .tar.gz for flexibility
+          ditto -c -k --sequesterRsrc --keepParent iq-to-audio.app ../iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip
+          tar -czf ../iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz iq-to-audio.app
+          cd ..
+          # Generate checksums
+          sha256sum iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip > iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip.sha256
+          sha256sum iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz > iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz.sha256
+
+      # Upload artifacts for release job
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.*
+          retention-days: 1
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Display artifacts
+        run: |
+          echo "=== Downloaded artifacts ==="
+          ls -la artifacts/
+          echo "=== Checksums ==="
+          cat artifacts/*.sha256 || true
+
+      # Determine version and tag
+      - name: Determine release version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release tag: $TAG"
+          echo "Release version: $VERSION"
+
+      # Generate release notes
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          TAG="${{ steps.version.outputs.TAG }}"
+
+          {
+            echo "# IQ to Audio $VERSION"
+            echo ""
+            echo "## 📦 Installation"
+            echo ""
+            echo "### Option 1: Download Pre-built Binaries"
+            echo "Download the appropriate archive for your platform from the assets below."
+            echo ""
+            echo "### Option 2: Docker"
+            echo '```bash'
+            echo "docker pull ghcr.io/${{ github.repository }}:$VERSION"
+            echo "docker run --rm ghcr.io/${{ github.repository }}:$VERSION --help"
+            echo '```'
+            echo ""
+            echo "## 🚀 What's Changed"
+            echo ""
+
+            # Try to extract from CHANGELOG.md if it exists
+            if [ -f CHANGELOG.md ]; then
+              awk "/^## \[$VERSION\]/,/^## \[/" CHANGELOG.md | head -n -2 | tail -n +2
+            else
+              # Generate from git log
+              if git describe --tags --abbrev=0 HEAD^ 2>/dev/null; then
+                PREV_TAG=$(git describe --tags --abbrev=0 HEAD^)
+                git log --pretty=format:"* %s (%h)" $PREV_TAG..HEAD
+              else
+                git log --pretty=format:"* %s (%h)" -10
+              fi
+            fi
+
+            echo ""
+            echo ""
+            echo "## 📋 Supported Platforms"
+            echo ""
+            echo "| Platform | Architecture | File |"
+            echo "|----------|-------------|------|"
+            echo "| Linux | x86_64 | \`iq-to-audio-linux-x86_64.tar.gz\` |"
+            echo "| Linux | ARM64 | \`iq-to-audio-linux-arm64.tar.gz\` |"
+            echo "| macOS | Intel (x86_64) | \`iq-to-audio-macos-x86_64.zip\` |"
+            echo "| macOS | Apple Silicon (ARM64) | \`iq-to-audio-macos-arm64.zip\` |"
+            echo "| Windows | x64 | \`iq-to-audio-windows-amd64.zip\` |"
+            echo "| Windows | ARM64 | \`iq-to-audio-windows-arm64.zip\` |"
+            echo ""
+            echo "## 🔒 Checksums"
+            echo ""
+            echo '```'
+            cat artifacts/*.sha256 2>/dev/null || echo "Checksums not available"
+            echo '```'
+            echo ""
+            echo "## 📖 Documentation"
+            echo ""
+            echo "* [README](https://github.com/${{ github.repository }}#readme)"
+            echo "* [Docker Hub](https://github.com/${{ github.repository }}/pkgs/container/iq-to-audio)"
+            echo ""
+            echo "---"
+            echo "*This release was automatically generated by GitHub Actions.*"
+          } > release_notes.md
+
+          cat release_notes.md
+
+      # Check if Docker image exists for this tag
+      - name: Check Docker image availability
+        id: docker
+        run: |
+          # Check if Docker image was built for this tag
+          if docker manifest inspect ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }} 2>/dev/null; then
+            echo "docker_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "docker_available=false" >> $GITHUB_OUTPUT
+            echo "Note: Docker image not yet available for this version"
+          fi
+
+      # Create the release
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.TAG }}
+          name: ${{ steps.version.outputs.TAG }}
+          body_path: release_notes.md
+          draft: ${{ github.event.inputs.draft == 'true' }}
+          prerelease: ${{ contains(steps.version.outputs.VERSION, 'rc') || contains(steps.version.outputs.VERSION, 'beta') || contains(steps.version.outputs.VERSION, 'alpha') }}
+          files: |
+            artifacts/iq-to-audio-*
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Trigger Docker build if not already built
+      - name: Trigger Docker build
+        if: steps.docker.outputs.docker_available == 'false'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'docker.yml',
+              ref: '${{ steps.version.outputs.TAG }}',
+            });
+
+  cleanup:
+    name: Cleanup Artifacts
+    needs: create-release
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Delete temporary artifacts
+        uses: geekyeggo/delete-artifact@v2
+        with:
+          name: release-*
+          failOnError: false

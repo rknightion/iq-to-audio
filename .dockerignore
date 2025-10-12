@@ -1,0 +1,129 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# GitHub
+.github/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.venv-*/
+
+# UV cache
+.uv_cache*/
+.uv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+!iq-to-audio.spec
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+*.cover
+.hypothesis/
+htmlcov/
+.tox/
+.nox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs/_build/
+*.md
+!README.md
+
+# Test files (large WAV files)
+testfiles/*.wav
+tests/
+
+# Benchmarks
+benchmarks/
+*.benchmark
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+tmp/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# CI/CD
+.travis.yml
+.gitlab-ci.yml
+azure-pipelines.yml
+
+# Docker
+Dockerfile*
+!Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Project specific
+todos.txt
+CLAUDE.md
+logo.png
+*.wav
+*.iq
+*.cf32
+*.raw
+
+# Output files
+output/
+*.mp3
+*.flac
+*.ogg
+
+# PyCharm
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# Local development
+local/
+scratch/
+experiments/

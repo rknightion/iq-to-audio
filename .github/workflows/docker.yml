@@ -1,0 +1,172 @@
+name: Docker Build and Publish
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # For default branch (main)
+            type=ref,event=branch
+            # For pull requests
+            type=ref,event=pr
+            # For version tags
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # Latest tag for main branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            # SHA-based tags
+            type=sha,prefix={{branch}}-,format=short
+            # Nightly builds
+            type=raw,value=nightly,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          target: runtime
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+
+      - name: Build development image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          target: development
+
+      - name: Run Trivy vulnerability scanner
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security tab
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Test Docker image (CLI)
+        if: github.event_name == 'pull_request'
+        run: |
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} --help
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} --version
+
+      - name: Test Docker image health check
+        if: github.event_name == 'pull_request'
+        run: |
+          docker run -d --name test-container ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} sleep 30
+          sleep 5
+          docker exec test-container python -c "from iq_to_audio import cli; print('Health check OK')"
+          docker stop test-container
+          docker rm test-container
+
+      - name: Generate SBOM
+        if: github.event_name != 'pull_request'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload SBOM as artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+
+      - name: Create Docker Hub description
+        if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+        run: |
+          echo "# IQ to Audio Docker Image" > DOCKER_README.md
+          echo "" >> DOCKER_README.md
+          echo "SDR demodulation toolkit for processing IQ recordings." >> DOCKER_README.md
+          echo "" >> DOCKER_README.md
+          echo "## Quick Start" >> DOCKER_README.md
+          echo "" >> DOCKER_README.md
+          echo '```bash' >> DOCKER_README.md
+          echo "# CLI mode" >> DOCKER_README.md
+          echo "docker run --rm -v \$(pwd)/data:/data ghcr.io/${{ github.repository }}:latest \\" >> DOCKER_README.md
+          echo "  --input /data/recording.wav --output /data/output.wav" >> DOCKER_README.md
+          echo "" >> DOCKER_README.md
+          echo "# GUI mode with X11 forwarding" >> DOCKER_README.md
+          echo "docker run --rm -e DISPLAY=\$DISPLAY \\" >> DOCKER_README.md
+          echo "  -v /tmp/.X11-unix:/tmp/.X11-unix:rw \\" >> DOCKER_README.md
+          echo "  -v \$(pwd)/data:/data \\" >> DOCKER_README.md
+          echo "  ghcr.io/${{ github.repository }}:latest --interactive" >> DOCKER_README.md
+          echo '```' >> DOCKER_README.md
+          echo "" >> DOCKER_README.md
+          echo "## Available Tags" >> DOCKER_README.md
+          echo "" >> DOCKER_README.md
+          echo "- \`latest\`: Latest stable release" >> DOCKER_README.md
+          echo "- \`nightly\`: Latest development build from main branch" >> DOCKER_README.md
+          echo "- \`dev\`: Development image with additional tools" >> DOCKER_README.md
+          echo "- \`vX.Y.Z\`: Specific version tags" >> DOCKER_README.md
+          echo "" >> DOCKER_README.md
+          echo "## Platforms" >> DOCKER_README.md
+          echo "" >> DOCKER_README.md
+          echo "- linux/amd64" >> DOCKER_README.md
+          echo "- linux/arm64" >> DOCKER_README.md

@@ -1,0 +1,206 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-progress runs when a new run is triggered on the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_CACHE_DIR: .uv_cache_ci
+  PYTHONUNBUFFERED: 1
+
+jobs:
+  test:
+    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.13"]
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb \
+            x11-utils \
+            libxkbcommon-x11-0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-xinerama0 \
+            libxcb-xfixes0 \
+            libegl1 \
+            libxcb-cursor0 \
+            libgl1-mesa-glx
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v3
+        with:
+          path: .uv_cache_ci
+          key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ matrix.python-version }}-
+
+      - name: Install dependencies
+        run: |
+          uv sync --dev
+
+      - name: Lint with ruff (check)
+        run: |
+          uv run ruff check src/ tests/ --output-format=github
+
+      - name: Lint with ruff (format)
+        run: |
+          uv run ruff format --check src/ tests/
+
+      - name: Type check with mypy
+        run: |
+          uv run mypy src/iq_to_audio --no-error-summary
+
+      - name: Run unit tests (Linux with xvfb)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          xvfb-run -a uv run pytest tests/ -v --tb=short \
+            --cov=iq_to_audio --cov-report=xml --cov-report=term-missing \
+            --cov-fail-under=70
+
+      - name: Run unit tests (macOS/Windows)
+        if: matrix.os != 'ubuntu-latest'
+        run: |
+          uv run pytest tests/ -v --tb=short \
+            --cov=iq_to_audio --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest' && github.event_name == 'push'
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-${{ matrix.os }}-py${{ matrix.python-version }}
+          fail_ci_if_error: false
+
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
+      - name: Install dependencies
+        run: |
+          uv sync --dev
+
+      - name: Run benchmarks
+        run: |
+          uv run pytest tests/test_benchmark.py --benchmark-json=benchmark_results.json || true
+
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        if: success()
+        with:
+          tool: 'pytest'
+          output-file-path: benchmark_results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: true
+          alert-threshold: '110%'
+          fail-on-alert: false
+          benchmark-data-dir-path: benchmarks
+
+  pyinstaller-smoke-test:
+    name: PyInstaller Build Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
+      - name: Install dependencies
+        run: |
+          uv sync --dev
+
+      - name: Generate platform icons
+        run: |
+          uv run python tools/generate_app_icons.py
+
+      - name: Build with PyInstaller
+        run: |
+          uv run pyinstaller iq-to-audio.spec
+
+      - name: Test built executable (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          ./dist/iq-to-audio/iq-to-audio --help
+          ./dist/iq-to-audio/iq-to-audio --version
+
+      - name: Test built executable (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          .\dist\iq-to-audio\iq-to-audio.exe --help
+          .\dist\iq-to-audio\iq-to-audio.exe --version
+
+      - name: Upload build artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyinstaller-logs-${{ matrix.os }}
+          path: |
+            build/
+            *.log

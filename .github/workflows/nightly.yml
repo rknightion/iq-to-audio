@@ -1,0 +1,211 @@
+name: PyInstaller Nightly Builds
+
+# This workflow creates nightly/development builds on main commits
+# For release builds, see release.yml
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      upload_artifacts:
+        description: 'Upload build artifacts'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  UV_CACHE_DIR: .uv_cache_ci
+
+jobs:
+  build-binaries:
+    name: Build ${{ matrix.platform }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+          - runner: windows-latest
+            platform: windows
+            arch: amd64
+          - runner: windows-11-arm
+            platform: windows
+            arch: arm64
+          - runner: macos-latest
+            platform: macos
+            arch: arm64
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v3
+        with:
+          path: .uv_cache_ci
+          key: uv-pyinstaller-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-pyinstaller-${{ runner.os }}-${{ matrix.arch }}-
+
+      - name: Install project dependencies
+        run: uv sync --dev
+
+      - name: Generate platform icons
+        run: uv run python tools/generate_app_icons.py
+
+      - name: Build application bundle
+        run: |
+          rm -rf build dist
+          uv run pyinstaller iq-to-audio.spec
+        shell: bash
+
+      - name: Test executable (Linux/macOS)
+        if: matrix.platform != 'windows'
+        run: |
+          if [ -d "dist/iq-to-audio.app" ]; then
+            # macOS app bundle
+            ./dist/iq-to-audio.app/Contents/MacOS/iq-to-audio --help
+            ./dist/iq-to-audio.app/Contents/MacOS/iq-to-audio --version
+          else
+            # Linux binary
+            ./dist/iq-to-audio/iq-to-audio --help
+            ./dist/iq-to-audio/iq-to-audio --version
+          fi
+
+      - name: Test executable (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          .\dist\iq-to-audio\iq-to-audio.exe --help
+          .\dist\iq-to-audio\iq-to-audio.exe --version
+
+      - name: Archive bundle (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          cd dist
+          tar -czf ../iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}-dev.tar.gz iq-to-audio
+
+      - name: Archive bundle (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          Compress-Archive -Path dist\iq-to-audio -DestinationPath iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}-dev.zip
+        shell: pwsh
+
+      - name: Archive bundle (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent iq-to-audio.app ../iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}-dev.zip
+
+      - name: Upload artifact
+        if: github.event.inputs.upload_artifacts != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}-dev
+          path: |
+            iq-to-audio-*.zip
+            iq-to-audio-*.tar.gz
+          retention-days: 7
+
+  upload-to-nightly:
+    name: Upload to Nightly Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event.inputs.upload_artifacts != 'false'
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        run: ls -la artifacts/*
+
+      - name: Create nightly tag
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const tagName = 'nightly';
+            const sha = context.sha.substring(0, 8);
+            const date = new Date().toISOString().split('T')[0];
+            const tagMessage = `Nightly build ${date} (${sha})`;
+
+            try {
+              // Delete existing nightly tag/release if it exists
+              try {
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tagName}`
+                });
+              } catch (e) {
+                console.log('No existing nightly tag to delete');
+              }
+
+              // Create new nightly tag
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/tags/${tagName}`,
+                sha: context.sha
+              });
+
+              // Create or update nightly release
+              const releases = await github.rest.repos.listReleases({
+                owner: context.repo.owner,
+                repo: context.repo.repo
+              });
+
+              const nightlyRelease = releases.data.find(r => r.tag_name === tagName);
+
+              if (nightlyRelease) {
+                await github.rest.repos.deleteRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: nightlyRelease.id
+                });
+              }
+
+              await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tagName,
+                name: `Nightly Build - ${date}`,
+                body: `Automated nightly build from commit ${sha}\n\nBuilt on: ${date}`,
+                draft: false,
+                prerelease: true,
+                target_commitish: context.sha
+              });
+
+            } catch (error) {
+              core.setFailed(error.message);
+            }
+
+      - name: Upload to nightly release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: nightly
+          files: artifacts/**/*
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
