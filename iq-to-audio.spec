@@ -110,7 +110,20 @@ MAC_ENTITLEMENTS = (
 
 PYTHON_SOURCES = [str(SRC_ROOT / "iq_to_audio" / "cli.py")]
 
-datas = collect_data_files("PySide6")
+if SYSTEM == "Darwin":
+    # PySide6 frameworks already arrive via the official hook; re-collecting them
+    # as data files trashes the macOS symlink layout inside *.framework bundles and
+    # triggers duplicate symlink errors during COLLECT. Skip framework payloads and
+    # let PyInstaller handle them via the binary path instead.
+    datas = collect_data_files(
+        "PySide6",
+        excludes=[
+            "Qt/lib/*.framework",
+            "Qt/lib/*.framework/**",
+        ],
+    )
+else:
+    datas = collect_data_files("PySide6")
 hiddenimports = sorted(
     set(
         collect_submodules("PySide6")
