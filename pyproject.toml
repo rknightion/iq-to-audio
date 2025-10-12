@@ -25,10 +25,10 @@ dependencies = [
 
 [project.scripts]
 iq-to-audio = "iq_to_audio.cli:main"
-pyinstaller = "iq_to_audio.packaging.pyinstaller_wrapper:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
