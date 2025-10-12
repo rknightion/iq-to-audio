@@ -90,7 +90,6 @@ jobs:
 
       # Build application with platform-specific args
       - name: Build application bundle
-        env: ${{ fromJSON(format('{{{0}}}', matrix.build_args || '')) }}
         run: |
           rm -rf build dist
           ${{ matrix.build_args }} uv run pyinstaller iq-to-audio.spec
