@@ -7,7 +7,7 @@ name = "iq-to-audio"
 version = "0.1.0"
 description = "Extract and demodulate narrowband FM audio from SDR++ baseband recordings."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13,<3.14"
 license = {text = "MIT"}
 authors = [
   { name = "IQ to Audio Tool" }
@@ -20,7 +20,7 @@ dependencies = [
   "tqdm>=4.66",
   "matplotlib>=3.10.7",
   "PySide6>=6.6.0",
-  "PySide6-Addons>=6.6.0"
+  "PySide6-Addons>=6.6.0",
 ]
 
 [project.scripts]
@@ -36,7 +36,8 @@ where = ["src"]
 dev = [
   "pytest>=7.4",
   "ruff>=0.14.0",
-  "mypy>=1.13"
+  "mypy>=1.13",
+  "pyinstaller>=6.16.0",
 ]
 
 [tool.ruff]

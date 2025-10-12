@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import soundfile as sf
+
+from .utils import resolve_ffprobe_executable
 
 LOG = logging.getLogger(__name__)
 
@@ -268,11 +269,12 @@ def _codec_to_detection(codec: str, *, source: str) -> InputFormatDetection:
 
 
 def _ffprobe_codec(path: Path) -> str | None:
-    if not shutil.which("ffprobe"):
+    ffprobe_path = resolve_ffprobe_executable()
+    if ffprobe_path is None:
         LOG.debug("ffprobe unavailable for codec detection: %s", path)
         return None
     cmd = [
-        "ffprobe",
+        str(ffprobe_path),
         "-v",
         "error",
         "-select_streams",

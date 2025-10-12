@@ -1,0 +1,91 @@
+name: Build Distributables
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+# Reuse a workspace-local cache so repeated pyinstaller runs avoid downloading wheels.
+env:
+  UV_CACHE_DIR: .uv_cache_ci
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux
+            arch: x86_64
+          - runner: macos-14
+            platform: macos
+            arch: universal2
+          - runner: windows-latest
+            platform: windows
+            arch: x86_64
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install FFmpeg
+        uses: FedericoCarboni/setup-ffmpeg@v2
+
+      - name: Install project dependencies
+        run: uv sync --dev
+
+      - name: Generate platform icons
+        run: uv run python tools/generate_app_icons.py
+
+      - name: Configure macOS codesign identity
+        if: runner.os == 'macOS' && secrets.MACOS_CODESIGN_IDENTITY != ''
+        run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=${{ secrets.MACOS_CODESIGN_IDENTITY }}" >> "$GITHUB_ENV"
+
+      - name: Build application bundle
+        run: |
+          rm -rf build dist
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            uv run pyinstaller iq-to-audio.spec --target-arch universal2
+          else
+            uv run pyinstaller iq-to-audio.spec
+          fi
+        shell: bash
+
+      - name: Archive bundle (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          cd dist
+          tar -czf ../iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz iq-to-audio
+
+      - name: Archive bundle (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent iq-to-audio.app ../iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip
+
+      - name: Archive bundle (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          Compress-Archive -Path dist\iq-to-audio -DestinationPath iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.zip
+            iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: ignore

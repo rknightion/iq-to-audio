@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import soundfile as sf
+
+from .utils import resolve_ffprobe_executable
 
 
 @dataclass
@@ -39,14 +40,15 @@ def probe_sample_rate(path: Path) -> SampleRateProbe:
 
 def _ffprobe_sample_rate(path: Path) -> Optional[float]:
     global _FFPROBE_WARNED
-    if not shutil.which("ffprobe"):
+    ffprobe_path = resolve_ffprobe_executable()
+    if ffprobe_path is None:
         if not _FFPROBE_WARNED:
             LOG.warning(FFPROBE_HINT)
             _FFPROBE_WARNED = True
         return None
 
     cmd = [
-        "ffprobe",
+        str(ffprobe_path),
         "-v",
         "error",
         "-select_streams",

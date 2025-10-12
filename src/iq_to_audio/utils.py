@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
@@ -51,6 +54,97 @@ def detect_center_frequency(path: Path) -> CenterFrequencyResult:
 def parse_center_frequency(path: Path) -> Optional[float]:
     """Backwards-compatible shim returning only the detected value."""
     return detect_center_frequency(path).value
+
+
+def _candidate_names(base: str) -> tuple[str, ...]:
+    if sys.platform.startswith("win"):
+        base_lower = base.lower()
+        if base_lower.endswith(".exe"):
+            return (base,)
+        return (base, f"{base}.exe")
+    return (base,)
+
+
+def _env_override_path(env_var: str, *, base: str) -> Path | None:
+    raw = os.environ.get(env_var)
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if candidate.is_dir():
+        for name in _candidate_names(base):
+            option = candidate / name
+            if option.exists():
+                return option
+        return None
+    if candidate.exists():
+        return candidate
+    # Honour missing extension on Windows env overrides.
+    if sys.platform.startswith("win") and candidate.suffix.lower() != ".exe":
+        exe_candidate = candidate.with_suffix(candidate.suffix + ".exe" if candidate.suffix else ".exe")
+        if exe_candidate.exists():
+            return exe_candidate
+    return None
+
+
+def _bundled_executable(*, base: str, subdir: str) -> Path | None:
+    if not getattr(sys, "frozen", False):
+        return None
+    search_roots: list[Path] = []
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        search_roots.append(Path(meipass))
+
+    try:
+        executable_path = Path(sys.executable).resolve()
+    except (AttributeError, RuntimeError):
+        executable_path = None
+    if executable_path is not None:
+        search_roots.append(executable_path.parent)
+        if sys.platform == "darwin":
+            # PyInstaller places executables inside Contents/MacOS; resources live next door.
+            search_roots.append(executable_path.parents[1] / "Resources")
+
+    for root in search_roots:
+        candidate_dir = root / subdir
+        for name in _candidate_names(base):
+            candidate = candidate_dir / name
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _path_executable(*, base: str) -> Path | None:
+    resolved = shutil.which(base)
+    return Path(resolved).resolve() if resolved else None
+
+
+@functools.lru_cache(maxsize=1)
+def resolve_ffmpeg_executable() -> Path | None:
+    """Return the preferred ffmpeg binary path for the current environment."""
+    for resolver in (
+        lambda: _env_override_path("IQ_TO_AUDIO_FFMPEG", base="ffmpeg"),
+        lambda: _bundled_executable(base="ffmpeg", subdir="ffmpeg"),
+        lambda: _path_executable(base="ffmpeg"),
+    ):
+        resolved = resolver()
+        if resolved:
+            return resolved
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def resolve_ffprobe_executable() -> Path | None:
+    """Return the preferred ffprobe binary path for the current environment."""
+    for resolver in (
+        lambda: _env_override_path("IQ_TO_AUDIO_FFPROBE", base="ffprobe"),
+        lambda: _bundled_executable(base="ffprobe", subdir="ffmpeg"),
+        lambda: _path_executable(base="ffprobe"),
+    ):
+        resolved = resolver()
+        if resolved:
+            return resolved
+    return None
 
 
 def _center_frequency_from_metadata(path: Path) -> Optional[CenterFrequencyResult]:
@@ -126,10 +220,11 @@ def _soundfile_tags(path: Path) -> Dict[str, str]:
 
 
 def _ffprobe_tags(path: Path) -> Dict[str, str]:
-    if not shutil.which("ffprobe"):
+    ffprobe_path = resolve_ffprobe_executable()
+    if ffprobe_path is None:
         return {}
     cmd = [
-        "ffprobe",
+        str(ffprobe_path),
         "-v",
         "error",
         "-show_entries",

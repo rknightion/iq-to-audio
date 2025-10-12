@@ -7,7 +7,6 @@ import logging
 import math
 import os
 import queue
-import shutil
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -16,14 +15,14 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from scipy import fft as sp_fft
-from scipy import signal
+from scipy.fft import fft, ifft
+from scipy.signal import firwin, kaiser_beta
 
 from .decoders import create_decoder
 from .input_formats import InputFormatSpec, resolve_input_format
 from .probe import SampleRateProbe, probe_sample_rate
 from .progress import PhaseState, ProgressSink, ProgressTracker
-from .utils import detect_center_frequency
+from .utils import detect_center_frequency, resolve_ffmpeg_executable
 from .visualize import save_stage_psd
 
 LOG = logging.getLogger(__name__)
@@ -103,8 +102,10 @@ class IQReader:
         self.input_bytes_per_frame = input_format.bytes_per_frame
 
     def __enter__(self) -> IQReader:
-        if not shutil.which("ffmpeg"):
+        ffmpeg_path = resolve_ffmpeg_executable()
+        if ffmpeg_path is None:
             raise RuntimeError(FFMPEG_HINT)
+        ffmpeg_executable = str(ffmpeg_path)
         cmd: list[str]
         if self.input_format.container == "raw":
             if self.sample_rate is None or self.sample_rate <= 0:
@@ -116,7 +117,7 @@ class IQReader:
             if fmt is None:
                 raise ValueError(f"Unsupported raw input format: {self.input_format.label}")
             cmd = [
-                "ffmpeg",
+                ffmpeg_executable,
                 "-hide_banner",
                 "-nostats",
                 "-loglevel",
@@ -137,7 +138,7 @@ class IQReader:
             ]
         else:
             cmd = [
-                "ffmpeg",
+                ffmpeg_executable,
                 "-hide_banner",
                 "-nostats",
                 "-loglevel",
@@ -262,12 +263,12 @@ class OverlapSaveFIR:
         self._fft_kwargs: dict[str, int] = {}
         if self.workers:
             try:
-                sp_fft.fft(np.zeros(8, dtype=np.complex128), workers=self.workers)
+                fft(np.zeros(8, dtype=np.complex128), workers=self.workers)
             except TypeError:
                 self.workers = None
             else:
                 self._fft_kwargs = {"workers": self.workers}
-        self.taps_fft = np.asarray(sp_fft.fft(padded_taps, **self._fft_kwargs))
+        self.taps_fft = np.asarray(fft(padded_taps, **self._fft_kwargs))
         self.state = np.zeros(self.overlap, dtype=np.complex64)
 
     def process(self, samples: np.ndarray) -> np.ndarray:
@@ -282,8 +283,8 @@ class OverlapSaveFIR:
             block = np.concatenate([self.state, seg]).astype(np.complex128)
             if block.size < self.fft_size:
                 block = np.pad(block, (0, self.fft_size - block.size))
-            spectrum = np.asarray(sp_fft.fft(block, **self._fft_kwargs))
-            filtered = np.asarray(sp_fft.ifft(spectrum * self.taps_fft, **self._fft_kwargs))
+            spectrum = np.asarray(fft(block, **self._fft_kwargs))
+            filtered = np.asarray(ifft(spectrum * self.taps_fft, **self._fft_kwargs))
             valid = filtered[self.overlap : self.overlap + seg.size]
             outputs.append(valid.astype(np.complex64))
             if self.overlap:
@@ -332,7 +333,8 @@ class AudioWriter:
     """Pipe float32 audio to ffmpeg for final WAV encoding/resampling."""
 
     def __init__(self, output_path: Path, input_rate: float):
-        if not shutil.which("ffmpeg"):
+        ffmpeg_path = resolve_ffmpeg_executable()
+        if ffmpeg_path is None:
             raise RuntimeError(FFMPEG_HINT)
         self.output_path = output_path
         self.input_rate = float(input_rate)
@@ -346,7 +348,7 @@ class AudioWriter:
             )
         self.proc: subprocess.Popen[bytes] | None = None
         cmd = [
-            "ffmpeg",
+            str(ffmpeg_path),
             "-hide_banner",
             "-loglevel",
             "error",
@@ -528,8 +530,8 @@ def design_channel_filter(sample_rate: float, bandwidth: float, decimation: int)
     num_taps = int(np.clip(4.0 / max(width, 1e-8), 1024, 32768))
     if num_taps % 2 == 0:
         num_taps += 1
-    beta = signal.kaiser_beta(ripple_db)
-    taps = signal.firwin(
+    beta = kaiser_beta(ripple_db)
+    taps = firwin(
         num_taps,
         cutoff=cutoff,
         window=("kaiser", beta),

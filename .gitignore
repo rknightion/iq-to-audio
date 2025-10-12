@@ -214,3 +214,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .DS_Store
+app.app
+nuitka-crash-report.xml
+Resources/
+app.build
+app.dist
+*.plist

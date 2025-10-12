@@ -4,7 +4,7 @@ import math
 from typing import Dict, Optional
 
 import numpy as np
-from scipy import signal
+from scipy.signal import lfilter
 
 from .base import Decoder, DecoderStats
 
@@ -51,7 +51,7 @@ class DeemphasisFilter:
         if samples.size == 0:
             return samples
         zi = np.array([self.state], dtype=np.float64)
-        audio, zf = signal.lfilter(
+        audio, zf = lfilter(
             self._b,
             self._a,
             samples.astype(np.float32, copy=False),

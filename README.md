@@ -36,6 +36,11 @@ FFmpeg must be on your `PATH` for ingestion and WAV output. PySide6 ships with t
 - `uv run python -c "from PySide6 import QtWidgets; print(QtWidgets.__version__)"`: confirm the Qt bindings import correctly.
 - `uv run --group dev pytest`: installs development tooling (pytest) for local testing.
 
+## Packaging
+
+Refer to [`docs/packaging.md`](docs/packaging.md) for PyInstaller build steps,
+icon generation, and CI automation details.
+
 ## Usage
 
 ```bash

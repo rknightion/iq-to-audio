@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from scipy import fft as sp_fft
+from scipy.fft import fft, fftfreq, fftshift
 
 LOG = logging.getLogger(__name__)
 
@@ -34,9 +34,9 @@ def compute_psd(
     win_power = np.sum(window ** 2) / use.size
     windowed = np.asarray(use, dtype=np.complex128) * window
     spectrum = _fft_dispatch(windowed, nfft, fft_workers)
-    spectrum = np.asarray(sp_fft.fftshift(spectrum))
+    spectrum = np.asarray(fftshift(spectrum))
     freqs = np.asarray(
-        sp_fft.fftshift(sp_fft.fftfreq(nfft, d=1.0 / sample_rate)),
+        fftshift(fftfreq(nfft, d=1.0 / sample_rate)),
         dtype=np.float64,
     )
     scale = (use.size * sample_rate * win_power) + _NUMPY_EPS
@@ -135,10 +135,10 @@ def _fft_dispatch(
 ) -> np.ndarray:
     if fft_workers and fft_workers > 1:
         try:
-            return np.asarray(sp_fft.fft(samples, n=nfft, workers=fft_workers))
+            return np.asarray(fft(samples, n=nfft, workers=fft_workers))
         except TypeError:
-            return np.asarray(sp_fft.fft(samples, n=nfft))
-    return np.asarray(sp_fft.fft(samples, n=nfft))
+            return np.asarray(fft(samples, n=nfft))
+    return np.asarray(fft(samples, n=nfft))
 
 
 class _SlidingFFT:
@@ -154,9 +154,7 @@ class _SlidingFFT:
         self.fft_workers = fft_workers if fft_workers and fft_workers > 1 else None
         self.window = np.hanning(self.nfft).astype(np.float64)
         self.win_power = np.sum(self.window ** 2) / self.nfft
-        self.freqs = sp_fft.fftshift(
-            sp_fft.fftfreq(self.nfft, d=1.0 / self.sample_rate)
-        ).astype(np.float64)
+        self.freqs = fftshift(fftfreq(self.nfft, d=1.0 / self.sample_rate)).astype(np.float64)
 
     def psd(self, samples: np.ndarray) -> np.ndarray:
         if samples.size != self.nfft:
@@ -165,7 +163,7 @@ class _SlidingFFT:
             )
         windowed = np.asarray(samples, dtype=np.complex128) * self.window
         spectrum = _fft_dispatch(windowed, self.nfft, self.fft_workers)
-        spectrum = np.asarray(sp_fft.fftshift(spectrum))
+        spectrum = np.asarray(fftshift(spectrum))
         scale = (self.nfft * self.sample_rate * self.win_power) + _NUMPY_EPS
         psd = spectrum * np.conj(spectrum) / scale
         result = 10.0 * np.log10(np.abs(psd) + _NUMPY_EPS)

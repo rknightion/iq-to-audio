@@ -4,6 +4,9 @@ import contextlib
 import logging
 import math
 import os
+
+os.environ.setdefault("MPLBACKEND", "QtAgg")  # Prefer QtAgg during runtime and compilation
+
 import signal
 import sys
 from collections.abc import Callable
@@ -12,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.axes import Axes
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.text import Text

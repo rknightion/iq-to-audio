@@ -27,7 +27,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import soundfile as sf  # noqa: E402
-from scipy import signal  # noqa: E402
+from scipy import __version__ as SCIPY_VERSION  # noqa: E402
+from scipy.signal import spectrogram  # noqa: E402
+from scipy.signal.windows import hann  # noqa: E402
 
 from iq_to_audio.benchmark import run_benchmark  # noqa: E402
 from iq_to_audio.processing import ProcessingConfig, ProcessingPipeline  # noqa: E402
@@ -237,8 +239,8 @@ def create_waterfall_plot(
     path: Path,
     title: str,
 ) -> None:
-    window = signal.windows.hann(2048, sym=False)
-    freqs, times, sxx = signal.spectrogram(
+    window = hann(2048, sym=False)
+    freqs, times, sxx = spectrogram(
         audio,
         fs=sample_rate,
         window=window,
@@ -765,7 +767,7 @@ def build_html_report(
 
     <section>
       <h2>Environment</h2>
-      <p>Python {sys.version.split()[0]} | NumPy {np.__version__} | SciPy {signal.__version__ if hasattr(signal, '__version__') else 'unknown'} | Matplotlib {matplotlib.__version__}</p>
+      <p>Python {sys.version.split()[0]} | NumPy {np.__version__} | SciPy {SCIPY_VERSION} | Matplotlib {matplotlib.__version__}</p>
     </section>
   </main>
   <footer>
