@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 import soundfile as sf
@@ -19,9 +17,6 @@ from iq_to_audio.processing import (
 )
 from iq_to_audio.progress import ProgressSink
 from iq_to_audio.visualize import compute_psd
-
-TESTFILES = Path(__file__).resolve().parent.parent / "testfiles"
-NFM_FIXTURE = TESTFILES / "fc-456834049Hz-ft-455837500-ft2-456872500-NFM.wav"
 
 
 def test_decimator_preserves_sequence():
@@ -127,10 +122,10 @@ class _AutoCancelSink(ProgressSink):
         return
 
 
-def test_processing_pipeline_cancellation_cleans_outputs(tmp_path):
+def test_processing_pipeline_cancellation_cleans_outputs(tmp_path, nfm_test_file):
     output_path = tmp_path / "cancel.wav"
     config = ProcessingConfig(
-        in_path=NFM_FIXTURE,
+        in_path=nfm_test_file,
         target_freq=455_837_500.0,
         bandwidth=12_500.0,
         center_freq=None,
