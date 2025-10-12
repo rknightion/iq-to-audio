@@ -15,9 +15,9 @@ was added for code signing and FFmpeg bundling.
   `utils.resolve_ffmpeg_executable()` / `resolve_ffprobe_executable()`.
 - macOS builds request `universal2` binaries per the PyInstaller feature notes so
   the resulting `.app` ships both arm64 and x86_64 slices.
-- GitHub Actions runs macOS packaging in a dedicated job; the spec itself
-  requests `target_arch="universal2"`, so the build produces a universal binary
-  without needing additional CLI flags.
+- GitHub Actions now builds two macOS artifacts: one on `macos-latest` (arm64)
+  and one on `macos-13` (x86_64). Each job runs PyInstaller natively on the
+  matching architecture, which avoids the universal2 dependency requirements.
 - `packaging/pyinstaller/runtime_environment.py` adds minor runtime polish:
   prepends `dist/ffmpeg` to `PATH`, enables layer-backed Qt rendering on macOS,
   and ensures Qt plugins resolve from the bundle.

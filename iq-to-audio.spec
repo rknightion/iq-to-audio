@@ -93,7 +93,7 @@ def _ffmpeg_binaries() -> list[tuple[str, str]]:
 
 
 SYSTEM = platform.system()
-TARGET_ARCH = "universal2" if SYSTEM == "Darwin" else None
+TARGET_ARCH = os.environ.get("IQ_TO_AUDIO_TARGET_ARCH") if SYSTEM == "Darwin" else None
 
 WINDOWS_ICON = _optional_icon("iq_to_audio.ico")
 MAC_ICON = _optional_icon("iq_to_audio.icns")

@@ -79,8 +79,8 @@ jobs:
             iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz
           if-no-files-found: ignore
 
-  build-macos:
-    name: Build macOS (universal2)
+  build-macos-arm64:
+    name: Build macOS arm64
     runs-on: macos-latest
 
     steps:
@@ -108,7 +108,7 @@ jobs:
       #   if: secrets.MACOS_CODESIGN_IDENTITY != ''
       #   run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=${{ secrets.MACOS_CODESIGN_IDENTITY }}" >> "$GITHUB_ENV"
 
-      - name: Build application bundle (universal2)
+      - name: Build application bundle
         run: |
           rm -rf build dist
           uv run pyinstaller iq-to-audio.spec
@@ -116,10 +116,55 @@ jobs:
       - name: Archive bundle (macOS)
         run: |
           cd dist
-          ditto -c -k --sequesterRsrc --keepParent iq-to-audio.app ../iq-to-audio-macos-universal2.zip
+          ditto -c -k --sequesterRsrc --keepParent iq-to-audio.app ../iq-to-audio-macos-arm64.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: iq-to-audio-macos-universal2
-          path: iq-to-audio-macos-universal2.zip
+          name: iq-to-audio-macos-arm64
+          path: iq-to-audio-macos-arm64.zip
+
+  build-macos-x86_64:
+    name: Build macOS x86_64
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
+      - name: Install project dependencies
+        run: uv sync --dev
+
+      - name: Generate platform icons
+        run: uv run python tools/generate_app_icons.py
+
+      # - name: Configure macOS codesign identity
+      #   if: secrets.MACOS_CODESIGN_IDENTITY != ''
+      #   run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=${{ secrets.MACOS_CODESIGN_IDENTITY }}" >> "$GITHUB_ENV"
+
+      - name: Build application bundle
+        run: |
+          rm -rf build dist
+          uv run pyinstaller iq-to-audio.spec
+
+      - name: Archive bundle (macOS)
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent iq-to-audio.app ../iq-to-audio-macos-x86_64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iq-to-audio-macos-x86_64
+          path: iq-to-audio-macos-x86_64.zip
