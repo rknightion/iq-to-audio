@@ -61,6 +61,8 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v4
         with:
+          lfs: true
+        with:
           fetch-depth: 0  # Full history for changelog generation
 
       - name: Set up Python 3.13
@@ -227,6 +229,8 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
+        with:
+          lfs: true
         with:
           fetch-depth: 0
 
