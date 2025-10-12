@@ -15,10 +15,9 @@ was added for code signing and FFmpeg bundling.
   `utils.resolve_ffmpeg_executable()` / `resolve_ffprobe_executable()`.
 - macOS builds request `universal2` binaries per the PyInstaller feature notes so
   the resulting `.app` ships both arm64 and x86_64 slices.
-- A startup shim removes `--target-arch`/`--target-architecture` when PyInstaller
-  runs against the spec. The build still honours the `target_arch="universal2"`
-  setting inside `iq-to-audio.spec`, so the GitHub Actions command can stay as-is
-  while conforming to PyInstaller's guidance.
+- GitHub Actions runs macOS packaging in a dedicated job; the spec itself
+  requests `target_arch="universal2"`, so the build produces a universal binary
+  without needing additional CLI flags.
 - `packaging/pyinstaller/runtime_environment.py` adds minor runtime polish:
   prepends `dist/ffmpeg` to `PATH`, enables layer-backed Qt rendering on macOS,
   and ensures Qt plugins resolve from the bundle.

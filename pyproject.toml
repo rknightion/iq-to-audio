@@ -28,7 +28,6 @@ iq-to-audio = "iq_to_audio.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
