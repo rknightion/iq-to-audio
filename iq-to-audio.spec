@@ -31,7 +31,12 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 APP_NAME = "iq-to-audio"
 BUNDLE_IDENTIFIER = "com.rknightion.iq-to-audio"
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+_SPEC_PATH = Path(globals().get("__file__", Path.cwd() / "iq-to-audio.spec"))
+if _SPEC_PATH.is_file():
+    PROJECT_ROOT = _SPEC_PATH.resolve().parent
+else:
+    PROJECT_ROOT = Path.cwd()
+
 SRC_ROOT = PROJECT_ROOT / "src"
 PACKAGING_ROOT = PROJECT_ROOT / "packaging"
 PYINSTALLER_ROOT = PACKAGING_ROOT / "pyinstaller"
