@@ -51,15 +51,15 @@ WORKDIR /app
 # Copy dependency manifests first to leverage Docker layer caching
 COPY pyproject.toml uv.lock ./
 
-# Install Python dependencies using uv (respect the lock file)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
-
-# Copy project files
+# Copy source files needed for package build
+COPY README.md README.md
 COPY src/ src/
 COPY packaging/ packaging/
 COPY tools/ tools/
-COPY README.md README.md
+
+# Install Python dependencies using uv (respect the lock file)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
 # Generate icons (if GUI is needed)
 RUN uv run python tools/generate_app_icons.py || true
