@@ -1,3 +1,4 @@
+# ruff: noqa: NPY002
 """
 Shared pytest fixtures and configuration for iq-to-audio tests.
 
@@ -5,6 +6,7 @@ Provides synthetic IQ generation, Qt app fixtures, and DSP test utilities.
 """
 
 import sys
+import tarfile
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +16,49 @@ from hypothesis import strategies as st
 
 # Add src to path for tests
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+_TESTFILES_DIR = Path(__file__).parent.parent / "testfiles"
+_TESTFILES_ARCHIVE = _TESTFILES_DIR / "iq-to-audio-fixtures.tar.xz"
+
+
+def _extract_fixture(filename: str) -> Path:
+    destination = _TESTFILES_DIR / filename
+    if destination.exists() or not _TESTFILES_ARCHIVE.exists():
+        return destination
+
+    with tarfile.open(_TESTFILES_ARCHIVE, mode="r:xz") as archive:
+        try:
+            member = archive.getmember(filename)
+        except KeyError:
+            pytest.skip(f"{filename} missing from archive {_TESTFILES_ARCHIVE}")
+
+        target_path = destination.resolve()
+        base_path = _TESTFILES_DIR.resolve()
+        member_path = (base_path / member.name).resolve()
+        if not str(member_path).startswith(str(base_path)):
+            raise ValueError(f"Unsafe path detected in archive: {member.name}")
+
+        archive.extract(member, path=_TESTFILES_DIR, filter="data")
+
+        if not target_path.exists():
+            raise RuntimeError(f"Failed to extract {filename} from archive")
+
+    return destination
+
+
+def _ensure_fixture(filename: str) -> Path:
+    _TESTFILES_DIR.mkdir(parents=True, exist_ok=True)
+    path = _TESTFILES_DIR / filename
+    if path.exists():
+        return path
+    _extract_fixture(filename)
+    if path.exists():
+        return path
+    pytest.skip(
+        f"Test fixture not available: {filename}. "
+        "Ensure iq-to-audio-fixtures.tar.xz is present in testfiles/."
+    )
+    return path
 
 
 # ============================================================================
@@ -252,25 +297,20 @@ def valid_sample_rates(draw):
 @pytest.fixture
 def testfiles_dir():
     """Path to testfiles directory."""
-    return Path(__file__).parent.parent / "testfiles"
+    _TESTFILES_DIR.mkdir(parents=True, exist_ok=True)
+    return _TESTFILES_DIR
 
 
 @pytest.fixture
 def am_test_file(testfiles_dir):
     """Path to AM test file if it exists."""
-    path = testfiles_dir / "fc-132334577Hz-ft-132300000-AM.wav"
-    if path.exists():
-        return path
-    pytest.skip(f"Test file not found: {path}")
+    return _ensure_fixture("fc-132334577Hz-ft-132300000-AM.wav")
 
 
 @pytest.fixture
 def nfm_test_file(testfiles_dir):
     """Path to NFM test file if it exists."""
-    path = testfiles_dir / "fc-456834049Hz-ft-455837500-ft2-456872500-NFM.wav"
-    if path.exists():
-        return path
-    pytest.skip(f"Test file not found: {path}")
+    return _ensure_fixture("fc-456834049Hz-ft-455837500-ft2-456872500-NFM.wav")
 
 
 # ============================================================================

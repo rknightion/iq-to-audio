@@ -10,10 +10,6 @@ import soundfile as sf
 
 from iq_to_audio import __version__
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "testfiles"
-NFM_FIXTURE = DATA_DIR / "fc-456834049Hz-ft-455837500-ft2-456872500-NFM.wav"
-AM_FIXTURE = DATA_DIR / "fc-132334577Hz-ft-132300000-AM.wav"
-
 
 def _run_cli(args: list[str]) -> str:
     cmd = [sys.executable, "-m", "iq_to_audio.cli", *args]
@@ -55,13 +51,13 @@ def test_cli_version_reports_package_version():
     assert result.stdout.strip() == __version__
 
 
-def test_cli_preview_nfm_generates_audio(tmp_path):
+def test_cli_preview_nfm_generates_audio(tmp_path, nfm_test_file):
     output = tmp_path / "nfm.wav"
     logs = _run_cli(
         [
             "--cli",
             "--in",
-            str(NFM_FIXTURE),
+            str(nfm_test_file),
             "--ft",
             "455837500",
             "--demod",
@@ -88,13 +84,13 @@ def test_cli_preview_nfm_generates_audio(tmp_path):
     assert "Center frequency 456834049 Hz" in logs
 
 
-def test_cli_preview_am_generates_audio(tmp_path):
+def test_cli_preview_am_generates_audio(tmp_path, am_test_file):
     output = tmp_path / "am.wav"
     logs = _run_cli(
         [
             "--cli",
             "--in",
-            str(AM_FIXTURE),
+            str(am_test_file),
             "--ft",
             "132300000",
             "--demod",
@@ -121,13 +117,13 @@ def test_cli_preview_am_generates_audio(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["usb", "lsb"])
-def test_cli_preview_ssb_generates_audio(tmp_path, mode: str):
+def test_cli_preview_ssb_generates_audio(tmp_path, nfm_test_file, mode: str):
     output = tmp_path / f"{mode}.wav"
     logs = _run_cli(
         [
             "--cli",
             "--in",
-            str(NFM_FIXTURE),
+            str(nfm_test_file),
             "--ft",
             "455837500",
             "--demod",
@@ -151,13 +147,13 @@ def test_cli_preview_ssb_generates_audio(tmp_path, mode: str):
     assert "Processing complete" in logs
 
 
-def test_cli_preview_multiple_targets(tmp_path):
+def test_cli_preview_multiple_targets(tmp_path, nfm_test_file):
     output = tmp_path / "batch.wav"
     logs = _run_cli(
         [
             "--cli",
             "--in",
-            str(NFM_FIXTURE),
+            str(nfm_test_file),
             "--ft",
             "455837500",
             "--ft",
@@ -182,13 +178,13 @@ def test_cli_preview_multiple_targets(tmp_path):
     assert "=== Previewing target 456872500 Hz (2/2) ===" in logs
 
 
-def test_cli_multi_target_outputs_are_unique(tmp_path):
+def test_cli_multi_target_outputs_are_unique(tmp_path, nfm_test_file):
     output = tmp_path / "main.wav"
     logs = _run_cli(
         [
             "--cli",
             "--in",
-            str(NFM_FIXTURE),
+            str(nfm_test_file),
             "--ft",
             "455837500",
             "--ft",
@@ -214,7 +210,7 @@ def test_cli_multi_target_outputs_are_unique(tmp_path):
     assert logs.count("Processing complete") >= 2
 
 
-def test_cli_dump_iq_and_plot(tmp_path):
+def test_cli_dump_iq_and_plot(tmp_path, nfm_test_file):
     output = tmp_path / "nfm_full.wav"
     iq_dump = tmp_path / "channel.cf32"
     plot_path = tmp_path / "stages.png"
@@ -222,7 +218,7 @@ def test_cli_dump_iq_and_plot(tmp_path):
         [
             "--cli",
             "--in",
-            str(NFM_FIXTURE),
+            str(nfm_test_file),
             "--ft",
             "455837500",
             "--demod",
