@@ -104,15 +104,31 @@ jobs:
       - name: Generate platform icons
         run: uv run python tools/generate_app_icons.py
 
-      # - name: Configure macOS codesign identity
-      #   if: secrets.MACOS_CODESIGN_IDENTITY != ''
-      #   run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=${{ secrets.MACOS_CODESIGN_IDENTITY }}" >> "$GITHUB_ENV"
+      - name: Import signing certificate
+        env:
+          MACOS_CODESIGN_CERT_BASE64: ${{ secrets.MACOS_CODESIGN_CERT_BASE64 }}
+          MACOS_CODESIGN_CERT_PASSWORD: ${{ secrets.MACOS_CODESIGN_CERT_PASSWORD }}
+        run: |
+          echo "$MACOS_CODESIGN_CERT_BASE64" | base64 --decode > /tmp/developerid.p12
+          security create-keychain -p "$RUNNER_TEMP" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$RUNNER_TEMP" build.keychain
+          security import /tmp/developerid.p12 -k build.keychain -P "$MACOS_CODESIGN_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$RUNNER_TEMP" build.keychain
+
+      - name: Configure macOS codesign identity
+        run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=${{ secrets.MACOS_CODESIGN_IDENTITY }}" >> "$GITHUB_ENV"
 
       - name: Build application bundle
         run: |
           rm -rf build dist
           uv run pyinstaller iq-to-audio.spec
 
+      - name: Codesign app bundle
+        run: |
+          codesign --deep --force --options runtime \
+            --sign "$IQ_TO_AUDIO_CODESIGN_IDENTITY" \
+            dist/iq-to-audio.app
       - name: Archive bundle (macOS)
         run: |
           cd dist
@@ -123,48 +139,3 @@ jobs:
         with:
           name: iq-to-audio-macos-arm64
           path: iq-to-audio-macos-arm64.zip
-
-  build-macos-x86_64:
-    name: Build macOS x86_64
-    runs-on: macos-13
-
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.13
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-
-      - name: Install FFmpeg
-        uses: AnimMouse/setup-ffmpeg@v1
-
-      - name: Install project dependencies
-        run: uv sync --dev
-
-      - name: Generate platform icons
-        run: uv run python tools/generate_app_icons.py
-
-      # - name: Configure macOS codesign identity
-      #   if: secrets.MACOS_CODESIGN_IDENTITY != ''
-      #   run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=${{ secrets.MACOS_CODESIGN_IDENTITY }}" >> "$GITHUB_ENV"
-
-      - name: Build application bundle
-        run: |
-          rm -rf build dist
-          uv run pyinstaller iq-to-audio.spec
-
-      - name: Archive bundle (macOS)
-        run: |
-          cd dist
-          ditto -c -k --sequesterRsrc --keepParent iq-to-audio.app ../iq-to-audio-macos-x86_64.zip
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: iq-to-audio-macos-x86_64
-          path: iq-to-audio-macos-x86_64.zip
