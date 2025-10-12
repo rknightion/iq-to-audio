@@ -28,21 +28,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux builds
           - runner: ubuntu-latest
             platform: linux
             arch: x86_64
+            build_args: ""
           - runner: ubuntu-24.04-arm
             platform: linux
             arch: arm64
+            build_args: ""
+
+          # Windows builds
           - runner: windows-latest
             platform: windows
             arch: amd64
+            build_args: ""
           - runner: windows-11-arm
             platform: windows
             arch: arm64
-          - runner: macos-latest
+            build_args: ""
+
+          # macOS builds (both Intel and Apple Silicon)
+          - runner: macos-latest  # Intel runners
+            platform: macos
+            arch: x86_64
+            build_args: "IQ_TO_AUDIO_TARGET_ARCH=x86_64"
+          - runner: macos-latest  # ARM64 runners
             platform: macos
             arch: arm64
+            build_args: "IQ_TO_AUDIO_TARGET_ARCH=arm64"
 
     steps:
       - name: Checkout sources
@@ -63,9 +77,10 @@ jobs:
         uses: actions/cache@v3
         with:
           path: .uv_cache_ci
-          key: uv-pyinstaller-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('pyproject.toml') }}
+          key: uv-nightly-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
-            uv-pyinstaller-${{ runner.os }}-${{ matrix.arch }}-
+            uv-nightly-${{ runner.os }}-${{ matrix.arch }}-
+            uv-nightly-${{ runner.os }}-
 
       - name: Install project dependencies
         run: uv sync --dev
@@ -73,10 +88,12 @@ jobs:
       - name: Generate platform icons
         run: uv run python tools/generate_app_icons.py
 
+      # Build application with platform-specific args
       - name: Build application bundle
+        env: ${{ fromJSON(format('{{{0}}}', matrix.build_args || '')) }}
         run: |
           rm -rf build dist
-          uv run pyinstaller iq-to-audio.spec
+          ${{ matrix.build_args }} uv run pyinstaller iq-to-audio.spec
         shell: bash
 
       - name: Test executable (Linux/macOS)
@@ -191,7 +208,7 @@ jobs:
                 repo: context.repo.repo,
                 tag_name: tagName,
                 name: `Nightly Build - ${date}`,
-                body: `Automated nightly build from commit ${sha}\n\nBuilt on: ${date}`,
+                body: `Automated nightly build from commit ${sha}\n\nBuilt on: ${date}\n\n## Platforms\n- Linux (x86_64, arm64)\n- Windows (amd64, arm64)\n- macOS (Intel x86_64, Apple Silicon arm64)`,
                 draft: false,
                 prerelease: true,
                 target_commitish: context.sha
