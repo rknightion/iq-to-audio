@@ -108,7 +108,7 @@ MAC_ENTITLEMENTS = (
     else None
 )
 
-PYTHON_SOURCES = [str(SRC_ROOT / "iq_to_audio" / "cli.py")]
+PYTHON_SOURCES = [str(PYINSTALLER_ROOT / "run_cli.py")]
 
 if SYSTEM == "Darwin":
     # PySide6 frameworks already arrive via the official hook; re-collecting them
@@ -128,6 +128,7 @@ hiddenimports = sorted(
     set(
         collect_submodules("PySide6")
         + collect_submodules("matplotlib")
+        + collect_submodules("iq_to_audio")
         + [
             "numpy",
             "scipy",
