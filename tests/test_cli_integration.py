@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from iq_to_audio import __version__
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "testfiles"
 NFM_FIXTURE = DATA_DIR / "fc-456834049Hz-ft-455837500-ft2-456872500-NFM.wav"
 AM_FIXTURE = DATA_DIR / "fc-132334577Hz-ft-132300000-AM.wav"
@@ -39,6 +41,18 @@ def _audio_stats(path: Path) -> dict[str, float]:
         "peak": peak,
         "nonzero_frac": nonzero,
     }
+
+
+def test_cli_version_reports_package_version():
+    result = subprocess.run(
+        [sys.executable, "-m", "iq_to_audio.cli", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.strip() == __version__
 
 
 def test_cli_preview_nfm_generates_audio(tmp_path):

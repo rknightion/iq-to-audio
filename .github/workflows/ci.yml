@@ -41,6 +41,17 @@ jobs:
       - name: Install FFmpeg
         uses: AnimMouse/setup-ffmpeg@v1
 
+      - name: Cache APT packages (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt/archives
+            /var/lib/apt/lists
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-
+
       - name: Install system dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -57,11 +68,10 @@ jobs:
             libxcb-xinerama0 \
             libxcb-xfixes0 \
             libegl1 \
-            libxcb-cursor0 \
-            libgl1-mesa-glx
+            libxcb-cursor0
 
       - name: Cache uv dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: .uv_cache_ci
           key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
@@ -72,6 +82,14 @@ jobs:
         run: |
           uv sync --dev
 
+      - name: Cache Ruff
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ruff
+          key: ruff-${{ runner.os }}-${{ hashFiles('**/*.py') }}
+          restore-keys: |
+            ruff-${{ runner.os }}-
+
       - name: Lint with ruff (check)
         run: |
           uv run ruff check src/ tests/ --output-format=github
@@ -80,9 +98,25 @@ jobs:
         run: |
           uv run ruff format --check src/ tests/
 
+      - name: Cache Mypy
+        uses: actions/cache@v4
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('**/*.py', 'pyproject.toml') }}
+          restore-keys: |
+            mypy-${{ runner.os }}-
+
       - name: Type check with mypy
         run: |
           uv run mypy src/iq_to_audio --no-error-summary
+
+      - name: Cache Pytest
+        uses: actions/cache@v4
+        with:
+          path: .pytest_cache
+          key: pytest-${{ runner.os }}-${{ hashFiles('tests/**/*.py') }}
+          restore-keys: |
+            pytest-${{ runner.os }}-
 
       - name: Run unit tests (Linux with xvfb)
         if: matrix.os == 'ubuntu-latest'
@@ -128,6 +162,15 @@ jobs:
       - name: Install FFmpeg
         uses: AnimMouse/setup-ffmpeg@v1
 
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: .uv_cache_ci
+          key: uv-benchmark-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-benchmark-${{ runner.os }}-
+            uv-${{ runner.os }}-
+
       - name: Install dependencies
         run: |
           uv sync --dev
@@ -171,6 +214,15 @@ jobs:
 
       - name: Install FFmpeg
         uses: AnimMouse/setup-ffmpeg@v1
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: .uv_cache_ci
+          key: uv-pyinstaller-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-pyinstaller-${{ runner.os }}-
+            uv-${{ runner.os }}-
 
       - name: Install dependencies
         run: |

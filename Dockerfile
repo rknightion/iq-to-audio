@@ -1,14 +1,17 @@
+# syntax=docker/dockerfile:1.7
 # Multi-stage Dockerfile for iq-to-audio
 # Supports both CLI and GUI modes (GUI requires X11 forwarding)
 
 # Stage 1: Base image with system dependencies
-FROM python:3.13-slim as base
+FROM python:3.13-slim AS base
+
+# Reduce apt noise and keep image small
+ARG DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies including FFmpeg
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libglib2.0-0 \
-    libgl1-mesa-glx \
     libxkbcommon-x11-0 \
     libxcb-icccm4 \
     libxcb-image0 \
@@ -37,29 +40,32 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast dependency management
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:$PATH"
+ENV UV_INSTALL_DIR=/usr/local/bin
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && uv --version
 
 # Stage 2: Build stage with dev dependencies
-FROM base as builder
+FROM base AS builder
 
 WORKDIR /app
 
+# Copy dependency manifests first to leverage Docker layer caching
+COPY pyproject.toml uv.lock ./
+
+# Install Python dependencies using uv (respect the lock file)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
 # Copy project files
-COPY pyproject.toml .
 COPY src/ src/
 COPY packaging/ packaging/
 COPY tools/ tools/
-COPY README.md .
-
-# Install Python dependencies using uv
-RUN uv sync --no-dev
+COPY README.md README.md
 
 # Generate icons (if GUI is needed)
 RUN uv run python tools/generate_app_icons.py || true
 
 # Stage 3: Runtime stage
-FROM base as runtime
+FROM base AS runtime
 
 WORKDIR /app
 
@@ -95,10 +101,10 @@ ENTRYPOINT ["python", "-m", "iq_to_audio.cli"]
 CMD ["--help"]
 
 # Stage 4: Development stage (optional, includes dev tools)
-FROM builder as development
+FROM builder AS development
 
 # Install development dependencies
-RUN uv sync --dev
+RUN uv sync --frozen --dev
 
 # Install additional dev tools
 RUN apt-get update && apt-get install -y \

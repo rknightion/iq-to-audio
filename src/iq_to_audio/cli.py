@@ -6,6 +6,7 @@ import math
 import sys
 from pathlib import Path
 
+from . import __version__
 from .input_formats import parse_user_format
 from .preview import run_preview
 from .processing import (
@@ -216,6 +217,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable debug logging.",
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=__version__,
+        help="Print the iq-to-audio version and exit.",
+    )
     parser.set_defaults(agc_enabled=True)
     return parser
 
@@ -347,7 +354,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.preview_seconds is not None:
         if launch_gui:
-            LOG.warning("--preview is ignored in interactive mode; use the GUI preview button instead.")
+            LOG.warning(
+                "--preview is ignored in interactive mode; use the GUI preview button instead."
+            )
         else:
             total = len(frequencies)
 
