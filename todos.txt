@@ -2,353 +2,17 @@
 - the line "MAX_PREVIEW_SAMPLES = 8_000_000  # Complex samples retained in memory for previews (~64 MB)." now lives in `interactive/models.py` and feeds the new `InteractiveState.max_preview_samples`. It caps in-memory FFT capture to ~64 MB; revisit after profiling before increasing.
 
 
-==============================================================================
-                           PACKAGING RESEARCH
-==============================================================================
-
-Research Date: 2025-10-11
-Target: Cross-platform standalone executable (macOS, Windows, Linux; ARM64, AMD64)
-Goal: Double-click GUI launcher with embedded Python environment + uv dependency management
-Reference: ComfyUI-style portable distribution
-
-------------------------------------------------------------------------------
-RECOMMENDATION #1: PyInstaller + GitHub Actions (Production-Ready)
-------------------------------------------------------------------------------
-
-OVERVIEW:
-PyInstaller is the most mature, widely-used solution for Python app packaging.
-It bundles your Python app with a Python interpreter into a single executable
-or folder. Supports all major platforms and architectures. Best compatibility
-with PySide6/Qt apps. Can bundle ffmpeg binaries. GitHub Actions can automate
-multi-platform builds.
-
-PROS:
-+ Most mature and battle-tested solution (used in thousands of projects)
-+ Excellent PySide6/Qt support out-of-the-box
-+ Simple to use - single command for basic packaging
-+ Extensive documentation and community support (Stack Overflow, GitHub)
-+ Works with virtually all Python packages (NumPy, SciPy, soundfile, etc.)
-+ Can bundle external binaries (ffmpeg) easily via --add-binary flag
-+ Cross-compilation not required - GitHub Actions handles all platforms
-+ Produces reasonably sized executables (~50-150MB depending on dependencies)
-+ Active development - latest version 6.16.0 (2025)
-+ No C/Rust compiler required
-+ Supports both --onefile (single exe) and --onedir (folder with exe + libs)
-+ Can embed data files, icons, and other resources
-+ Works with uv-managed projects (just needs requirements.txt or direct deps)
-
-CONS:
-- Slower startup time (~1-2 seconds) due to unpacking to temp directory
-- Larger executable size compared to Nuitka (no compilation optimization)
-- Antivirus false positives occasionally (common issue, solvable with code signing)
-- Must build on each target platform (Windows on Windows, macOS on macOS, etc.)
-- Bundled apps don't get performance improvements (interpreted Python still)
-
-IMPLEMENTATION STEPS:
-
-1. INSTALL PyInstaller in your project:
-   ```bash
-   uv add --dev pyinstaller
-   ```
-
-2. CREATE A BASIC SPEC FILE (auto-generated, then customized):
-   ```bash
-   uv run pyinstaller --name iq-to-audio \
-                       --windowed \
-                       --onedir \
-                       src/iq_to_audio/interactive/app.py
-   ```
-
-   This generates `iq-to-audio.spec` which you'll customize.
-
-3. CUSTOMIZE THE .spec FILE for ffmpeg bundling and resources:
-
-   ```python
-   # iq-to-audio.spec
-   # -*- mode: python ; coding: utf-8 -*-
-   import sys
-   from pathlib import Path
-   from PyInstaller.utils.hooks import collect_data_files, collect_submodules
-
-   block_cipher = None
-
-   # Collect all PySide6 components
-   pyside6_datas = collect_data_files('PySide6')
-
-   # Add ffmpeg binaries (platform-specific paths)
-   ffmpeg_binaries = []
-   if sys.platform == 'win32':
-       ffmpeg_binaries = [
-           ('ffmpeg/bin/ffmpeg.exe', 'ffmpeg'),
-           ('ffmpeg/bin/ffprobe.exe', 'ffmpeg'),
-       ]
-   elif sys.platform == 'darwin':
-       ffmpeg_binaries = [
-           ('/opt/homebrew/bin/ffmpeg', 'ffmpeg'),  # ARM64
-           ('/opt/homebrew/bin/ffprobe', 'ffmpeg'),
-           # OR: ('/usr/local/bin/ffmpeg', 'ffmpeg'),  # x86_64
-       ]
-   else:  # Linux
-       ffmpeg_binaries = [
-           ('/usr/bin/ffmpeg', 'ffmpeg'),
-           ('/usr/bin/ffprobe', 'ffmpeg'),
-       ]
-
-   a = Analysis(
-       ['src/iq_to_audio/cli.py'],  # Entry point
-       pathex=[],
-       binaries=ffmpeg_binaries,
-       datas=pyside6_datas,
-       hiddenimports=[
-           'PySide6.QtCore',
-           'PySide6.QtWidgets',
-           'PySide6.QtGui',
-           'numpy',
-           'scipy',
-           'soundfile',
-           'soxr',
-           'matplotlib',
-       ],
-       hookspath=[],
-       hooksconfig={},
-       runtime_hooks=[],
-       excludes=[],
-       win_no_prefer_redirects=False,
-       win_private_assemblies=False,
-       cipher=block_cipher,
-       noarchive=False,
-   )
-
-   pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-
-   exe = EXE(
-       pyz,
-       a.scripts,
-       [],
-       exclude_binaries=True,
-       name='iq-to-audio',
-       debug=False,
-       bootloader_ignore_signals=False,
-       strip=False,
-       upx=True,
-       console=False,  # GUI app, no console window
-       disable_windowed_traceback=False,
-       target_arch=None,
-       codesign_identity=None,
-       entitlements_file=None,
-       icon='resources/icon.ico',  # Optional: add app icon
-   )
-
-   coll = COLLECT(
-       exe,
-       a.binaries,
-       a.zipfiles,
-       a.datas,
-       strip=False,
-       upx=True,
-       upx_exclude=[],
-       name='iq-to-audio',
-   )
-
-   # For macOS: Create .app bundle
-   if sys.platform == 'darwin':
-       app = BUNDLE(
-           coll,
-           name='iq-to-audio.app',
-           icon='resources/icon.icns',
-           bundle_identifier='com.yourname.iq-to-audio',
-           info_plist={
-               'NSPrincipalClass': 'NSApplication',
-               'NSHighResolutionCapable': 'True',
-           },
-       )
-   ```
-
-4. HANDLE FFMPEG RUNTIME PATH DETECTION:
-
-   Add this helper to your code (e.g., in utils.py):
-
-   ```python
-   import sys
-   import os
-   from pathlib import Path
-
-   def get_ffmpeg_path() -> Path:
-       """Get ffmpeg path, works in both dev and bundled PyInstaller app."""
-       if getattr(sys, 'frozen', False):
-           # Running in PyInstaller bundle
-           base_path = Path(sys._MEIPASS)
-           ffmpeg_name = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
-           return base_path / 'ffmpeg' / ffmpeg_name
-       else:
-           # Running in development - use system ffmpeg
-           return Path('ffmpeg')  # Assumes ffmpeg is on PATH
-
-   def get_ffprobe_path() -> Path:
-       """Get ffprobe path for bundled or dev environments."""
-       if getattr(sys, 'frozen', False):
-           base_path = Path(sys._MEIPASS)
-           ffprobe_name = 'ffprobe.exe' if sys.platform == 'win32' else 'ffprobe'
-           return base_path / 'ffmpeg' / ffprobe_name
-       else:
-           return Path('ffprobe')
-   ```
-
-   Update your ffmpeg/ffprobe calls to use these paths:
-
-   ```python
-   from iq_to_audio.utils import get_ffmpeg_path, get_ffprobe_path
-
-   # In probe.py or wherever ffprobe is called:
-   result = subprocess.run(
-       [str(get_ffprobe_path()), '-v', 'quiet', '-print_format', 'json', ...],
-       ...
-   )
-   ```
-
-5. BUILD THE EXECUTABLE:
-   ```bash
-   uv run pyinstaller iq-to-audio.spec
-   ```
-
-   Output will be in `dist/iq-to-audio/` (folder) or `dist/iq-to-audio.exe` (if --onefile).
-
-6. TEST THE BUILD:
-   ```bash
-   # Windows
-   dist/iq-to-audio/iq-to-audio.exe --interactive
-
-   # macOS
-   open dist/iq-to-audio.app
-
-   # Linux
-   ./dist/iq-to-audio/iq-to-audio --interactive
-   ```
-
-7. GITHUB ACTIONS WORKFLOW for automated multi-platform builds:
-
-   Create `.github/workflows/build-release.yml`:
-
-   ```yaml
-   name: Build Releases
-
-   on:
-     push:
-       tags:
-         - 'v*'  # Trigger on version tags like v1.0.0
-
-   jobs:
-     build:
-       name: Build on ${{ matrix.os }}
-       runs-on: ${{ matrix.os }}
-       strategy:
-         matrix:
-           include:
-             - os: ubuntu-latest
-               platform: linux
-               arch: x86_64
-             - os: macos-13  # Intel
-               platform: macos
-               arch: x86_64
-             - os: macos-14  # Apple Silicon
-               platform: macos
-               arch: arm64
-             - os: windows-latest
-               platform: windows
-               arch: x86_64
-
-       steps:
-         - uses: actions/checkout@v4
-
-         - name: Install system dependencies (Ubuntu)
-           if: matrix.platform == 'linux'
-           run: |
-             sudo apt-get update
-             sudo apt-get install -y ffmpeg
-
-         - name: Install system dependencies (macOS)
-           if: matrix.platform == 'macos'
-           run: |
-             brew install ffmpeg
-
-         - name: Install system dependencies (Windows)
-           if: matrix.platform == 'windows'
-           run: |
-             choco install ffmpeg -y
-
-         - name: Set up Python
-           uses: actions/setup-python@v5
-           with:
-             python-version: '3.11'
-
-         - name: Install uv
-           run: |
-             curl -LsSf https://astral.sh/uv/install.sh | sh
-
-         - name: Install dependencies
-           run: |
-             uv sync
-             uv add --dev pyinstaller
-
-         - name: Build with PyInstaller
-           run: |
-             uv run pyinstaller iq-to-audio.spec
-
-         - name: Create distribution archive (Linux/macOS)
-           if: matrix.platform != 'windows'
-           run: |
-             cd dist
-             tar -czf iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz iq-to-audio/
-
-         - name: Create distribution archive (Windows)
-           if: matrix.platform == 'windows'
-           run: |
-             cd dist
-             Compress-Archive -Path iq-to-audio -DestinationPath iq-to-audio-windows-x86_64.zip
-
-         - name: Upload Release Asset
-           uses: softprops/action-gh-release@v1
-           with:
-             files: |
-               dist/iq-to-audio-*.tar.gz
-               dist/iq-to-audio-*.zip
-           env:
-             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-   ```
-
-8. OPTIONAL: CODE SIGNING (reduces antivirus false positives):
-
-   - Windows: Use SignTool with a code signing certificate
-   - macOS: Use codesign with Apple Developer ID
-   - See: https://pyinstaller.org/en/stable/usage.html#code-signing
-
-FFMPEG BUNDLING NOTES:
-- Option A (BUNDLED): Include ffmpeg binaries in --add-binary, increases app size by ~100MB
-- Option B (EXTERNAL): Document ffmpeg as external dependency, users install separately
-- Recommendation: Bundle ffmpeg for best UX, users don't need to install anything
-
-SIZE ESTIMATES:
-- Without ffmpeg: ~80-120MB (PySide6 + NumPy/SciPy are large)
-- With ffmpeg: ~180-220MB
-- Can reduce with UPX compression (--upx flag, already in spec)
-
-FURTHER READING:
-- PyInstaller docs: https://pyinstaller.org/en/stable/
-- PySide6 + PyInstaller: https://doc.qt.io/qtforpython-6/deployment/deployment-pyinstaller.html
-- Bundling data files: https://pyinstaller.org/en/stable/spec-files.html#adding-data-files
-
 -----DSP Post Processing-------
 
 
 
 ----TESTING-----
 
-## COMPREHENSIVE TESTING STRATEGY & IMPLEMENTATION GUIDE
+## TESTING IMPLEMENTATION GUIDE (Future Work)
 
 ### EXECUTIVE SUMMARY
-This document outlines a comprehensive testing strategy for the iq-to-audio project, covering unit tests,
-integration tests, GUI testing, performance benchmarking, and CI/CD integration. Each section includes
-actionable implementation details, code examples, and references to support agentic implementation.
+This document outlines testing strategies not yet implemented in CI.
+Completed: benchmarking, coverage tracking, CI/CD pipeline, multi-platform testing, linting, type checking.
 
 ---
 
@@ -728,100 +392,23 @@ def test_nfm_decoder_bounded_output(samples):
 
 ---
 
-### 5. PERFORMANCE & BENCHMARK TESTING
+### 5. ✅ PERFORMANCE & BENCHMARK TESTING (COMPLETED)
 
-**Framework: pytest-benchmark**
-- PyPI: https://pypi.org/project/pytest-benchmark/
-- Docs: https://pytest-benchmark.readthedocs.io/
+**Status:** 21 comprehensive benchmarks implemented in `tests/test_benchmark.py`
+- Demodulation modes (NFM, AM, USB, LSB)
+- Sample rate scaling (96kHz to 2.5MHz)
+- Chunk size optimization
+- AGC impact measurement
+- Bandwidth scaling
+- Real file processing
+- Sustained performance (1 second runs)
 
-**Installation:**
-```bash
-uv add --dev pytest-benchmark
-```
+**CI Integration:** Automated via benchmark-action/github-action-benchmark
+- Tracks performance over time
+- 10% regression alert threshold
+- Results viewable in GitHub Pages
 
-**Key features:**
-- Automatic calibration and warmup rounds
-- Statistical analysis (min/max/mean/stddev/median)
-- Regression detection via `--benchmark-compare`
-- JSON export for CI tracking
-- cProfile integration with `--benchmark-cprofile`
-
-**Example: Benchmark DSP stages**
-```python
-# tests/test_dsp_performance.py
-import numpy as np
-import pytest
-from iq_to_audio.processing import Decimator
-from iq_to_audio.decoders.nfm import QuadratureDemod, DeemphasisFilter
-from iq_to_audio.spectrum import compute_psd
-
-@pytest.fixture
-def synthetic_iq():
-    """1M samples of complex IQ data."""
-    return np.random.randn(1_000_000).astype(np.complex64)
-
-def test_decimator_throughput(benchmark, synthetic_iq):
-    """Benchmark decimation performance (critical path)."""
-    decimator = Decimator(factor=10)
-    result = benchmark(decimator.process, synthetic_iq)
-    assert result.size == synthetic_iq.size // 10
-
-def test_quadrature_demod_throughput(benchmark):
-    """Benchmark NFM quadrature demodulation."""
-    samples = np.exp(1j * np.cumsum(np.random.randn(500_000) * 0.1)).astype(np.complex64)
-    demod = QuadratureDemod()
-    result = benchmark(demod.process, samples)
-    assert result.size == samples.size
-
-def test_psd_computation_throughput(benchmark, synthetic_iq):
-    """Benchmark FFT/PSD computation (interactive mode bottleneck)."""
-    result = benchmark(compute_psd, synthetic_iq[:262144], 2_500_000.0, nfft=4096)
-    freqs, psd = result
-    assert freqs.size == 4096
-
-@pytest.mark.parametrize("nfft", [1024, 4096, 16384, 65536])
-def test_psd_scaling_with_fft_size(benchmark, nfft):
-    """Measure PSD performance vs FFT size."""
-    samples = np.random.randn(nfft).astype(np.complex64)
-    benchmark.group = f"psd_nfft_{nfft}"
-    benchmark(compute_psd, samples, 1_000_000.0, nfft=nfft)
-```
-
-**Running benchmarks:**
-```bash
-# Initial baseline
-uv run pytest tests/test_dsp_performance.py --benchmark-autosave
-
-# Compare to baseline (fail if >5% regression)
-uv run pytest tests/test_dsp_performance.py --benchmark-compare=0001 --benchmark-compare-fail=min:5%
-
-# Profile slowest test
-uv run pytest tests/test_dsp_performance.py::test_psd_computation_throughput --benchmark-cprofile=tottime
-```
-
-**CI integration (GitHub Actions):**
-```yaml
-# .github/workflows/benchmark.yml
-- name: Run performance benchmarks
-  run: |
-    uv run pytest tests/test_dsp_performance.py --benchmark-json=benchmark_results.json
-
-- name: Store benchmark results
-  uses: benchmark-action/github-action-benchmark@v1
-  with:
-    tool: 'pytest'
-    output-file-path: benchmark_results.json
-    github-token: ${{ secrets.GITHUB_TOKEN }}
-    auto-push: true
-```
-
-**Detecting regressions with Bencher:**
-- https://bencher.dev/learn/benchmarking/python/pytest-benchmark/
-- Tracks performance across PRs, alerts on degradation
-
-**References:**
-- https://pytest-benchmark.readthedocs.io/en/latest/usage.html
-- https://codspeed.io/blog/one-pytest-marker-to-track-the-performance-of-your-tests
+**Documentation:** See `tests/BENCHMARKS.md` for full details
 
 ---
 
@@ -986,17 +573,13 @@ if __name__ == "__main__":
 
 Run: `python generate_test_iq.py` → produces `.cf32` file for testing
 
-3. **Store test vectors in Git LFS** (if files >100MB):
-```bash
-# Install Git LFS
-brew install git-lfs
-git lfs install
-
-# Track large test files
-git lfs track "testfiles/*.wav"
-git add .gitattributes testfiles/
-git commit -m "Add test IQ captures via LFS"
-```
+3. **✅ Test file storage via Google Drive (IMPLEMENTED)**:
+Large test files (>100MB) are stored in Google Drive and automatically downloaded via:
+- Composite action: `.github/actions/download-test-fixtures/`
+- Python script: `scripts/download_test_fixtures.py`
+- Auto-triggered by pytest via `conftest.py` session fixture
+- Cached by SHA256 checksum to avoid redundant downloads
+- See `docs/GOOGLE_DRIVE_SETUP.md` for configuration
 
 #### 6.3 Parameterized Testing with Real Files
 
@@ -1021,208 +604,25 @@ def test_decoder_audio_quality_matrix(tmp_path, test_file, demod, expected_rms_r
 
 ---
 
-### 7. CI/CD INTEGRATION (GITHUB ACTIONS)
+### 7. ✅ CI/CD INTEGRATION (COMPLETED)
 
-#### 7.1 Headless Qt Testing Setup
+**Status:** Full CI/CD pipeline implemented in `.github/workflows/ci.yml`
 
-**Challenge:** PySide6 requires display server (X11/Wayland). GitHub Actions runners lack GUI.
+**Implemented features:**
+- ✅ Multi-platform testing (Ubuntu, Windows, macOS)
+- ✅ Headless Qt testing with xvfb
+- ✅ Coverage tracking (75% threshold, excludes GUI/CLI)
+- ✅ pytest-cov with Codecov integration
+- ✅ Ruff linting (Linux only)
+- ✅ Mypy type checking (Linux only)
+- ✅ Benchmark tracking with github-action-benchmark
+- ✅ PyInstaller smoke tests on all platforms
+- ✅ Google Drive test fixture downloads
 
-**Solution: Virtual framebuffer (xvfb)**
-
-**Required system packages (Ubuntu):**
-```yaml
-# .github/workflows/test.yml
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            xvfb \
-            x11-utils \
-            libxkbcommon-x11-0 \
-            libxcb-icccm4 \
-            libxcb-image0 \
-            libxcb-keysyms1 \
-            libxcb-randr0 \
-            libxcb-render-util0 \
-            libxcb-xinerama0 \
-            libxcb-xfixes0 \
-            libegl1 \
-            libxcb-cursor0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
-
-      - name: Install dependencies
-        run: uv sync --dev
-
-      - name: Run tests with xvfb
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          xvfb-run -a uv run pytest tests/ -v --tb=short
-```
-
-**Alternative: pytest-xvfb plugin** (auto-manages xvfb)
-```bash
-uv add --dev pytest-xvfb
-```
-Then in pytest.ini:
-```ini
-[pytest]
-xvfb_width = 1920
-xvfb_height = 1080
-xvfb_colordepth = 24
-```
-No manual xvfb-run needed—plugin handles it automatically.
-
-**Troubleshooting common issues:**
-- **ImportError: libEGL.so.1** → Install `libegl1`
-- **qt.qpa.plugin: Could not load Qt platform plugin** → Set `QT_QPA_PLATFORM=offscreen`
-- **Cannot open display** → Ensure xvfb is running before Qt import
-
-**References:**
-- pytest-qt troubleshooting: https://pytest-qt.readthedocs.io/en/latest/troubleshooting.html
-- GitHub Actions Qt setup: https://codito.in/xvfb-in-github-action/
-- Headless GUI testing: https://arbitrary-but-fixed.net/2022/01/21/headless-gui-github-actions.html
-
-#### 7.2 Complete CI Workflow Example
-
-```yaml
-# .github/workflows/ci.yml
-name: CI
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.10', '3.11', '3.12']
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg xvfb libxkbcommon-x11-0 libxcb-icccm4 \
-            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
-            libxcb-xinerama0 libxcb-xfixes0 libegl1 libxcb-cursor0
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
-
-      - name: Install dependencies
-        run: |
-          uv sync --dev
-
-      - name: Lint with ruff
-        run: |
-          uv run ruff check src/ tests/
-
-      - name: Type check with mypy
-        run: |
-          uv run mypy src/iq_to_audio --no-error-summary
-
-      - name: Run unit tests
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          xvfb-run -a uv run pytest tests/ -v --tb=short \
-            --cov=iq_to_audio --cov-report=xml --cov-branch
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          files: ./coverage.xml
-          flags: unittests
-          name: codecov-umbrella
-
-      - name: Run benchmarks
-        run: |
-          uv run pytest tests/test_dsp_performance.py --benchmark-json=bench.json
-
-      - name: Store benchmark results
-        uses: benchmark-action/github-action-benchmark@v1
-        if: github.ref == 'refs/heads/main'
-        with:
-          tool: 'pytest'
-          output-file-path: bench.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
-
-  macos-test:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install ffmpeg
-        run: brew install ffmpeg
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
-
-      - name: Install dependencies
-        run: uv sync --dev
-
-      - name: Run tests (native Qt on macOS)
-        run: |
-          uv run pytest tests/test_processing.py tests/test_cli_integration.py -v
-```
-
-#### 7.3 Coverage Reporting & Badge
-
-**Use pytest-cov to track coverage:**
-```bash
-uv add --dev pytest-cov
-uv run pytest --cov=iq_to_audio --cov-report=html --cov-branch
-```
-
-**View HTML report:**
-```bash
-open htmlcov/index.html
-```
-
-**Add coverage badge to README:**
-```markdown
-[![codecov](https://codecov.io/gh/yourusername/iq-to-audio/branch/main/graph/badge.svg)](https://codecov.io/gh/yourusername/iq-to-audio)
-```
-
-**Set coverage thresholds in pyproject.toml:**
-```toml
-[tool.pytest.ini_options]
-addopts = "--cov=iq_to_audio --cov-report=term-missing --cov-fail-under=80"
-```
-Fails CI if coverage drops below 80%.
-
-**References:**
-- pytest-cov docs: https://pytest-cov.readthedocs.io/
-- Codecov GitHub Action: https://github.com/codecov/codecov-action
+**Optimizations:**
+- Linting/type-checking run only on Linux (not platform-specific)
+- Caching for uv, ruff, mypy, pytest
+- Test fixtures cached by SHA256 checksum
 
 ---
 
@@ -1493,38 +893,40 @@ Any change to defaults fails test → explicit decision required.
 
 ### 10. TESTING BEST PRACTICES CHECKLIST
 
-**Before merging any PR:**
+**Before merging any PR (automated in CI):**
+- [x] `uv run ruff check --fix` passes on changed files (CI enforced)
+- [x] `uv run mypy <file>` clean for modified modules (CI enforced)
+- [x] `uv run pytest tests/ -v` passes (CI enforced)
+- [x] Coverage maintained at 75%+ (CI enforced)
+- [x] Benchmarks tracked automatically (CI enforced)
+
+**Manual checks:**
 - [ ] All modified modules have corresponding test coverage
-- [ ] `uv run ruff check --fix` passes on changed files
-- [ ] `uv run mypy <file>` clean for modified modules
-- [ ] `uv run pytest tests/test_<module>.py -v` passes
-- [ ] Coverage delta: `pytest --cov=iq_to_audio --cov-report=term-missing` (no decrease)
 - [ ] GUI changes: Add qtbot test in test_interactive_qt.py
 - [ ] DSP changes: Add property test with hypothesis (if applicable)
-- [ ] Performance-critical path: Add benchmark in test_dsp_performance.py
 - [ ] New decoder: Add integration test in test_cli_integration.py with synthetic IQ
 
-**Continuous improvement:**
-- Weekly: Review uncovered lines in coverage report, add targeted tests
-- Monthly: Run `mutmut` to detect weak tests
-- Per release: Update visual regression baselines if plots intentionally changed
-- After performance PR: Compare benchmarks with `--benchmark-compare`
+**Continuous improvement (future):**
+- Review uncovered lines in coverage report, add targeted tests
+- Run `mutmut` to detect weak tests (not yet configured)
+- Update visual regression baselines if plots intentionally changed (not yet implemented)
+- Compare benchmarks with `--benchmark-compare` (automated in CI)
 
 ---
 
-### 11. QUICK REFERENCE - COMMANDS
+### 11. QUICK REFERENCE - LOCAL TESTING COMMANDS
 
-**Run all tests:**
+**Run all tests (CI runs this automatically):**
 ```bash
 uv run pytest tests/ -v
 ```
 
 **Run specific test file:**
 ```bash
-uv run pytest tests/test_spectrum.py -v
+uv run pytest tests/test_<module>.py -v
 ```
 
-**Run with coverage:**
+**Run with coverage (automated in CI):**
 ```bash
 uv run pytest --cov=iq_to_audio --cov-report=html --cov-branch
 ```
@@ -1534,31 +936,23 @@ uv run pytest --cov=iq_to_audio --cov-report=html --cov-branch
 QT_QPA_PLATFORM=offscreen uv run pytest tests/test_interactive_qt.py
 ```
 
-**Run benchmarks:**
+**Run benchmarks (automated in CI on main branch):**
 ```bash
-uv run pytest tests/test_dsp_performance.py --benchmark-only
+uv run pytest tests/test_benchmark.py --benchmark-only
 ```
 
-**Compare benchmarks:**
+**Type check file (automated in CI):**
 ```bash
-uv run pytest tests/test_dsp_performance.py --benchmark-compare=0001
+uv run mypy src/iq_to_audio/<file>.py
 ```
 
-**Property-based tests (verbose):**
+**Lint and format (automated in CI):**
 ```bash
-uv run pytest tests/test_processing_properties.py -v --hypothesis-show-statistics
+uv run ruff check --fix src/iq_to_audio/<file>.py
+uv run ruff format src/iq_to_audio/<file>.py
 ```
 
-**Type check modified file:**
-```bash
-uv run mypy src/iq_to_audio/spectrum.py
-```
-
-**Lint and format:**
-```bash
-uv run ruff check --fix src/iq_to_audio/spectrum.py
-uv run ruff format src/iq_to_audio/spectrum.py
-```
+**Note:** Most of these run automatically in CI. Use locally for quick iteration before pushing.
 
 ---
 
@@ -1591,23 +985,34 @@ uv run ruff format src/iq_to_audio/spectrum.py
 
 ### 13. IMPLEMENTATION PRIORITY MATRIX
 
-| Priority | Module | Test Type | Estimated Effort | Risk if Untested |
-|----------|--------|-----------|------------------|------------------|
-| P0 | spectrum.py | Unit + Property | 4 hours | HIGH - FFT bugs silent |
-| P0 | decoders/common.py | Unit | 2 hours | HIGH - Affects all decoders |
-| P1 | preview.py | Integration | 2 hours | MEDIUM - User-facing errors |
-| P1 | interactive/workers.py | Qt signals | 3 hours | MEDIUM - Threading bugs |
-| P1 | progress.py | Unit | 1 hour | LOW - Simple interfaces |
-| P2 | interactive/widgets.py | Qt + Visual | 4 hours | MEDIUM - UI regressions |
-| P2 | decoders/am.py | Unit | 2 hours | LOW - Already in CLI tests |
-| P3 | visualize.py | Unit | 1 hour | LOW - Deprecated module |
+| Priority | Module | Test Type | Estimated Effort | Risk if Untested | Status |
+|----------|--------|-----------|------------------|------------------|--------|
+| ~~P0~~ | ~~CI/CD pipeline~~ | ~~Integration~~ | ~~--~~ | ~~--~~ | ✅ **DONE** |
+| ~~P0~~ | ~~Benchmarking~~ | ~~Performance~~ | ~~--~~ | ~~--~~ | ✅ **DONE** (21 tests) |
+| ~~P0~~ | ~~Coverage tracking~~ | ~~Infrastructure~~ | ~~--~~ | ~~--~~ | ✅ **DONE** (75%) |
+| P0 | spectrum.py | Unit + Property | 4 hours | HIGH - FFT bugs silent | ⏳ TODO |
+| P0 | decoders/common.py | Unit | 2 hours | HIGH - Affects all decoders | ⏳ TODO |
+| P1 | preview.py | Integration | 2 hours | MEDIUM - User-facing errors | ⏳ TODO |
+| P1 | interactive/workers.py | Qt signals | 3 hours | MEDIUM - Threading bugs | ⏳ TODO |
+| P1 | progress.py | Unit | 1 hour | LOW - Simple interfaces | ⏳ TODO |
+| P2 | interactive/widgets.py | Qt + Visual | 4 hours | MEDIUM - UI regressions | ⏳ TODO |
+| P2 | decoders/am.py | Unit | 2 hours | LOW - Already in CLI tests | ⏳ TODO |
+| P3 | visualize.py | Unit | 1 hour | LOW - Deprecated module | ⏳ TODO |
+| P3 | Property-based testing | Hypothesis | 3 hours | LOW - Nice to have | ⏳ TODO |
+| P3 | Visual regression | pytest-image-snapshot | 4 hours | LOW - Manual testing OK | ⏳ TODO |
 
-**Total implementation estimate: ~19 hours** (spread across 2-3 sprints)
+**Total remaining estimate: ~19 hours** for module coverage
+**Infrastructure:** ✅ Complete (CI/CD, benchmarks, coverage tracking)
 
-**Milestone 1 (Week 1):** P0 items + CI setup
-**Milestone 2 (Week 2):** P1 items + benchmark suite
-**Milestone 3 (Week 3):** P2 items + visual regression
-**Milestone 4 (Week 4):** Documentation, coverage >85%
+**Completed milestones:**
+- ✅ CI/CD setup with multi-platform testing
+- ✅ Comprehensive benchmark suite (21 tests across 7 groups)
+- ✅ Coverage tracking with 75% threshold
+- ✅ Linting and type-checking automation
+
+**Remaining work:**
+- P0-P2: Module-level test coverage for untested components
+- P3: Advanced testing techniques (property-based, visual regression)
 
 ---
 
