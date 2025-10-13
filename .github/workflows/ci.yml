@@ -175,6 +175,11 @@ jobs:
       - name: Install FFmpeg
         uses: AnimMouse/setup-ffmpeg@v1
 
+      - name: Install minimal Qt dependencies (for pytestqt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0
+
       - name: Cache uv dependencies
         uses: actions/cache@v4
         with:
@@ -190,12 +195,14 @@ jobs:
 
       - name: Run benchmarks
         continue-on-error: true
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           echo "Running performance benchmarks..."
           uv run pytest tests/test_benchmark.py \
             --benchmark-json=benchmark_results.json \
             --benchmark-columns=min,max,mean,median,stddev \
-            -p no:pytestqt \
+            --override-ini='addopts=-ra --strict-markers --tb=short' \
             -v || true
 
       - name: Display benchmark summary
