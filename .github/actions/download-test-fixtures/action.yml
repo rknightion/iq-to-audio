@@ -90,15 +90,23 @@ runs:
       run: |
         mkdir -p ~/.config/rclone
 
+        # Determine temp directory (cross-platform)
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          TEMP_DIR="$RUNNER_TEMP"
+          SERVICE_ACCOUNT_FILE="$TEMP_DIR/gdrive-service-account.json"
+        else
+          SERVICE_ACCOUNT_FILE="/tmp/gdrive-service-account.json"
+        fi
+
         # Write service account JSON to temp file
-        echo "$SERVICE_ACCOUNT_JSON" > /tmp/gdrive-service-account.json
+        echo "$SERVICE_ACCOUNT_JSON" > "$SERVICE_ACCOUNT_FILE"
 
         # Build rclone config
         cat > ~/.config/rclone/rclone.conf <<EOF
         [gdrive]
         type = drive
         scope = drive.readonly
-        service_account_file = /tmp/gdrive-service-account.json
+        service_account_file = $SERVICE_ACCOUNT_FILE
         EOF
 
         # Add custom client_id if provided to avoid rate limits
@@ -111,6 +119,7 @@ runs:
         fi
 
         echo "rclone configuration created"
+        echo "Service account file: $SERVICE_ACCOUNT_FILE"
 
     - name: Download fixtures from Google Drive
       id: download
@@ -122,28 +131,57 @@ runs:
         echo "Downloading test fixtures from Google Drive..."
         echo "File ID: ${{ inputs.file-id }}"
 
-        # Download using rclone
-        # Use --drive-acknowledge-abuse in case the file is flagged
-        rclone copy \
+        # First, try to find the file in shared space by listing files
+        echo "Searching for file in shared drive space..."
+        rclone lsf --drive-shared-with-me gdrive: -R --files-only -vv || true
+
+        # Method 1: Try to copy using the file ID directly as a file reference
+        # In rclone, you can access a file by ID using the format: {file_id}
+        echo "Attempting to download file by ID..."
+        if rclone copyto \
+          --drive-shared-with-me \
           --drive-acknowledge-abuse \
           --progress \
           --transfers 1 \
-          "gdrive:${{ inputs.file-id }}" \
-          "${{ inputs.destination-dir }}/" \
-          -v
+          "gdrive:{${{ inputs.file-id }}}" \
+          "${{ inputs.destination-dir }}/iq-to-audio-fixtures.tar.xz" \
+          -vv 2>&1 | tee /tmp/rclone.log; then
+          echo "Download successful via file ID"
+        else
+          # Method 2: Try to find and copy by filename from shared space
+          echo "Method 1 failed, trying to find file by searching shared space..."
 
-        # Find the downloaded file (rclone uses the Drive filename)
-        DOWNLOADED_FILE=$(find "${{ inputs.destination-dir }}" -name "*.tar.xz" -type f -print -quit)
+          # List all shared files and try to find ours
+          FOUND_FILE=$(rclone lsf --drive-shared-with-me gdrive: -R --files-only | grep -E "fixtures.*\.tar\.xz|iq-to-audio.*\.tar\.xz" | head -1 || true)
 
-        if [ -z "$DOWNLOADED_FILE" ]; then
-          echo "ERROR: Downloaded file not found"
-          exit 1
+          if [ -n "$FOUND_FILE" ]; then
+            echo "Found file: $FOUND_FILE"
+            rclone copy \
+              --drive-shared-with-me \
+              --drive-acknowledge-abuse \
+              --progress \
+              --transfers 1 \
+              "gdrive:$FOUND_FILE" \
+              "${{ inputs.destination-dir }}/" \
+              -vv
+
+            # Rename if needed
+            BASENAME=$(basename "$FOUND_FILE")
+            if [ "$BASENAME" != "iq-to-audio-fixtures.tar.xz" ]; then
+              mv "${{ inputs.destination-dir }}/$BASENAME" "${{ inputs.destination-dir }}/iq-to-audio-fixtures.tar.xz"
+            fi
+          else
+            echo "ERROR: Could not find fixture file in shared space"
+            echo "Available files:"
+            rclone lsf --drive-shared-with-me gdrive: -R --files-only
+            exit 1
+          fi
         fi
 
-        # Rename to expected name if needed
         EXPECTED_FILE="${{ inputs.destination-dir }}/iq-to-audio-fixtures.tar.xz"
-        if [ "$DOWNLOADED_FILE" != "$EXPECTED_FILE" ]; then
-          mv "$DOWNLOADED_FILE" "$EXPECTED_FILE"
+        if [ ! -f "$EXPECTED_FILE" ]; then
+          echo "ERROR: Download failed - file not found at $EXPECTED_FILE"
+          exit 1
         fi
 
         echo "Download complete: $EXPECTED_FILE"
@@ -181,6 +219,10 @@ runs:
       if: always()
       shell: bash
       run: |
-        # Remove sensitive files
-        rm -f /tmp/gdrive-service-account.json
-        rm -f ~/.config/rclone/rclone.conf
+        # Remove sensitive files (cross-platform)
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          rm -f "$RUNNER_TEMP/gdrive-service-account.json" || true
+        else
+          rm -f /tmp/gdrive-service-account.json || true
+        fi
+        rm -f ~/.config/rclone/rclone.conf || true

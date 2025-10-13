@@ -83,14 +83,27 @@ The setup uses **rclone** with **service account authentication** for non-intera
 
 ### 2.5 Share Drive File with Service Account
 
+**⚠️ CRITICAL STEP**: The service account must have access to the file!
+
 1. Open the JSON key file you just downloaded
 2. Find the `client_email` field (looks like `iq-to-audio-ci@project-id.iam.gserviceaccount.com`)
-3. In Google Drive, right-click your `iq-to-audio-fixtures.tar.xz` file
-4. Select **Share**
-5. Paste the service account email address
-6. Set permission to **Viewer**
-7. Uncheck "Notify people"
-8. Click **Share**
+3. **Copy the entire email address**
+4. In Google Drive, **right-click** your `iq-to-audio-fixtures.tar.xz` file
+5. Select **Share**
+6. **Paste the service account email address** into the "Add people and groups" field
+7. Set permission to **Viewer** (default)
+8. Uncheck "Notify people" (optional, to avoid sending an email to the service account)
+9. Click **Share**
+
+**Verification**:
+- The file should now show the service account email in the "Who has access" section
+- The permission should be "Viewer"
+- If the file is in a folder, you don't need to share the folder—just the file is enough
+
+**Common issues**:
+- If you don't share the file, you'll get "directory not found" errors
+- Make sure you're sharing the actual file, not a shortcut to it
+- The service account email must be exactly as it appears in the JSON file
 
 ## Part 3: (Optional) Create Custom OAuth Client to Avoid Rate Limits
 
@@ -193,11 +206,23 @@ If you want to test locally:
 
 ## Troubleshooting
 
+### "directory not found" error
+
+**This is the most common error** and means the service account cannot access the file.
+
+**Solutions**:
+1. **Verify file sharing**: Open the file in Google Drive, click "Share", and confirm the service account email appears in "Who has access"
+2. **Check the service account email**: Open your JSON key file and verify the `client_email` field matches exactly what you shared
+3. **Re-share the file**: Remove the service account from sharing and add it again
+4. **Check file location**: If the file is in a Team Drive/Shared Drive, you may need different permissions
+5. **Test manually**: Try running the download script locally with the same credentials to see detailed error messages
+
 ### "Permission denied" or "File not found"
 
-- Verify the service account email has "Viewer" access to the Drive file
-- Check that `GDRIVE_FILE_ID` is correct
+- Verify the service account email has "Viewer" access to the Drive file (see "directory not found" above)
+- Check that `GDRIVE_FILE_ID` is correct (it should be the alphanumeric string from the Drive URL)
 - Ensure the file is not in a restricted folder
+- Make sure you're not sharing a shortcut—share the actual file
 
 ### "Rate limited" errors
 

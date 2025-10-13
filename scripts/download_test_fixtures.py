@@ -103,21 +103,24 @@ def download_fixture(
 
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    # Download using rclone
+    # Download using rclone with --drive-shared-with-me flag
     LOG.info("Downloading test fixtures from Google Drive (file_id: %s)", file_id)
 
+    # Method 1: Try to download by file ID using {file_id} format
     try:
+        LOG.info("Attempting download using file ID...")
         result = subprocess.run(
             [
                 "rclone",
-                "copy",
+                "copyto",
+                "--drive-shared-with-me",
                 "--drive-acknowledge-abuse",
                 "--progress",
                 "--transfers",
                 "1",
-                f"gdrive:{file_id}",
-                str(destination.parent),
-                "-v",
+                f"gdrive:{{{file_id}}}",
+                str(destination),
+                "-vv",
             ],
             check=True,
             capture_output=True,
@@ -125,21 +128,73 @@ def download_fixture(
         )
         LOG.info("rclone output: %s", result.stdout)
     except subprocess.CalledProcessError as e:
-        LOG.error("rclone failed: %s", e.stderr)
+        LOG.warning("Method 1 (file ID) failed: %s", e.stderr)
+
+        # Method 2: Try to find file by searching shared space
+        LOG.info("Attempting to find file by searching shared space...")
+        try:
+            # List shared files
+            result = subprocess.run(
+                [
+                    "rclone",
+                    "lsf",
+                    "--drive-shared-with-me",
+                    "gdrive:",
+                    "-R",
+                    "--files-only",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # Find our file
+            files = result.stdout.strip().split("\n")
+            found_file = None
+            for file in files:
+                if "fixtures" in file.lower() and file.endswith(".tar.xz"):
+                    found_file = file
+                    break
+
+            if not found_file:
+                LOG.error("Could not find fixture file in shared space")
+                LOG.error("Available files: %s", files)
+                return False
+
+            LOG.info("Found file: %s", found_file)
+
+            # Download the found file
+            result = subprocess.run(
+                [
+                    "rclone",
+                    "copy",
+                    "--drive-shared-with-me",
+                    "--drive-acknowledge-abuse",
+                    "--progress",
+                    "--transfers",
+                    "1",
+                    f"gdrive:{found_file}",
+                    str(destination.parent),
+                    "-vv",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            # Rename if needed
+            downloaded_file = destination.parent / Path(found_file).name
+            if downloaded_file != destination and downloaded_file.exists():
+                downloaded_file.rename(destination)
+                LOG.info("Renamed %s to %s", downloaded_file, destination)
+
+        except subprocess.CalledProcessError as e:
+            LOG.error("rclone failed: %s", e.stderr)
+            return False
+
+    if not destination.exists():
+        LOG.error("Download failed - file not found at %s", destination)
         return False
-
-    # Find the downloaded file (rclone uses the Drive filename)
-    downloaded_files = list(destination.parent.glob("*.tar.xz"))
-    if not downloaded_files:
-        LOG.error("Downloaded file not found in %s", destination.parent)
-        return False
-
-    downloaded_file = downloaded_files[0]
-
-    # Rename to expected name if needed
-    if downloaded_file != destination:
-        downloaded_file.rename(destination)
-        LOG.info("Renamed %s to %s", downloaded_file, destination)
 
     LOG.info("Download complete: %s (%.2f MB)", destination, destination.stat().st_size / 1024 / 1024)
 
