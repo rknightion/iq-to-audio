@@ -16,6 +16,7 @@ from .processing import (
     ProcessingResult,
 )
 from .progress import TqdmProgressSink
+from .squelch import AudioPostOptions, SquelchConfig, gather_audio_targets, process_audio_batch
 
 LOG = logging.getLogger("iq_to_audio")
 
@@ -212,6 +213,87 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run in CLI mode (default launches the interactive GUI).",
     )
     parser.add_argument(
+        "--audio-post",
+        dest="audio_post_path",
+        type=Path,
+        help="Apply audio post-processing (auto squelch) to the given file or directory.",
+    )
+    parser.add_argument(
+        "--audio-post-mode",
+        dest="audio_post_mode",
+        choices=["adaptive", "static", "transient", "webrtc"],
+        default="adaptive",
+        help="Squelch algorithm to use when --audio-post is supplied (default: adaptive).",
+    )
+    parser.add_argument(
+        "--audio-post-noise-floor",
+        dest="audio_post_noise_floor",
+        type=float,
+        help="Manual noise floor in dBFS for --audio-post (auto-detected by default).",
+    )
+    parser.add_argument(
+        "--audio-post-noise-percentile",
+        dest="audio_post_percentile",
+        type=float,
+        default=0.2,
+        help="Percentile used for auto noise floor estimation (default: 0.2 → 20th percentile).",
+    )
+    parser.add_argument(
+        "--audio-post-threshold",
+        dest="audio_post_threshold",
+        type=float,
+        default=6.0,
+        help="Margin above noise floor in dBFS for the squelch threshold (default: 6).",
+    )
+    parser.add_argument(
+        "--audio-post-webrtc-mode",
+        dest="audio_post_webrtc_mode",
+        type=int,
+        choices=[0, 1, 2, 3],
+        default=2,
+        help="WebRTC VAD aggressiveness (0=least, 3=most) when using --audio-post-mode=webrtc (default: 2).",
+    )
+    parser.add_argument(
+        "--audio-post-webrtc-frame-ms",
+        dest="audio_post_webrtc_frame_ms",
+        type=int,
+        choices=[10, 20, 30],
+        default=20,
+        help="WebRTC VAD frame duration in milliseconds (default: 20).",
+    )
+    parser.add_argument(
+        "--audio-post-lead",
+        dest="audio_post_lead",
+        type=float,
+        default=0.15,
+        help="Lead-in seconds retained when trimming silence (default: 0.15).",
+    )
+    parser.add_argument(
+        "--audio-post-trail",
+        dest="audio_post_trail",
+        type=float,
+        default=0.35,
+        help="Trailing seconds retained when trimming silence (default: 0.35).",
+    )
+    parser.add_argument(
+        "--audio-post-no-trim",
+        dest="audio_post_trim",
+        action="store_false",
+        help="Disable silence trimming when performing --audio-post.",
+    )
+    parser.add_argument(
+        "--audio-post-overwrite",
+        dest="audio_post_overwrite",
+        action="store_true",
+        help="Overwrite original files when performing --audio-post (default writes -cleaned copies).",
+    )
+    parser.add_argument(
+        "--audio-post-suffix",
+        dest="audio_post_suffix",
+        default="-cleaned",
+        help="Suffix to append when writing cleaned copies (default: -cleaned).",
+    )
+    parser.add_argument(
         "--verbose",
         dest="verbose",
         action="store_true",
@@ -224,6 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the iq-to-audio version and exit.",
     )
     parser.set_defaults(agc_enabled=True)
+    parser.set_defaults(audio_post_trim=True)
     return parser
 
 
@@ -233,11 +316,83 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cli and args.interactive:
         parser.error("--cli cannot be combined with --interactive.")
+    if args.audio_post_path and args.interactive:
+        parser.error("--audio-post cannot be combined with --interactive.")
+    if args.audio_post_path and args.benchmark:
+        parser.error("--audio-post cannot be combined with --benchmark.")
+    if args.audio_post_path and not 0.0 <= args.audio_post_percentile <= 1.0:
+        parser.error("--audio-post-noise-percentile must be between 0.0 and 1.0.")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    if args.audio_post_path:
+        squelch_config = SquelchConfig(
+            method=args.audio_post_mode,
+            auto_noise_floor=args.audio_post_noise_floor is None,
+            manual_noise_floor_db=args.audio_post_noise_floor,
+            noise_floor_percentile=args.audio_post_percentile,
+            threshold_margin_db=args.audio_post_threshold,
+            trim_silence=args.audio_post_trim,
+            trim_lead_seconds=args.audio_post_lead,
+            trim_trail_seconds=args.audio_post_trail,
+            webrtc_mode=args.audio_post_webrtc_mode,
+            webrtc_frame_ms=args.audio_post_webrtc_frame_ms,
+        )
+        post_options = AudioPostOptions(
+            config=squelch_config,
+            overwrite=args.audio_post_overwrite,
+            cleaned_suffix=args.audio_post_suffix,
+        )
+        try:
+            post_targets = gather_audio_targets(args.audio_post_path, post_options)
+        except Exception as exc:
+            LOG.error("Unable to enumerate audio targets: %s", exc)
+            return 1
+        if not post_targets:
+            LOG.error("No audio files found at %s.", args.audio_post_path)
+            return 1
+        LOG.info(
+            "Audio post-processing %d file(s) via %s squelch (%s).",
+            len(post_targets),
+            squelch_config.method,
+            "overwrite" if post_options.overwrite else f"suffix '{post_options.cleaned_suffix}'",
+        )
+
+        def _progress(completed: int, total: int, current: Path) -> None:
+            if total <= 0:
+                LOG.info("Processing %s", current)
+                return
+            completed = max(0, min(completed, total))
+            pct = (completed / total) * 100.0
+            LOG.info(" [%6.2f%%] %s", pct, current)
+
+        summary = process_audio_batch(post_targets, post_options, progress_cb=_progress)
+        for item in summary.results:
+            retained_pct = item.retained_ratio * 100.0
+            LOG.info(
+                "%s -> %s | %.2fs → %.2fs | %.1f%% retained | floor %.1f dB | threshold %.1f dB",
+                item.input_path,
+                item.output_path,
+                item.duration_in,
+                item.duration_out,
+                retained_pct,
+                item.noise_floor_db,
+                item.threshold_db,
+            )
+        if summary.errors:
+            LOG.error("Audio post-processing failed on %d file(s).", summary.failed)
+            for path, error in summary.errors:
+                LOG.error(" - %s: %s", path, error)
+            return 1
+        LOG.info(
+            "Audio post-processing complete: Δsize %+d bytes, Δduration %+0.2f s.",
+            summary.aggregate_size_delta(),
+            summary.aggregate_duration_delta(),
+        )
+        return 0
 
     frequencies: list[float] = list(args.target_freqs or [])
 
