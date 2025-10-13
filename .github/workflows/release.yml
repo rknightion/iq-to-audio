@@ -357,7 +357,7 @@ jobs:
       # Trigger Docker build if not already built
       - name: Trigger Docker build
         if: steps.docker.outputs.docker_available == 'false'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v8
         with:
           script: |
             await github.rest.actions.createWorkflowDispatch({
