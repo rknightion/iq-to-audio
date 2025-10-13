@@ -102,9 +102,14 @@ class AudioPostPage(QtWidgets.QWidget):
     def _build_options_panel(self) -> PanelGroup:
         panel = PanelGroup("Auto squelch & cleanup")
         panel_layout = QtWidgets.QVBoxLayout()
-        panel_layout.setSpacing(12)
+        metrics = self.fontMetrics()
+        base_spacing = max(12, int(metrics.height() * 1.15))
+        row_spacing = max(8, int(metrics.height() * 0.8))
+        panel_layout.setSpacing(base_spacing)
 
         method_row = QtWidgets.QHBoxLayout()
+        method_row.setContentsMargins(0, 0, 0, 0)
+        method_row.setSpacing(row_spacing)
         method_row.addWidget(QtWidgets.QLabel("Squelch method:"))
         self.method_combo = QtWidgets.QComboBox()
         self.method_combo.addItem("Adaptive (voice)", "adaptive")
@@ -114,8 +119,11 @@ class AudioPostPage(QtWidgets.QWidget):
         method_row.addWidget(self.method_combo, stretch=1)
         panel_layout.addLayout(method_row)
         self._control_widgets.append(self.method_combo)
+        self._elevate_height(self.method_combo)
 
         noise_mode_row = QtWidgets.QHBoxLayout()
+        noise_mode_row.setContentsMargins(0, 0, 0, 0)
+        noise_mode_row.setSpacing(row_spacing)
         noise_mode_row.addWidget(QtWidgets.QLabel("Noise floor mode:"))
         self.noise_mode_combo = QtWidgets.QComboBox()
         self.noise_mode_combo.addItem("Auto detect (percentile)")
@@ -123,8 +131,11 @@ class AudioPostPage(QtWidgets.QWidget):
         noise_mode_row.addWidget(self.noise_mode_combo, stretch=1)
         panel_layout.addLayout(noise_mode_row)
         self._control_widgets.append(self.noise_mode_combo)
+        self._elevate_height(self.noise_mode_combo)
 
         manual_row = QtWidgets.QHBoxLayout()
+        manual_row.setContentsMargins(0, 0, 0, 0)
+        manual_row.setSpacing(row_spacing)
         manual_row.addWidget(QtWidgets.QLabel("Manual floor (dBFS):"))
         self.noise_floor_spin = QtWidgets.QDoubleSpinBox()
         self.noise_floor_spin.setRange(-140.0, 0.0)
@@ -136,8 +147,11 @@ class AudioPostPage(QtWidgets.QWidget):
         manual_row.addStretch(1)
         panel_layout.addLayout(manual_row)
         self._control_widgets.append(self.noise_floor_spin)
+        self._elevate_height(self.noise_floor_spin)
 
         auto_row = QtWidgets.QHBoxLayout()
+        auto_row.setContentsMargins(0, 0, 0, 0)
+        auto_row.setSpacing(row_spacing)
         auto_row.addWidget(QtWidgets.QLabel("Auto percentile:"))
         self.percentile_spin = QtWidgets.QDoubleSpinBox()
         self.percentile_spin.setRange(0.01, 1.0)
@@ -149,8 +163,11 @@ class AudioPostPage(QtWidgets.QWidget):
         auto_row.addStretch(1)
         panel_layout.addLayout(auto_row)
         self._control_widgets.append(self.percentile_spin)
+        self._elevate_height(self.percentile_spin)
 
         margin_row = QtWidgets.QHBoxLayout()
+        margin_row.setContentsMargins(0, 0, 0, 0)
+        margin_row.setSpacing(row_spacing)
         margin_row.addWidget(QtWidgets.QLabel("Threshold margin (dB):"))
         self.margin_spin = QtWidgets.QDoubleSpinBox()
         self.margin_spin.setRange(0.0, 30.0)
@@ -160,11 +177,12 @@ class AudioPostPage(QtWidgets.QWidget):
         margin_row.addStretch(1)
         panel_layout.addLayout(margin_row)
         self._control_widgets.append(self.margin_spin)
+        self._elevate_height(self.margin_spin)
 
         self.webrtc_row_widget = QtWidgets.QWidget()
         webrtc_row = QtWidgets.QHBoxLayout(self.webrtc_row_widget)
         webrtc_row.setContentsMargins(0, 0, 0, 0)
-        webrtc_row.setSpacing(8)
+        webrtc_row.setSpacing(row_spacing)
         webrtc_row.addWidget(QtWidgets.QLabel("WebRTC aggressiveness:"))
         self.webrtc_mode_combo = QtWidgets.QComboBox()
         self.webrtc_mode_combo.addItem("0 — Lowest (sensitive)", 0)
@@ -172,16 +190,20 @@ class AudioPostPage(QtWidgets.QWidget):
         self.webrtc_mode_combo.addItem("2 — Balanced", 2)
         self.webrtc_mode_combo.addItem("3 — Highest (strict)", 3)
         webrtc_row.addWidget(self.webrtc_mode_combo)
+        self._elevate_height(self.webrtc_mode_combo)
         webrtc_row.addWidget(QtWidgets.QLabel("Frame (ms):"))
         self.webrtc_frame_combo = QtWidgets.QComboBox()
         for frame_ms in (10, 20, 30):
             self.webrtc_frame_combo.addItem(f"{frame_ms}", frame_ms)
         webrtc_row.addWidget(self.webrtc_frame_combo)
+        self._elevate_height(self.webrtc_frame_combo)
         webrtc_row.addStretch(1)
         panel_layout.addWidget(self.webrtc_row_widget)
         self._control_widgets.extend([self.webrtc_mode_combo, self.webrtc_frame_combo])
 
         trim_row = QtWidgets.QHBoxLayout()
+        trim_row.setContentsMargins(0, 0, 0, 0)
+        trim_row.setSpacing(row_spacing)
         self.trim_silence_check = QtWidgets.QCheckBox("Trim silence after squelch")
         self.trim_silence_check.setChecked(True)
         trim_row.addWidget(self.trim_silence_check)
@@ -193,6 +215,7 @@ class AudioPostPage(QtWidgets.QWidget):
         self.lead_in_spin.setSingleStep(0.05)
         self.lead_in_spin.setValue(0.15)
         trim_row.addWidget(self.lead_in_spin)
+        self._elevate_height(self.lead_in_spin)
 
         self.trailing_spin = QtWidgets.QDoubleSpinBox()
         self.trailing_spin.setPrefix("Trailing ")
@@ -201,6 +224,7 @@ class AudioPostPage(QtWidgets.QWidget):
         self.trailing_spin.setSingleStep(0.05)
         self.trailing_spin.setValue(0.35)
         trim_row.addWidget(self.trailing_spin)
+        self._elevate_height(self.trailing_spin)
         trim_row.addStretch(1)
         panel_layout.addLayout(trim_row)
         self._control_widgets.extend([self.trim_silence_check, self.lead_in_spin, self.trailing_spin])
@@ -273,6 +297,11 @@ class AudioPostPage(QtWidgets.QWidget):
         self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.results_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.results_table.setMinimumHeight(200)
+        row_height = int(self.fontMetrics().height() * 1.6)
+        vheader = self.results_table.verticalHeader()
+        vheader.setDefaultSectionSize(row_height)
+        vheader.setMinimumSectionSize(row_height)
+        self.results_table.setStyleSheet("QTableWidget::item { padding: 4px 6px; }")
         panel_layout.addWidget(self.results_table, stretch=1)
 
         self.summary_label = QtWidgets.QLabel("Run a cleanup to populate results.")
@@ -581,6 +610,13 @@ class AudioPostPage(QtWidgets.QWidget):
         if tooltip:
             item.setToolTip(tooltip)
         self.results_table.setItem(row, column, item)
+
+    def _elevate_height(self, widget: QtWidgets.QWidget) -> None:
+        metrics = self.fontMetrics()
+        height = max(int(metrics.height() * 1.6), widget.sizeHint().height() + 4)
+        widget.setMinimumHeight(height)
+        if isinstance(widget, (QtWidgets.QComboBox, QtWidgets.QAbstractSpinBox)):
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
 
 class DigitalPostPage(QtWidgets.QWidget):
