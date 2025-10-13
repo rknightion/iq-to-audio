@@ -48,7 +48,7 @@ jobs:
             build_args: ""
 
           # macOS builds (both Intel and Apple Silicon)
-          - runner: macos-latest  # Intel runners
+          - runner: macos-15-intel  # Intel runners
             platform: macos
             arch: x86_64
             build_args: "IQ_TO_AUDIO_TARGET_ARCH=x86_64"
@@ -89,9 +89,22 @@ jobs:
       - name: Generate platform icons
         run: uv run python tools/generate_app_icons.py
 
+      # macOS-specific: Set up signing environment variables
+      - name: Configure macOS signing secrets
+        if: matrix.platform == 'macos'
+        env:
+          MACOS_CODESIGN_CERT_BASE64: ${{ secrets.MACOS_CODESIGN_CERT_BASE64 }}
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          MACOS_NOTARIZE_USER: ${{ secrets.MACOS_NOTARIZE_USER }}
+        run: |
+          # Export secrets to GITHUB_ENV for use in subsequent if conditions
+          echo "HAS_CODESIGN_CERT=$([[ -n "$MACOS_CODESIGN_CERT_BASE64" ]] && echo 'true' || echo 'false')" >> "$GITHUB_ENV"
+          echo "HAS_CODESIGN_IDENTITY=$([[ -n "$MACOS_CODESIGN_IDENTITY" ]] && echo 'true' || echo 'false')" >> "$GITHUB_ENV"
+          echo "HAS_NOTARIZE_USER=$([[ -n "$MACOS_NOTARIZE_USER" ]] && echo 'true' || echo 'false')" >> "$GITHUB_ENV"
+
       # macOS-specific: Import signing certificate
       - name: Import macOS signing certificate
-        if: matrix.platform == 'macos' && secrets.MACOS_CODESIGN_CERT_BASE64 != ''
+        if: matrix.platform == 'macos' && env.HAS_CODESIGN_CERT == 'true'
         env:
           MACOS_CODESIGN_CERT_BASE64: ${{ secrets.MACOS_CODESIGN_CERT_BASE64 }}
           MACOS_CODESIGN_CERT_PASSWORD: ${{ secrets.MACOS_CODESIGN_CERT_PASSWORD }}
@@ -105,7 +118,7 @@ jobs:
           rm /tmp/developerid.p12
 
       - name: Configure macOS codesign identity
-        if: matrix.platform == 'macos' && secrets.MACOS_CODESIGN_IDENTITY != ''
+        if: matrix.platform == 'macos' && env.HAS_CODESIGN_IDENTITY == 'true'
         env:
           MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
         run: echo "IQ_TO_AUDIO_CODESIGN_IDENTITY=$MACOS_CODESIGN_IDENTITY" >> "$GITHUB_ENV"
@@ -131,7 +144,7 @@ jobs:
           spctl -a -vvv -t exec dist/iq-to-audio.app || true
 
       - name: Notarize macOS app bundle
-        if: matrix.platform == 'macos' && secrets.MACOS_NOTARIZE_USER != ''
+        if: matrix.platform == 'macos' && env.HAS_NOTARIZE_USER == 'true'
         env:
           MACOS_NOTARIZE_USER: ${{ secrets.MACOS_NOTARIZE_USER }}
           MACOS_NOTARIZE_PASSWORD: ${{ secrets.MACOS_NOTARIZE_PASSWORD }}
