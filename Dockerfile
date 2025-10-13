@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.19
 # Multi-stage Dockerfile for iq-to-audio
 # Supports both CLI and GUI modes (GUI requires X11 forwarding)
 
