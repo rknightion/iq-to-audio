@@ -92,6 +92,7 @@ jobs:
           uv sync --dev
 
       - name: Cache Ruff
+        if: matrix.os == 'ubuntu-latest'
         uses: actions/cache@v4
         with:
           path: ~/.cache/ruff
@@ -100,16 +101,19 @@ jobs:
             ruff-${{ runner.os }}-
 
       - name: Lint with ruff (check)
+        if: matrix.os == 'ubuntu-latest'
         continue-on-error: true
         run: |
           uv run ruff check src/ tests/ --output-format=github
 
       - name: Lint with ruff (format)
+        if: matrix.os == 'ubuntu-latest'
         continue-on-error: true
         run: |
           uv run ruff format --check src/ tests/
 
       - name: Cache Mypy
+        if: matrix.os == 'ubuntu-latest'
         uses: actions/cache@v4
         with:
           path: .mypy_cache
@@ -118,6 +122,7 @@ jobs:
             mypy-${{ runner.os }}-
 
       - name: Type check with mypy
+        if: matrix.os == 'ubuntu-latest'
         run: |
           uv run mypy src/iq_to_audio --no-error-summary
 

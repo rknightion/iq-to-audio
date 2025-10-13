@@ -57,12 +57,17 @@ def parse_center_frequency(path: Path) -> Optional[float]:
 
 
 def _candidate_names(base: str) -> tuple[str, ...]:
-    if sys.platform.startswith("win"):
-        base_lower = base.lower()
-        if base_lower.endswith(".exe"):
-            return (base,)
-        return (base, f"{base}.exe")
-    return (base,)
+    """Return candidate executable names (adds .exe on Windows if needed)."""
+    is_windows = sys.platform.startswith("win")
+
+    if not is_windows:
+        return (base,)
+
+    # Windows: check if already has .exe extension
+    base_lower = base.lower()
+    if base_lower.endswith(".exe"):
+        return (base,)
+    return (base, f"{base}.exe")
 
 
 def _env_override_path(env_var: str, *, base: str) -> Path | None:
