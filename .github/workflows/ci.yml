@@ -192,7 +192,11 @@ jobs:
         continue-on-error: true
         run: |
           echo "Running performance benchmarks..."
-          uv run pytest tests/test_benchmark.py --benchmark-json=benchmark_results.json --benchmark-columns=min,max,mean,median,stddev -v || true
+          uv run pytest tests/test_benchmark.py \
+            --benchmark-json=benchmark_results.json \
+            --benchmark-columns=min,max,mean,median,stddev \
+            -p no:pytestqt \
+            -v || true
 
       - name: Display benchmark summary
         if: always()

@@ -6,14 +6,23 @@ This document describes the performance benchmarks tracked over time for the iq-
 
 ```bash
 # Run all benchmarks and save results
-uv run pytest tests/test_benchmark.py --benchmark-json=benchmark_results.json
+uv run pytest tests/test_benchmark.py \
+  --benchmark-json=benchmark_results.json \
+  -p no:pytestqt
 
 # Run and display comparison table
-uv run pytest tests/test_benchmark.py --benchmark-only
+uv run pytest tests/test_benchmark.py \
+  --benchmark-only \
+  -p no:pytestqt
 
 # Run specific group
-uv run pytest tests/test_benchmark.py -m benchmark --benchmark-group=demod-synthetic
+uv run pytest tests/test_benchmark.py \
+  -m benchmark \
+  --benchmark-group=demod-synthetic \
+  -p no:pytestqt
 ```
+
+**Note**: The `-p no:pytestqt` flag disables the Qt plugin, which isn't needed for benchmarks and avoids Qt dependency issues.
 
 ## Benchmark Groups
 
