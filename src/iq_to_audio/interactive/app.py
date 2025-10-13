@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QStackedWidget,
     QWidget,
 )
 
@@ -236,6 +237,14 @@ class InteractiveWindow(QMainWindow):
         self.waterfall_options_panel: WaterfallOptionsPanel | None = None
 
         self.toolbar_widget: QtWidgets.QToolBar | None = None
+        self.nav_toolbar: QtWidgets.QToolBar | None = None
+        self.page_stack: QStackedWidget | None = None
+        self.nav_actions: dict[int, QtGui.QAction] = {}
+        self.capture_page_index: int = 0
+        self.audio_post_page_index: int = 0
+        self.digital_post_page_index: int = 0
+        self.audio_post_page: AudioPostPage | None = None
+        self.digital_post_page: DigitalPostPage | None = None
         self.main_splitter: QSplitter | None = None
         self.preview_splitter: QSplitter | None = None
 
@@ -267,6 +276,25 @@ class InteractiveWindow(QMainWindow):
         self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
 
     def _build_ui(self) -> None:
+        stack = QStackedWidget()
+        stack.setObjectName("interactivePageStack")
+        self.page_stack = stack
+
+        capture_page = self._build_capture_page()
+        self.capture_page_index = stack.addWidget(capture_page)
+
+        self.audio_post_page = AudioPostPage(state=self.state)
+        self.audio_post_page.process_requested.connect(self._on_audio_post_requested)
+        self.audio_post_page_index = stack.addWidget(self.audio_post_page)
+
+        self.digital_post_page = DigitalPostPage(state=self.state)
+        self.digital_post_page_index = stack.addWidget(self.digital_post_page)
+
+        stack.setCurrentIndex(self.capture_page_index)
+        stack.currentChanged.connect(self._on_page_changed)
+        self.setCentralWidget(stack)
+
+    def _build_capture_page(self) -> QWidget:
         splitter = LockedSplitter(Qt.Orientation.Horizontal, locked_handles={1})
         splitter.setObjectName("interactiveMainSplitter")
         splitter.setChildrenCollapsible(False)
@@ -363,18 +391,60 @@ class InteractiveWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
 
-        self.setCentralWidget(splitter)
         self.main_splitter = splitter
         self.preview_splitter = preview_splitter
 
         self._connect_panel_signals()
+        container = QWidget()
+        container.setObjectName("interactiveCapturePage")
+        container_layout = QtWidgets.QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+        container_layout.addWidget(splitter)
+        return container
+
+    def _build_navigation(self) -> None:
+        if self.page_stack is None:
+            return
+        nav_toolbar = QtWidgets.QToolBar("Workspace navigation")
+        nav_toolbar.setObjectName("interactiveNavigationToolbar")
+        nav_toolbar.setMovable(False)
+        nav_toolbar.setFloatable(False)
+        nav_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, nav_toolbar)
+        self.nav_toolbar = nav_toolbar
+
+        self.nav_actions.clear()
+        action_group = QtGui.QActionGroup(nav_toolbar)
+        action_group.setExclusive(True)
+
+        def add_nav_action(label: str, index: int) -> None:
+            action = QtGui.QAction(label, self)
+            action.setCheckable(True)
+            action_group.addAction(action)
+            nav_toolbar.addAction(action)
+            action.triggered.connect(lambda checked, idx=index: self._set_active_page(idx) if checked else None)
+            self.nav_actions[index] = action
+
+        add_nav_action("Capture", self.capture_page_index)
+        add_nav_action("Audio Post", self.audio_post_page_index)
+        add_nav_action("Digital Post", self.digital_post_page_index)
+
+        action = self.nav_actions.get(self.capture_page_index)
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(True)
+            action.blockSignals(False)
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        self._on_page_changed(self.capture_page_index)
 
     def _build_actions(self) -> None:
-        toolbar = self.addToolBar("Interactive controls")
+        toolbar = QtWidgets.QToolBar("Interactive controls")
         toolbar.setObjectName("interactiveControlsToolbar")
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
         open_action = QtGui.QAction("Open…", self)
         open_action.setShortcut(QtGui.QKeySequence("Ctrl+O"))
