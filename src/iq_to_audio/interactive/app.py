@@ -37,6 +37,7 @@ from ..input_formats import InputFormatSpec, detect_input_format, list_supported
 from ..probe import probe_sample_rate
 from ..processing import ProcessingCancelled, ProcessingConfig
 from ..progress import ProgressSink
+from ..squelch import AudioPostOptions, SquelchSummary, gather_audio_targets
 from ..utils import detect_center_frequency
 from ..visualize import SelectionResult, ensure_matplotlib
 from .models import (
@@ -54,9 +55,10 @@ from .panels import (
     TargetsPanel,
     WaterfallOptionsPanel,
 )
+from .post import AudioPostPage, DigitalPostPage
 from .state import COLOR_THEMES, InteractiveState
 from .widgets import LockedSplitter, PanelGroup, SpanController, WaterfallWindow
-from .workers import PreviewWorker, SnapshotJob, SnapshotWorker
+from .workers import AudioPostJob, AudioPostWorker, PreviewWorker, SnapshotJob, SnapshotWorker
 
 LOG = logging.getLogger(__name__)
 
@@ -204,11 +206,13 @@ class InteractiveWindow(QMainWindow):
         self.thread_pool = QtCore.QThreadPool.globalInstance()
         self._active_snapshot_worker: SnapshotWorker | None = None
         self._active_preview_worker: PreviewWorker | None = None
+        self._active_audio_post_worker: AudioPostWorker | None = None
         self._active_pipeline: Any | None = None
         self._status_sink: StatusProgressSink | None = None
         self.progress_sink: ProgressSink | None = None
         self.result_configs: list[ProcessingConfig] | None = None
         self.waterfall_window: WaterfallWindow | None = None
+        self._audio_post_targets: list[Path] = []
 
         self.figure: Figure | None = None
         self.canvas: FigureCanvasQTAgg | None = None
@@ -253,6 +257,7 @@ class InteractiveWindow(QMainWindow):
 
         self._configure_window()
         self._build_ui()
+        self._build_navigation()
         self._build_actions()
         self._update_format_options()
         self._refresh_format_status_label()
@@ -474,6 +479,93 @@ class InteractiveWindow(QMainWindow):
         toolbar.addAction(close_action)
 
         self.toolbar_widget = toolbar
+        if self.page_stack is not None:
+            self._on_page_changed(self.page_stack.currentIndex())
+
+    def _on_audio_post_requested(self, base_path: Path, options: AudioPostOptions) -> None:
+        if self._active_audio_post_worker is not None:
+            self._set_status("Audio post-processing already running.", error=True)
+            if self.audio_post_page:
+                self.audio_post_page.set_processing(False)
+            return
+        try:
+            targets = gather_audio_targets(base_path, options)
+        except Exception as exc:
+            if self.audio_post_page:
+                self.audio_post_page.set_processing(False)
+            self._set_status(f"Audio post setup failed: {exc}", error=True)
+            return
+        if not targets:
+            if self.audio_post_page:
+                self.audio_post_page.set_processing(False)
+            self._set_status("No audio files found for post-processing.", error=True)
+            return
+        job = AudioPostJob(targets=targets, options=options)
+        worker = AudioPostWorker(job)
+        self._active_audio_post_worker = worker
+        self._audio_post_targets = targets
+        worker.signals.started.connect(lambda: self._on_audio_post_started(len(targets)))
+        worker.signals.progress.connect(self._on_audio_post_progress)
+        worker.signals.finished.connect(self._on_audio_post_finished)
+        worker.signals.failed.connect(self._on_audio_post_failed)
+        self.status_progress_signal.emit(0.0)
+        self.thread_pool.start(worker)
+        self._set_status(f"Audio post-processing {len(targets)} file(s)…", error=False)
+
+    def _on_audio_post_started(self, total: int) -> None:
+        if self.audio_post_page:
+            self.audio_post_page.update_progress(0.0, float(total))
+
+    def _on_audio_post_progress(self, completed: float, total: float) -> None:
+        total = max(total, 0.0)
+        ratio = 0.0
+        if total > 0:
+            ratio = max(0.0, min(completed / total, 1.0))
+        if self.audio_post_page:
+            self.audio_post_page.update_progress(completed, total)
+        self.status_progress_signal.emit(ratio)
+        if total > 0:
+            self._set_status(f"Audio post {int(completed)}/{int(total)} file(s)…", error=False)
+        else:
+            self._set_status("Audio post-processing…", error=False)
+
+    def _on_audio_post_finished(self, summary: SquelchSummary) -> None:
+        self._active_audio_post_worker = None
+        self._audio_post_targets = []
+        self.status_progress_signal.emit(1.0)
+        if self.audio_post_page:
+            self.audio_post_page.display_summary(summary)
+        if summary.failed:
+            self._set_status(f"Audio post complete with {summary.failed} error(s).", error=True)
+        else:
+            self._set_status("Audio post-processing complete.", error=False)
+
+    def _on_audio_post_failed(self, exc: Exception) -> None:
+        self._active_audio_post_worker = None
+        self._audio_post_targets = []
+        self.status_progress_signal.emit(0.0)
+        if self.audio_post_page:
+            self.audio_post_page.set_processing(False)
+        QtWidgets.QMessageBox.critical(self, "Audio post-processing failed", str(exc))
+        self._set_status(f"Audio post-processing failed: {exc}", error=True)
+
+    def _set_active_page(self, index: int) -> None:
+        if self.page_stack is None:
+            return
+        bounded_index = max(0, min(index, self.page_stack.count() - 1))
+        if self.page_stack.currentIndex() == bounded_index:
+            self._on_page_changed(bounded_index)
+            return
+        self.page_stack.setCurrentIndex(bounded_index)
+
+    def _on_page_changed(self, index: int) -> None:
+        for key, action in self.nav_actions.items():
+            action.blockSignals(True)
+            action.setChecked(key == index)
+            action.blockSignals(False)
+        capture_active = index == self.capture_page_index
+        if self.toolbar_widget:
+            self.toolbar_widget.setEnabled(capture_active)
 
     def _connect_panel_signals(self) -> None:
         if (
@@ -561,18 +653,32 @@ class InteractiveWindow(QMainWindow):
         return f"Outputs default beside: {path.parent}"
 
     def _update_output_hint(self) -> None:
+        resolved = self.state.resolved_output_dir()
         if not self.recording_panel:
+            if self.audio_post_page:
+                self.audio_post_page.update_recent_capture(
+                    selected_path=self.state.selected_path,
+                    output_dir=resolved,
+                )
+            if self.digital_post_page:
+                self.digital_post_page.update_recent_capture(output_dir=resolved)
             return
         if self.state.selected_path is None:
             hint = "Select a recording to preview output location."
         else:
-            resolved = self.state.resolved_output_dir()
             if resolved is None:
                 hint = self._default_output_hint(self.state.selected_path)
             else:
                 hint = f"Outputs will be written to: {resolved}"
         self.state.output_hint = hint
         self.recording_panel.output_hint_label.setText(hint)
+        if self.audio_post_page:
+            self.audio_post_page.update_recent_capture(
+                selected_path=self.state.selected_path,
+                output_dir=resolved,
+            )
+        if self.digital_post_page:
+            self.digital_post_page.update_recent_capture(output_dir=resolved)
 
     def _format_auto_text(self) -> str:
         if self.state.detected_format:

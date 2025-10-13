@@ -15,6 +15,7 @@ from ..preview import run_preview
 from ..probe import SampleRateProbe, probe_sample_rate
 from ..processing import ProcessingCancelled, ProcessingConfig, tune_chunk_size
 from ..spectrum import WaterfallResult, streaming_waterfall
+from ..squelch import AudioPostOptions, process_audio_batch
 from ..utils import detect_center_frequency
 from .models import SnapshotData
 
@@ -385,3 +386,32 @@ class PreviewWorker(QtCore.QRunnable):
         finally:
             with contextlib.suppress(Exception):
                 self.register_pipeline(None)
+
+
+@dataclass(slots=True)
+class AudioPostJob:
+    targets: list[Path]
+    options: AudioPostOptions
+
+
+class AudioPostWorker(QtCore.QRunnable):
+    """Background worker for audio post-processing squelch cleanup."""
+
+    def __init__(self, job: AudioPostJob) -> None:
+        super().__init__()
+        self.job = job
+        self.signals = WorkerSignals()
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        self.signals.started.emit()
+
+        def _progress(done: int, total: int, _path: Path) -> None:
+            self.signals.progress.emit(float(done), float(total))
+
+        try:
+            summary = process_audio_batch(self.job.targets, self.job.options, progress_cb=_progress)
+        except Exception as exc:  # pragma: no cover - surfaced to UI
+            self.signals.failed.emit(exc)
+        else:
+            self.signals.finished.emit(summary)

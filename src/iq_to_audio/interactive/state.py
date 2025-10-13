@@ -90,6 +90,18 @@ class InteractiveState:
     center_detected_from: str = ""
     max_preview_samples: int = MAX_PREVIEW_SAMPLES
     max_target_freqs: int = MAX_TARGET_FREQUENCIES
+    audio_post_method: str = "adaptive"
+    audio_post_auto_noise: bool = True
+    audio_post_manual_noise_floor: float | None = None
+    audio_post_percentile: float = 0.2
+    audio_post_threshold_db: float = 6.0
+    audio_post_trim: bool = True
+    audio_post_lead: float = 0.15
+    audio_post_trail: float = 0.35
+    audio_post_overwrite: bool = False
+    audio_post_suffix: str = "-cleaned"
+    audio_post_webrtc_mode: int = 2
+    audio_post_webrtc_frame_ms: int = 20
 
     def __post_init__(self) -> None:
         self.snapshot_seconds = max(self.default_snapshot, 0.25)
@@ -168,6 +180,26 @@ class InteractiveState:
         else:
             self.sample_rate_override = None
             self.sample_rate_source = ""
+
+        self.audio_post_method = str(kwargs.get("audio_post_method", self.audio_post_method))
+        self.audio_post_auto_noise = bool(kwargs.get("audio_post_auto_noise", self.audio_post_auto_noise))
+        manual_floor = kwargs.get("audio_post_manual_noise_floor")
+        self.audio_post_manual_noise_floor = (
+            float(manual_floor) if manual_floor is not None else self.audio_post_manual_noise_floor
+        )
+        self.audio_post_percentile = float(kwargs.get("audio_post_percentile", self.audio_post_percentile))
+        self.audio_post_threshold_db = float(kwargs.get("audio_post_threshold_db", self.audio_post_threshold_db))
+        self.audio_post_trim = bool(kwargs.get("audio_post_trim", self.audio_post_trim))
+        self.audio_post_lead = float(kwargs.get("audio_post_lead", self.audio_post_lead))
+        self.audio_post_trail = float(kwargs.get("audio_post_trail", self.audio_post_trail))
+        self.audio_post_overwrite = bool(kwargs.get("audio_post_overwrite", self.audio_post_overwrite))
+        suffix = kwargs.get("audio_post_suffix", self.audio_post_suffix)
+        if isinstance(suffix, str) and suffix:
+            self.audio_post_suffix = suffix
+        self.audio_post_webrtc_mode = int(kwargs.get("audio_post_webrtc_mode", self.audio_post_webrtc_mode))
+        self.audio_post_webrtc_frame_ms = int(
+            kwargs.get("audio_post_webrtc_frame_ms", self.audio_post_webrtc_frame_ms)
+        )
 
     def update_center(self, center: float, source: str) -> None:
         self.center_freq = center
