@@ -191,11 +191,77 @@ jobs:
       - name: Run benchmarks
         continue-on-error: true
         run: |
-          uv run pytest tests/test_benchmark.py --benchmark-json=benchmark_results.json
+          echo "Running performance benchmarks..."
+          uv run pytest tests/test_benchmark.py --benchmark-json=benchmark_results.json --benchmark-columns=min,max,mean,median,stddev -v || true
+
+      - name: Display benchmark summary
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -f "benchmark_results.json" ]; then
+            echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Extract benchmark count
+            COUNT=$(python -c "import json; data = json.load(open('benchmark_results.json')); print(len(data.get('benchmarks', [])))" 2>/dev/null || echo "0")
+            echo "Ran $COUNT benchmarks" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Show top 5 fastest and slowest benchmarks
+            if [ "$COUNT" -gt "0" ]; then
+              echo "### Top 5 Fastest" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              python -c "
+          import json
+          data = json.load(open('benchmark_results.json'))
+          benchmarks = data.get('benchmarks', [])
+          sorted_benchmarks = sorted(benchmarks, key=lambda x: x['stats']['mean'])[:5]
+          for b in sorted_benchmarks:
+              name = b['name'].replace('test_benchmark_', '')
+              mean_ms = b['stats']['mean'] * 1000
+              print(f'{name:45s} {mean_ms:8.2f} ms')
+          " 2>/dev/null || echo "Error processing results"
+              echo '```' >> $GITHUB_STEP_SUMMARY
+
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Top 5 Slowest" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              python -c "
+          import json
+          data = json.load(open('benchmark_results.json'))
+          benchmarks = data.get('benchmarks', [])
+          sorted_benchmarks = sorted(benchmarks, key=lambda x: x['stats']['mean'], reverse=True)[:5]
+          for b in sorted_benchmarks:
+              name = b['name'].replace('test_benchmark_', '')
+              mean_ms = b['stats']['mean'] * 1000
+              print(f'{name:45s} {mean_ms:8.2f} ms')
+          " 2>/dev/null || echo "Error processing results"
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "No benchmark results available" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Validate benchmark results
+        id: validate
+        run: |
+          if [ -f "benchmark_results.json" ]; then
+            # Check if file has actual benchmark data (not empty/minimal)
+            if python -c "import json; data = json.load(open('benchmark_results.json')); exit(0 if len(data.get('benchmarks', [])) > 0 else 1)" 2>/dev/null; then
+              echo "valid=true" >> $GITHUB_OUTPUT
+              echo "Benchmark results are valid (found $(python -c "import json; print(len(json.load(open('benchmark_results.json')).get('benchmarks', [])))" 2>/dev/null) benchmarks)"
+            else
+              echo "valid=false" >> $GITHUB_OUTPUT
+              echo "No benchmark data found in results"
+            fi
+          else
+            echo "valid=false" >> $GITHUB_OUTPUT
+            echo "Benchmark results file not found"
+          fi
 
       - name: Store benchmark results
         uses: benchmark-action/github-action-benchmark@v1
-        if: hashFiles('benchmark_results.json') != ''
+        if: steps.validate.outputs.valid == 'true'
         with:
           tool: 'pytest'
           output-file-path: benchmark_results.json
