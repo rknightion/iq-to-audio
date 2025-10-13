@@ -1,0 +1,186 @@
+name: Download Test Fixtures from Google Drive
+description: Downloads iq-to-audio test fixtures using rclone from Google Drive
+inputs:
+  service-account-json:
+    description: 'Google service account JSON credentials'
+    required: true
+  file-id:
+    description: 'Google Drive file ID to download'
+    required: true
+  expected-sha256:
+    description: 'Expected SHA256 checksum for validation'
+    required: true
+  client-id:
+    description: 'Optional custom Google OAuth client ID to avoid rate limits'
+    required: false
+    default: ''
+  client-secret:
+    description: 'Optional custom Google OAuth client secret'
+    required: false
+    default: ''
+  destination-dir:
+    description: 'Destination directory for downloaded fixtures'
+    required: false
+    default: 'testfiles'
+  cache-enabled:
+    description: 'Enable caching of downloaded fixtures'
+    required: false
+    default: 'true'
+
+outputs:
+  cache-hit:
+    description: 'Whether the cache was hit'
+    value: ${{ steps.cache.outputs.cache-hit }}
+  downloaded:
+    description: 'Whether the file was downloaded'
+    value: ${{ steps.download.outputs.downloaded }}
+
+runs:
+  using: composite
+  steps:
+    - name: Cache test fixtures
+      id: cache
+      if: inputs.cache-enabled == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.destination-dir }}/iq-to-audio-fixtures.tar.xz
+        key: test-fixtures-${{ inputs.expected-sha256 }}
+        restore-keys: |
+          test-fixtures-
+
+    - name: Check if file exists
+      id: check
+      shell: bash
+      run: |
+        if [ -f "${{ inputs.destination-dir }}/iq-to-audio-fixtures.tar.xz" ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "Test fixtures already present"
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "Test fixtures need to be downloaded"
+        fi
+
+    - name: Install rclone
+      if: steps.check.outputs.exists != 'true'
+      shell: bash
+      run: |
+        if command -v rclone >/dev/null 2>&1; then
+          echo "rclone already installed: $(rclone version | head -1)"
+          exit 0
+        fi
+
+        echo "Installing rclone..."
+        if [[ "$RUNNER_OS" == "Linux" ]]; then
+          sudo apt-get update && sudo apt-get install -y rclone
+        elif [[ "$RUNNER_OS" == "macOS" ]]; then
+          brew install rclone
+        elif [[ "$RUNNER_OS" == "Windows" ]]; then
+          choco install rclone -y
+        fi
+
+        rclone version
+
+    - name: Configure rclone for Google Drive
+      if: steps.check.outputs.exists != 'true'
+      shell: bash
+      env:
+        SERVICE_ACCOUNT_JSON: ${{ inputs.service-account-json }}
+        CLIENT_ID: ${{ inputs.client-id }}
+        CLIENT_SECRET: ${{ inputs.client-secret }}
+      run: |
+        mkdir -p ~/.config/rclone
+
+        # Write service account JSON to temp file
+        echo "$SERVICE_ACCOUNT_JSON" > /tmp/gdrive-service-account.json
+
+        # Build rclone config
+        cat > ~/.config/rclone/rclone.conf <<EOF
+        [gdrive]
+        type = drive
+        scope = drive.readonly
+        service_account_file = /tmp/gdrive-service-account.json
+        EOF
+
+        # Add custom client_id if provided to avoid rate limits
+        if [ -n "$CLIENT_ID" ]; then
+          echo "client_id = $CLIENT_ID" >> ~/.config/rclone/rclone.conf
+          echo "client_secret = $CLIENT_SECRET" >> ~/.config/rclone/rclone.conf
+          echo "Using custom OAuth client to avoid rate limits"
+        else
+          echo "Using rclone's default client (may be rate limited)"
+        fi
+
+        echo "rclone configuration created"
+
+    - name: Download fixtures from Google Drive
+      id: download
+      if: steps.check.outputs.exists != 'true'
+      shell: bash
+      run: |
+        mkdir -p "${{ inputs.destination-dir }}"
+
+        echo "Downloading test fixtures from Google Drive..."
+        echo "File ID: ${{ inputs.file-id }}"
+
+        # Download using rclone
+        # Use --drive-acknowledge-abuse in case the file is flagged
+        rclone copy \
+          --drive-acknowledge-abuse \
+          --progress \
+          --transfers 1 \
+          "gdrive:${{ inputs.file-id }}" \
+          "${{ inputs.destination-dir }}/" \
+          -v
+
+        # Find the downloaded file (rclone uses the Drive filename)
+        DOWNLOADED_FILE=$(find "${{ inputs.destination-dir }}" -name "*.tar.xz" -type f -print -quit)
+
+        if [ -z "$DOWNLOADED_FILE" ]; then
+          echo "ERROR: Downloaded file not found"
+          exit 1
+        fi
+
+        # Rename to expected name if needed
+        EXPECTED_FILE="${{ inputs.destination-dir }}/iq-to-audio-fixtures.tar.xz"
+        if [ "$DOWNLOADED_FILE" != "$EXPECTED_FILE" ]; then
+          mv "$DOWNLOADED_FILE" "$EXPECTED_FILE"
+        fi
+
+        echo "Download complete: $EXPECTED_FILE"
+        ls -lh "$EXPECTED_FILE"
+        echo "downloaded=true" >> $GITHUB_OUTPUT
+
+    - name: Verify checksum
+      if: steps.check.outputs.exists != 'true'
+      shell: bash
+      run: |
+        FILE="${{ inputs.destination-dir }}/iq-to-audio-fixtures.tar.xz"
+        EXPECTED="${{ inputs.expected-sha256 }}"
+
+        echo "Verifying SHA256 checksum..."
+        echo "Expected: $EXPECTED"
+
+        if [[ "$RUNNER_OS" == "macOS" ]]; then
+          ACTUAL=$(shasum -a 256 "$FILE" | awk '{print $1}')
+        else
+          ACTUAL=$(sha256sum "$FILE" | awk '{print $1}')
+        fi
+
+        echo "Actual:   $ACTUAL"
+
+        if [ "$ACTUAL" != "$EXPECTED" ]; then
+          echo "ERROR: Checksum mismatch!"
+          echo "Expected: $EXPECTED"
+          echo "Got:      $ACTUAL"
+          exit 1
+        fi
+
+        echo "Checksum verified successfully"
+
+    - name: Cleanup
+      if: always()
+      shell: bash
+      run: |
+        # Remove sensitive files
+        rm -f /tmp/gdrive-service-account.json
+        rm -f ~/.config/rclone/rclone.conf

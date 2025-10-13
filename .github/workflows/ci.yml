@@ -29,8 +29,15 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v5
+
+      - name: Download test fixtures from Google Drive
+        uses: ./.github/actions/download-test-fixtures
         with:
-          lfs: true
+          service-account-json: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          file-id: ${{ secrets.GDRIVE_FILE_ID }}
+          expected-sha256: ${{ secrets.GDRIVE_FILE_SHA256 }}
+          client-id: ${{ secrets.GDRIVE_CLIENT_ID }}
+          client-secret: ${{ secrets.GDRIVE_CLIENT_SECRET }}
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
@@ -210,8 +217,15 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@v5
+
+      - name: Download test fixtures from Google Drive
+        uses: ./.github/actions/download-test-fixtures
         with:
-          lfs: true
+          service-account-json: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          file-id: ${{ secrets.GDRIVE_FILE_ID }}
+          expected-sha256: ${{ secrets.GDRIVE_FILE_SHA256 }}
+          client-id: ${{ secrets.GDRIVE_CLIENT_ID }}
+          client-secret: ${{ secrets.GDRIVE_CLIENT_SECRET }}
 
       - name: Set up Python
         uses: actions/setup-python@v6

@@ -5,6 +5,9 @@ Shared pytest fixtures and configuration for iq-to-audio tests.
 Provides synthetic IQ generation, Qt app fixtures, and DSP test utilities.
 """
 
+import logging
+import os
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -19,6 +22,58 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 _TESTFILES_DIR = Path(__file__).parent.parent / "testfiles"
 _TESTFILES_ARCHIVE = _TESTFILES_DIR / "iq-to-audio-fixtures.tar.xz"
+
+LOG = logging.getLogger(__name__)
+
+
+def _download_fixtures_if_needed() -> bool:
+    """
+    Download test fixtures from Google Drive if not present.
+
+    Uses the download_test_fixtures.py script with environment variables.
+    Returns True if fixtures are available, False otherwise.
+    """
+    if _TESTFILES_ARCHIVE.exists():
+        return True
+
+    # Check if we have the necessary environment variables
+    if not os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON") or not os.getenv("GDRIVE_FILE_ID"):
+        LOG.warning(
+            "Test fixtures not found and Google Drive credentials not configured. "
+            "Tests requiring fixtures will be skipped."
+        )
+        return False
+
+    # Try to run the download script
+    script_path = Path(__file__).parent.parent / "scripts" / "download_test_fixtures.py"
+    if not script_path.exists():
+        LOG.warning("Download script not found at %s", script_path)
+        return False
+
+    try:
+        LOG.info("Attempting to download test fixtures from Google Drive...")
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        LOG.info("Download script output: %s", result.stdout)
+        return _TESTFILES_ARCHIVE.exists()
+    except subprocess.CalledProcessError as e:
+        LOG.error("Failed to download test fixtures: %s", e.stderr)
+        return False
+
+
+@pytest.fixture(scope="session", autouse=True)
+def download_test_fixtures():
+    """
+    Session-level fixture to download test fixtures before any tests run.
+
+    This runs once per test session and attempts to download the fixtures
+    from Google Drive if they're not already present.
+    """
+    _download_fixtures_if_needed()
 
 
 def _extract_fixture(filename: str) -> Path:
