@@ -57,6 +57,7 @@ from .panels import (
 )
 from .post import AudioPostPage, DigitalPostPage
 from .state import COLOR_THEMES, InteractiveState
+from .styles import DARK_STYLESHEET
 from .widgets import LockedSplitter, PanelGroup, SpanController, WaterfallWindow
 from .workers import AudioPostJob, AudioPostWorker, PreviewWorker, SnapshotJob, SnapshotWorker
 
@@ -303,7 +304,7 @@ class InteractiveWindow(QMainWindow):
         splitter = LockedSplitter(Qt.Orientation.Horizontal, locked_handles={1})
         splitter.setObjectName("interactiveMainSplitter")
         splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(1)
+        splitter.setHandleWidth(0)  # Hide splitter handle since it's locked
 
         options_scroll = QtWidgets.QScrollArea()
         options_scroll.setWidgetResizable(True)
@@ -2153,6 +2154,9 @@ def launch_interactive_session(
 
     if not isinstance(qapp, QApplication):
         raise RuntimeError("QApplication instance missing during launch.")
+
+    # Apply custom stylesheet for improved visual hierarchy and UX
+    qapp.setStyleSheet(DARK_STYLESHEET)
 
     sigint_relay: _SigintRelay | None = None
     try:

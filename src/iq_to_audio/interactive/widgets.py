@@ -202,29 +202,17 @@ class PanelGroup(QtWidgets.QGroupBox):
         super().__init__(title, parent)
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.setSizePolicy(
-            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred)
+            QtWidgets.QSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Preferred
+            )
         )
-        self.setStyleSheet(
-            """
-            QGroupBox {
-                font-weight: 600;
-                border: 1px solid palette(mid);
-                border-radius: 8px;
-                margin-top: 20px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 14px;
-                top: 6px;
-                padding: 6px 10px;
-            }
-            """
-        )
+        # Styling is now handled by the global stylesheet in styles.py
+        # This allows for consistent theming across the entire application
 
     def set_layout(self, layout: QtWidgets.QLayout) -> None:
+        # Improved spacing - balanced between compact and readable
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setSpacing(11)
         self.setLayout(layout)
 
 
