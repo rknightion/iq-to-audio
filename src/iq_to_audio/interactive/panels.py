@@ -16,7 +16,9 @@ class RecordingPanel(PanelGroup):
 
         file_row = QtWidgets.QHBoxLayout()
         file_row.addWidget(QtWidgets.QLabel("Input WAV:"))
-        self.file_entry = QtWidgets.QLineEdit(state.selected_path.as_posix() if state.selected_path else "")
+        self.file_entry = QtWidgets.QLineEdit(
+            state.selected_path.as_posix() if state.selected_path else ""
+        )
         self.file_entry.setPlaceholderText("Select a baseband WAV recording…")
         file_row.addWidget(self.file_entry, stretch=1)
         self.browse_button = QtWidgets.QPushButton("Browse…")
@@ -43,10 +45,10 @@ class RecordingPanel(PanelGroup):
         center_row.addWidget(self.center_entry)
         self.detect_button = QtWidgets.QPushButton("Detect from file")
         center_row.addWidget(self.detect_button)
-        self.center_source_label = QtWidgets.QLabel(
-            f"Center source: {state.center_source or '—'}"
+        self.center_source_label = QtWidgets.QLabel(f"Center source: {state.center_source or '—'}")
+        self.center_source_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        self.center_source_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.center_source_label.setWordWrap(True)
         center_row.addWidget(self.center_source_label, stretch=1)
         layout.addLayout(center_row)
@@ -67,7 +69,9 @@ class RecordingPanel(PanelGroup):
 
         output_row = QtWidgets.QHBoxLayout()
         output_row.addWidget(QtWidgets.QLabel("Output directory:"))
-        self.output_entry = QtWidgets.QLineEdit(state.output_dir.as_posix() if state.output_dir else "")
+        self.output_entry = QtWidgets.QLineEdit(
+            state.output_dir.as_posix() if state.output_dir else ""
+        )
         self.output_entry.setPlaceholderText("Optional override – defaults beside input WAV")
         output_row.addWidget(self.output_entry, stretch=1)
         self.output_browse_button = QtWidgets.QPushButton("Browse…")
@@ -155,9 +159,9 @@ class TargetsPanel(PanelGroup):
     def __init__(self, state: InteractiveState) -> None:
         super().__init__("Target frequencies (Hz)")
         layout = QtWidgets.QGridLayout()
-        layout.setContentsMargins(12, 6, 12, 12)
-        layout.setHorizontalSpacing(12)
-        layout.setVerticalSpacing(8)
+        layout.setContentsMargins(14, 10, 14, 14)
+        layout.setHorizontalSpacing(14)
+        layout.setVerticalSpacing(10)
 
         self.entries: list[QtWidgets.QLineEdit] = []
         self.helper_label = QtWidgets.QLabel(
@@ -225,9 +229,9 @@ class SpectrumOptionsPanel(PanelGroup):
     def __init__(self, state: InteractiveState) -> None:
         super().__init__("Spectrum options")
         layout = QtWidgets.QGridLayout()
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(12)
-        layout.setVerticalSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setHorizontalSpacing(14)
+        layout.setVerticalSpacing(11)
 
         layout.addWidget(QtWidgets.QLabel("FFT size"), 0, 0)
         self.nfft_combo = QtWidgets.QComboBox()
@@ -266,9 +270,9 @@ class WaterfallOptionsPanel(PanelGroup):
     def __init__(self, state: InteractiveState) -> None:
         super().__init__("Waterfall options")
         layout = QtWidgets.QGridLayout()
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setHorizontalSpacing(12)
-        layout.setVerticalSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setHorizontalSpacing(14)
+        layout.setVerticalSpacing(11)
 
         layout.addWidget(QtWidgets.QLabel("Max slices"), 0, 0)
         self.slice_spin = QtWidgets.QSpinBox()
