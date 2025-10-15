@@ -260,7 +260,9 @@ class IQReader:
 
         raw = np.frombuffer(buffer, dtype="<f4")
         i_samples, q_samples = self._extract_iq(raw)
-        iq = i_samples.astype(np.float32, copy=False) + 1j * q_samples.astype(np.float32, copy=False)
+        iq = i_samples.astype(np.float32, copy=False) + 1j * q_samples.astype(
+            np.float32, copy=False
+        )
         return iq.astype(np.complex64, copy=False)
 
     def _extract_iq(self, raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -290,9 +292,7 @@ class ComplexOscillator:
         n = np.arange(samples.size, dtype=np.float64)
         phases = self.phase + sign * self.increment * n
         osc = np.exp(1j * phases).astype(np.complex64)
-        self.phase = (self.phase + sign * self.increment * samples.size) % (
-            2.0 * np.pi
-        )
+        self.phase = (self.phase + sign * self.increment * samples.size) % (2.0 * np.pi)
         mixed = samples.astype(np.complex64, copy=False) * osc
         return np.asarray(mixed, dtype=np.complex64)
 
@@ -307,9 +307,7 @@ class OverlapSaveFIR:
         self.filter_len = len(taps)
         self.overlap = self.filter_len - 1
         self.block_size = block_size
-        self.fft_size = 1 << math.ceil(
-            math.log2(self.block_size + self.filter_len - 1)
-        )
+        self.fft_size = 1 << math.ceil(math.log2(self.block_size + self.filter_len - 1))
         padded_taps = np.zeros(self.fft_size, dtype=np.complex128)
         padded_taps[: self.filter_len] = self.taps
         self.workers = workers if workers and workers > 1 else None
@@ -344,9 +342,7 @@ class OverlapSaveFIR:
                 if seg.size >= self.overlap:
                     self.state = seg[-self.overlap :].copy()
                 else:
-                    self.state = np.concatenate(
-                        [self.state[seg.size :], seg]
-                    ).astype(np.complex64)
+                    self.state = np.concatenate([self.state[seg.size :], seg]).astype(np.complex64)
         return np.concatenate(outputs)
 
 
@@ -359,7 +355,7 @@ class Decimator:
         if self.factor == 1 or samples.size == 0:
             return samples
         start = (-self.offset) % self.factor
-        decimated = samples[start:: self.factor]
+        decimated = samples[start :: self.factor]
         self.offset = (self.offset + samples.size) % self.factor
         return decimated
 
@@ -582,7 +578,9 @@ class IQSliceWriter:
             self.peak = peak
         if self.spec.container == "wav":
             assert self._file is not None
-            interleaved = np.column_stack((samples.real, samples.imag)).astype(np.float32, copy=False)
+            interleaved = np.column_stack((samples.real, samples.imag)).astype(
+                np.float32, copy=False
+            )
             self._file.write(interleaved)
         else:
             assert self._fd is not None
@@ -596,6 +594,7 @@ class IQSliceWriter:
         if self._fd is not None:
             self._fd.close()
             self._fd = None
+
 
 def design_channel_filter(sample_rate: float, bandwidth: float, decimation: int) -> np.ndarray:
     guard = max(1_000.0, bandwidth * 0.5)
