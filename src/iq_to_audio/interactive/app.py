@@ -127,7 +127,9 @@ class _SigintRelay:
         escalate: Callable[[int, object | None], None] | None = None,
     ) -> None:
         self._app = app
-        self._previous_handler = previous_handler if previous_handler is not None else signal.SIG_DFL
+        self._previous_handler = (
+            previous_handler if previous_handler is not None else signal.SIG_DFL
+        )
         self._schedule_quit = schedule_quit or (lambda: QtCore.QTimer.singleShot(0, app.quit))
         self._escalate = escalate or self._default_escalate
         self._triggered = False
@@ -312,7 +314,9 @@ class InteractiveWindow(QMainWindow):
         options_scroll.setMinimumWidth(LEFT_PANEL_WIDTH)
         options_scroll.setMaximumWidth(LEFT_PANEL_WIDTH)
         options_scroll.setSizePolicy(
-            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding)
+            QtWidgets.QSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Expanding
+            )
         )
 
         options_container = QWidget()
@@ -429,7 +433,9 @@ class InteractiveWindow(QMainWindow):
             action.setCheckable(True)
             action_group.addAction(action)
             nav_toolbar.addAction(action)
-            action.triggered.connect(lambda checked, idx=index: self._set_active_page(idx) if checked else None)
+            action.triggered.connect(
+                lambda checked, idx=index: self._set_active_page(idx) if checked else None
+            )
             self.nav_actions[index] = action
 
         add_nav_action("Capture", self.capture_page_index)
@@ -612,7 +618,9 @@ class InteractiveWindow(QMainWindow):
 
         tp = self.targets_panel
         for index, entry in enumerate(tp.entries):
-            entry.editingFinished.connect(lambda idx=index, field=entry: self._on_target_edit(idx, field.text()))
+            entry.editingFinished.connect(
+                lambda idx=index, field=entry: self._on_target_edit(idx, field.text())
+            )
         tp.clear_button.clicked.connect(self._on_clear_targets)
 
         sp = self.status_panel
@@ -699,7 +707,9 @@ class InteractiveWindow(QMainWindow):
             _format_spec_map().values(),
             key=lambda spec: (container_order.get(spec.container, 99), order.get(spec.codec, 99)),
         )
-        desired = self.state.input_format_choice if self.state.input_format_choice != "auto" else "auto"
+        desired = (
+            self.state.input_format_choice if self.state.input_format_choice != "auto" else "auto"
+        )
         combo.blockSignals(True)
         combo.clear()
         combo.addItem(self._format_auto_text(), "auto")
@@ -715,7 +725,11 @@ class InteractiveWindow(QMainWindow):
         if not self.recording_panel:
             return
         label_text = self.state.input_format_message
-        color = "red" if self.state.input_format_error else self.palette().color(QtGui.QPalette.ColorRole.WindowText).name()
+        color = (
+            "red"
+            if self.state.input_format_error
+            else self.palette().color(QtGui.QPalette.ColorRole.WindowText).name()
+        )
         self.recording_panel.format_status_label.setText(label_text)
         self.recording_panel.format_status_label.setStyleSheet(f"color: {color};")
 
@@ -808,7 +822,9 @@ class InteractiveWindow(QMainWindow):
         if detection.spec:
             spec = detection.spec
             message = detection.message or f"Detected {spec.label}."
-            self.state.set_detected_format(spec.key, source=detection.source, message=message, error=None)
+            self.state.set_detected_format(
+                spec.key, source=detection.source, message=message, error=None
+            )
             if spec.container == "wav":
                 self._update_sample_rate_from_probe(path)
                 if announce:
@@ -930,7 +946,9 @@ class InteractiveWindow(QMainWindow):
     def _apply_status_message(self, message: str, highlight: bool) -> None:
         if not self.status_panel:
             return
-        color = "red" if highlight else self.palette().color(QtGui.QPalette.ColorRole.WindowText).name()
+        color = (
+            "red" if highlight else self.palette().color(QtGui.QPalette.ColorRole.WindowText).name()
+        )
         self.status_panel.status_label.setText(message)
         self.status_panel.status_label.setStyleSheet(f"color: {color};")
         self.statusBar().showMessage(message)
@@ -1025,12 +1043,18 @@ class InteractiveWindow(QMainWindow):
 
     def _on_detect_center(self) -> None:
         if self.state.selected_path is None:
-            self._set_status("Select an input recording before detecting center frequency.", error=True)
+            self._set_status(
+                "Select an input recording before detecting center frequency.", error=True
+            )
             return
         if self._active_preview_worker is not None or self._active_pipeline is not None:
-            self._set_status("Center detection is unavailable while processing is active.", error=True)
+            self._set_status(
+                "Center detection is unavailable while processing is active.", error=True
+            )
             return
-        self._auto_detect_center(self.state.selected_path, announce=True, force=True, preserve_manual=True)
+        self._auto_detect_center(
+            self.state.selected_path, announce=True, force=True, preserve_manual=True
+        )
 
     def _on_center_manual(self) -> None:
         if not self.recording_panel:
@@ -1110,7 +1134,9 @@ class InteractiveWindow(QMainWindow):
         self.state.set_agc_enabled(enabled)
         if previous == enabled:
             return
-        status = "Automatic gain control enabled." if enabled else "Automatic gain control disabled."
+        status = (
+            "Automatic gain control enabled." if enabled else "Automatic gain control disabled."
+        )
         self._set_status(status, error=False)
         if self.recording_panel:
             self.recording_panel.agc_check.setChecked(enabled)
@@ -1129,11 +1155,7 @@ class InteractiveWindow(QMainWindow):
         self.channel_panel.bandwidth_entry.setText(f"{self.state.bandwidth_hz:.0f}")
         self._set_status("Bandwidth updated.", error=False)
         if self.span_controller and self.state.bandwidth_hz is not None:
-            center = (
-                self.state.selection.center_freq
-                if self.state.selection is not None
-                else value
-            )
+            center = self.state.selection.center_freq if self.state.selection is not None else value
             self.span_controller.set_selection(
                 center,
                 self.state.bandwidth_hz,
@@ -1169,7 +1191,9 @@ class InteractiveWindow(QMainWindow):
             return False
         rounded = float(round(freq))
         existing = [
-            self._parse_float(entry.text()) for entry in self.targets_panel.entries if entry is not None
+            self._parse_float(entry.text())
+            for entry in self.targets_panel.entries
+            if entry is not None
         ]
         if any(value is not None and abs(value - rounded) < 0.5 for value in existing):
             if announce:
@@ -1182,7 +1206,9 @@ class InteractiveWindow(QMainWindow):
                 break
         if next_index is None:
             if announce:
-                self._set_status("All target slots are filled. Clear targets to add more.", error=True)
+                self._set_status(
+                    "All target slots are filled. Clear targets to add more.", error=True
+                )
             return False
         entry = self.targets_panel.entries[next_index]
         entry.blockSignals(True)
@@ -1308,7 +1334,9 @@ class InteractiveWindow(QMainWindow):
         assert self.status_panel is not None
 
         self._set_status(
-            "Analyzing entire recording…" if self.state.full_snapshot else f"Gathering {snapshot_seconds:.2f} s snapshot…",
+            "Analyzing entire recording…"
+            if self.state.full_snapshot
+            else f"Gathering {snapshot_seconds:.2f} s snapshot…",
             error=False,
         )
         self.status_panel.progress_bar.setVisible(True)
@@ -1326,9 +1354,13 @@ class InteractiveWindow(QMainWindow):
         )
         worker = SnapshotWorker(job)
 
-        worker.signals.progress.connect(self._on_snapshot_progress, Qt.ConnectionType.QueuedConnection)
+        worker.signals.progress.connect(
+            self._on_snapshot_progress, Qt.ConnectionType.QueuedConnection
+        )
         worker.signals.failed.connect(self._on_snapshot_failed, Qt.ConnectionType.QueuedConnection)
-        worker.signals.finished.connect(self._on_snapshot_finished, Qt.ConnectionType.QueuedConnection)
+        worker.signals.finished.connect(
+            self._on_snapshot_finished, Qt.ConnectionType.QueuedConnection
+        )
 
         self._active_snapshot_worker = worker
         self.thread_pool.start(worker)
@@ -1338,7 +1370,9 @@ class InteractiveWindow(QMainWindow):
             return
         self.status_panel.progress_bar.setVisible(True)
         self.status_panel.progress_bar.setValue(int(max(0.0, min(fraction, 1.0)) * 1000.0))
-        self._set_status(f"Gathered {seconds_done:.1f} s of preview ({fraction * 100:4.1f}%)…", error=False)
+        self._set_status(
+            f"Gathered {seconds_done:.1f} s of preview ({fraction * 100:4.1f}%)…", error=False
+        )
 
     def _on_snapshot_failed(self, exc: Exception) -> None:
         self._active_snapshot_worker = None
@@ -1399,7 +1433,9 @@ class InteractiveWindow(QMainWindow):
         if layout is None:
             layout = QtWidgets.QVBoxLayout()
             self.spectrum_panel.set_layout(layout)
-        managed_widgets = tuple(widget for widget in (self.toolbar, self.canvas) if widget is not None)
+        managed_widgets = tuple(
+            widget for widget in (self.toolbar, self.canvas) if widget is not None
+        )
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
@@ -1425,7 +1461,9 @@ class InteractiveWindow(QMainWindow):
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _pos: f"{x / 1e6:.3f}"))
         ax.set_xlabel("Absolute frequency (MHz)")
         ax.set_ylabel("Power (dBFS/Hz)")
-        ax.grid(True, which="both", ls=theme.get("grid", ":"), color=theme.get("grid_color", "#cccccc"))
+        ax.grid(
+            True, which="both", ls=theme.get("grid", ":"), color=theme.get("grid_color", "#cccccc")
+        )
         ax.set_facecolor(theme.get("bg", "white"))
         self.figure.patch.set_facecolor(theme.get("face", "white"))
         for spine in ax.spines.values():
@@ -1469,7 +1507,9 @@ class InteractiveWindow(QMainWindow):
         self._on_span_changed(self.span_controller.selection.as_selection())
 
         if snapshot.waterfall is not None:
-            self._update_waterfall_display(snapshot.sample_rate, snapshot.center_freq, snapshot.waterfall)
+            self._update_waterfall_display(
+                snapshot.sample_rate, snapshot.center_freq, snapshot.waterfall
+            )
 
         self._update_status_controls()
 
@@ -1482,7 +1522,9 @@ class InteractiveWindow(QMainWindow):
             "face": theme.get("face", "white"),
         }
         hover_color = self._hover_theme["line"]
-        self._hover_line = ax.axvline(ax.get_xlim()[0], color=hover_color, ls="--", lw=1.0, alpha=0.6)
+        self._hover_line = ax.axvline(
+            ax.get_xlim()[0], color=hover_color, ls="--", lw=1.0, alpha=0.6
+        )
         self._hover_line.set_visible(False)
         bbox_args = {
             "boxstyle": "round,pad=0.3",
@@ -1519,7 +1561,9 @@ class InteractiveWindow(QMainWindow):
         if self.canvas:
             self._hover_cid = self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
             self._press_cid = self.canvas.mpl_connect("button_press_event", self._on_canvas_press)
-            self._release_cid = self.canvas.mpl_connect("button_release_event", self._on_canvas_release)
+            self._release_cid = self.canvas.mpl_connect(
+                "button_release_event", self._on_canvas_release
+            )
             self._scroll_cid = self.canvas.mpl_connect("scroll_event", self._on_canvas_scroll)
         self._update_selection_label()
 
@@ -1714,7 +1758,11 @@ class InteractiveWindow(QMainWindow):
     def _on_waterfall_pick(self, freq_hz: float) -> None:
         if self.span_controller is None:
             return
-        bandwidth = self.state.selection.bandwidth if self.state.selection else (self.state.bandwidth_hz or 12_500.0)
+        bandwidth = (
+            self.state.selection.bandwidth
+            if self.state.selection
+            else (self.state.bandwidth_hz or 12_500.0)
+        )
         self.span_controller.set_selection(freq_hz, bandwidth)
 
     def _on_waterfall_closed(self) -> None:
@@ -1726,7 +1774,9 @@ class InteractiveWindow(QMainWindow):
 
     def _on_preview_clicked(self) -> None:
         if self._active_preview_worker is not None:
-            self._set_status("Preview already running. Cancel it before starting a new one.", error=True)
+            self._set_status(
+                "Preview already running. Cancel it before starting a new one.", error=True
+            )
             return
         if self.state.selection is None or self.state.selected_path is None:
             self._set_status("Select a frequency span before previewing.", error=True)
@@ -1765,7 +1815,9 @@ class InteractiveWindow(QMainWindow):
         )
         worker.signals.started.connect(lambda: self._set_preview_enabled(False))
         worker.signals.failed.connect(self._on_preview_failed, Qt.ConnectionType.QueuedConnection)
-        worker.signals.finished.connect(self._on_preview_finished, Qt.ConnectionType.QueuedConnection)
+        worker.signals.finished.connect(
+            self._on_preview_finished, Qt.ConnectionType.QueuedConnection
+        )
 
         self._active_preview_worker = worker
         self.thread_pool.start(worker)
@@ -1810,7 +1862,9 @@ class InteractiveWindow(QMainWindow):
     def _set_preview_enabled(self, enabled: bool) -> None:
         if not self.status_panel:
             return
-        self.status_panel.preview_button.setEnabled(enabled and self.state.snapshot_data is not None)
+        self.status_panel.preview_button.setEnabled(
+            enabled and self.state.snapshot_data is not None
+        )
         if self.toolbar_widget:
             for action in self.toolbar_widget.actions():
                 if action.text().startswith("Preview"):
@@ -1899,7 +1953,9 @@ class InteractiveWindow(QMainWindow):
             len(self.result_configs),
             self.result_configs[0].bandwidth,
         )
-        return InteractiveSessionResult(configs=self.result_configs, progress_sink=self.progress_sink)
+        return InteractiveSessionResult(
+            configs=self.result_configs, progress_sink=self.progress_sink
+        )
 
     # ------------------------------------------------------------------
     # Config helpers
@@ -1909,7 +1965,9 @@ class InteractiveWindow(QMainWindow):
         if self.state.selected_path is None:
             raise ValueError("Select an input recording first.")
         if self.state.input_format_choice == "auto" and self.state.input_format_error:
-            raise ValueError("Input format not detected. Choose a format or fix the recording metadata before previewing.")
+            raise ValueError(
+                "Input format not detected. Choose a format or fix the recording metadata before previewing."
+            )
         center_value = self.state.center_freq
         if self.recording_panel:
             entered = self._parse_float(self.recording_panel.center_entry.text())
@@ -1965,7 +2023,9 @@ class InteractiveWindow(QMainWindow):
         kwargs["center_freq"] = center_value
         kwargs["center_freq_source"] = self.state.center_source
 
-        bandwidth = self.state.bandwidth_hz or (self.state.selection.bandwidth if self.state.selection else 12_500.0)
+        bandwidth = self.state.bandwidth_hz or (
+            self.state.selection.bandwidth if self.state.selection else 12_500.0
+        )
         kwargs["bandwidth"] = max(bandwidth, 100.0)
         self.state.set_bandwidth(kwargs["bandwidth"])
 
@@ -1985,7 +2045,9 @@ class InteractiveWindow(QMainWindow):
                     self.state.set_target_frequencies(frequencies)
                     self.state.target_text = [f"{freq:.0f}" for freq in frequencies]
                     if len(self.state.target_text) < self.state.max_target_freqs:
-                        self.state.target_text.extend([""] * (self.state.max_target_freqs - len(self.state.target_text)))
+                        self.state.target_text.extend(
+                            [""] * (self.state.max_target_freqs - len(self.state.target_text))
+                        )
             else:
                 raise ValueError("Enter at least one target frequency before running DSP.")
 
@@ -1998,8 +2060,12 @@ class InteractiveWindow(QMainWindow):
                 center_freq=center_value,
                 center_freq_source=self.state.center_source,
                 output_path=self._output_path_for_frequency(path, freq, total),
-                dump_iq_path=self._augment_path(self.state.base_kwargs.get("dump_iq_path"), freq, total),
-                plot_stages_path=self._augment_path(self.state.base_kwargs.get("plot_stages_path"), freq, total),
+                dump_iq_path=self._augment_path(
+                    self.state.base_kwargs.get("dump_iq_path"), freq, total
+                ),
+                plot_stages_path=self._augment_path(
+                    self.state.base_kwargs.get("plot_stages_path"), freq, total
+                ),
                 agc_enabled=self.state.agc_enabled,
             )
             config = ProcessingConfig(in_path=path, **freq_kwargs)
@@ -2014,7 +2080,9 @@ class InteractiveWindow(QMainWindow):
         self._update_output_hint()
         return configs
 
-    def _output_path_for_frequency(self, input_path: Path, target_freq: float, total: int) -> Path | None:
+    def _output_path_for_frequency(
+        self, input_path: Path, target_freq: float, total: int
+    ) -> Path | None:
         base = self._resolve_output_path(input_path, target_freq)
         if total <= 1:
             return base
