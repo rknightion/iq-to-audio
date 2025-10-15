@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt, Signal
 
+from ..digital import iter_decoders
+from ..docker_backend import DockerConnectivity, DockerLaunchRequest
 from ..squelch import AudioPostOptions, SquelchConfig, SquelchSummary
 from .state import InteractiveState
 from .widgets import PanelGroup
@@ -611,32 +614,20 @@ class AudioPostPage(QtWidgets.QWidget):
 
 
 class DigitalPostPage(QtWidgets.QWidget):
-    """Placeholder UI for digital decoder hand-off."""
+    """Digital decoder hand-off UI backed by the Docker container."""
 
-    prepare_requested = Signal(str, Path)
-
-    DECODER_OPTIONS: list[tuple[str, str, str]] = [
-        (
-            "dsd-fme",
-            "DSD-FME — Digital voice decoding",
-            "Configure piping voice channels to the DSD-FME toolkit.",
-        ),
-        (
-            "multimon-ng",
-            "Multimon-NG — Packet data decoding",
-            "Batch process paging/data bursts via multimon-ng.",
-        ),
-        (
-            "ft8",
-            "FT8/FT4 — Weak signal workflows",
-            "Stage audio bursts for FT8 or FT4 decoders.",
-        ),
-    ]
+    prepare_requested = Signal(DockerLaunchRequest)
+    docker_probe_requested = Signal()
 
     def __init__(self, *, state: InteractiveState) -> None:
         super().__init__()
         self.state = state
         self._recent_output_dir: Path | None = state.resolved_output_dir()
+        self._decoders = list(iter_decoders())
+        self._decoder_map = {decoder.key: decoder for decoder in self._decoders}
+        self._decoder_index = {decoder.key: index for index, decoder in enumerate(self._decoders)}
+        self._launch_in_progress = False
+        self._docker_status: DockerConnectivity | None = None
 
         # Wrap content in scroll area to prevent overlap when window is small
         scroll_area = QtWidgets.QScrollArea()
@@ -665,8 +656,8 @@ class DigitalPostPage(QtWidgets.QWidget):
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
-        self.prepare_button = QtWidgets.QPushButton("Prepare transfer")
-        self.prepare_button.clicked.connect(self._show_placeholder_message)
+        self.prepare_button = QtWidgets.QPushButton("Launch decoder")
+        self.prepare_button.clicked.connect(self._on_launch_clicked)
         button_row.addWidget(self.prepare_button)
         container_layout.addLayout(button_row)
 
@@ -681,6 +672,8 @@ class DigitalPostPage(QtWidgets.QWidget):
 
         self._update_source_hint()
         self._on_tool_changed(0)
+        self.set_docker_status(None)
+        self.set_launch_in_progress(False)
 
     def _build_source_panel(self) -> PanelGroup:
         panel = PanelGroup("Source recordings")
@@ -719,13 +712,27 @@ class DigitalPostPage(QtWidgets.QWidget):
         panel_layout.setSpacing(11)
 
         self.decoder_combo = QtWidgets.QComboBox()
-        for key, label, _description in self.DECODER_OPTIONS:
-            self.decoder_combo.addItem(label, userData=key)
+        for decoder in self._decoders:
+            self.decoder_combo.addItem(decoder.label, userData=decoder.key)
         panel_layout.addWidget(self.decoder_combo)
 
         self.decoder_description_label = QtWidgets.QLabel("")
         self.decoder_description_label.setWordWrap(True)
         panel_layout.addWidget(self.decoder_description_label)
+
+        args_label = QtWidgets.QLabel("Additional Arguments:")
+        panel_layout.addWidget(args_label)
+
+        self.decoder_args_entry = QtWidgets.QLineEdit()
+        self.decoder_args_entry.setPlaceholderText("e.g., -i audio.wav -o decoded.txt")
+        panel_layout.addWidget(self.decoder_args_entry)
+
+        args_note = QtWidgets.QLabel(
+            "Optional command-line flags to pass to the decoder. Leave empty to use default help command."
+        )
+        args_note.setWordWrap(True)
+        args_note.setStyleSheet("color: palette(mid);")
+        panel_layout.addWidget(args_note)
 
         self.decoder_combo.currentIndexChanged.connect(self._on_tool_changed)
 
@@ -743,8 +750,158 @@ class DigitalPostPage(QtWidgets.QWidget):
         self.tool_options_stack.addWidget(self._build_ft8_options())
         panel_layout.addWidget(self.tool_options_stack)
 
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(8)
+        self.docker_status_label = QtWidgets.QLabel("Docker connectivity has not been checked.")
+        self.docker_status_label.setWordWrap(True)
+        status_row.addWidget(self.docker_status_label, stretch=1)
+
+        self.docker_retry_button = QtWidgets.QPushButton("Re-check")
+        status_row.addWidget(self.docker_retry_button)
+
+        self.docker_help_button = QtWidgets.QToolButton()
+        self.docker_help_button.setText("?")
+        self.docker_help_button.setToolTip("Docker requirements and setup guidance")
+        status_row.addWidget(self.docker_help_button)
+
+        self.docker_retry_button.clicked.connect(self.docker_probe_requested.emit)
+        self.docker_help_button.clicked.connect(self._show_docker_requirements)
+
+        panel_layout.addLayout(status_row)
+
         panel.set_layout(panel_layout)
         return panel
+
+    def set_docker_status(self, status: DockerConnectivity | None) -> None:
+        self._docker_status = status
+        if status is None:
+            message = "Checking Docker connectivity…"
+            color = "palette(mid)"
+            allow_retry = False
+        elif status.available:
+            message = f"Docker engine connected — {status.message}"
+            color = "#1c7c54"
+            allow_retry = True
+        else:
+            message = f"Docker unavailable — {status.message}"
+            color = "#b12a0b"
+            allow_retry = True
+        self.docker_status_label.setText(message)
+        self.docker_status_label.setStyleSheet(f"color: {color};")
+        self.docker_retry_button.setEnabled(allow_retry and not self._launch_in_progress)
+
+    def set_launch_in_progress(self, active: bool) -> None:
+        self._launch_in_progress = active
+        self.prepare_button.setEnabled(not active)
+        self.decoder_combo.setEnabled(not active)
+        self.decoder_args_entry.setEnabled(not active)
+        self.source_path_entry.setEnabled(not active)
+        self.source_browse_button.setEnabled(not active)
+        self.tool_options_stack.setEnabled(not active)
+        self.docker_retry_button.setEnabled(self._docker_status is not None and not active)
+
+    def _on_launch_clicked(self) -> None:
+        if self._launch_in_progress:
+            return
+        path_text = self.source_path_entry.text().strip()
+        target_dir = None
+        if path_text:
+            candidate = Path(path_text).expanduser()
+            try:
+                target_dir = candidate.resolve()
+            except OSError:
+                target_dir = candidate
+        elif self._recent_output_dir is not None:
+            target_dir = self._recent_output_dir
+        if target_dir is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Select audio directory",
+                "Choose the directory containing demodulated audio exports before launching a decoder.",
+            )
+            return
+        if not target_dir.exists() or not target_dir.is_dir():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid directory",
+                f"The selected path is not a directory: {target_dir}",
+            )
+            return
+        if self._docker_status is not None and not self._docker_status.available:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Docker unavailable",
+                "Docker Engine is not reachable. Start Docker and click Re-check before launching.",
+            )
+            return
+        index = self.decoder_combo.currentIndex()
+        if index < 0 or index >= len(self._decoders):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Decoder not selected",
+                "Select a decoder preset to continue.",
+            )
+            return
+        key = self.decoder_combo.currentData()
+        decoder = self._decoder_map.get(str(key))
+        if decoder is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Decoder unavailable",
+                "The selected decoder preset is no longer available.",
+            )
+            return
+
+        # Parse custom decoder arguments if provided
+        args_text = self.decoder_args_entry.text().strip()
+        if args_text:
+            try:
+                command_tokens = tuple(shlex.split(args_text))
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Invalid arguments",
+                    f"Failed to parse decoder arguments: {exc}",
+                )
+                return
+        else:
+            command_tokens = decoder.default_command
+
+        request = DockerLaunchRequest(
+            command=command_tokens,
+            audio_dir=target_dir,
+            decoder_key=decoder.key,
+            pull_if_missing=True,
+        )
+        try:
+            request.validate()
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid configuration",
+                str(exc),
+            )
+            return
+        self.set_launch_in_progress(True)
+        self.prepare_requested.emit(request)
+
+    def _show_docker_requirements(self) -> None:
+        QtWidgets.QMessageBox.information(
+            self,
+            "Docker requirements",
+            (
+                "<p>Docker Engine must be running to use digital post-processing.<br>"
+                "Ensure the Docker socket is available at its default location.</p>"
+                "<p><b>Install guides:</b></p>"
+                "<ul>"
+                '<li><a href="https://www.docker.com/products/docker-desktop/">Docker Desktop (Windows/macOS)</a></li>'
+                '<li><a href="https://orbstack.dev/">OrbStack for macOS</a></li>'
+                '<li><a href="https://docs.docker.com/engine/install/">Docker Engine on Linux</a></li>'
+                "</ul>"
+                "<p>After installing, launch Docker and press <b>Re-check</b> to verify connectivity.</p>"
+            ),
+        )
 
     def _build_dsd_fme_options(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
@@ -846,14 +1003,12 @@ class DigitalPostPage(QtWidgets.QWidget):
         self.source_path_entry.setText(path.as_posix())
 
     def _on_tool_changed(self, index: int) -> None:
-        self.tool_options_stack.setCurrentIndex(index)
-        if 0 <= index < len(self.DECODER_OPTIONS):
-            _key, _label, description = self.DECODER_OPTIONS[index]
-            self.decoder_description_label.setText(description)
-
-    def _show_placeholder_message(self) -> None:
-        QtWidgets.QMessageBox.information(
-            self,
-            "Coming soon",
-            "Decoder integrations will be wired up in a future release.",
-        )
+        if 0 <= index < self.tool_options_stack.count():
+            self.tool_options_stack.setCurrentIndex(index)
+        else:
+            self.tool_options_stack.setCurrentIndex(0)
+        if 0 <= index < len(self._decoders):
+            decoder = self._decoders[index]
+            self.decoder_description_label.setText(decoder.description)
+        else:
+            self.decoder_description_label.setText("")
