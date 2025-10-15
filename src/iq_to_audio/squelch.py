@@ -3,22 +3,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from fractions import Fraction
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import soundfile as sf
-import webrtcvad
 from scipy import signal
 
-SquelchMethod = Literal["adaptive", "static", "transient", "webrtc"]
+SquelchMethod = Literal["adaptive", "static", "transient"]
 
 LOG = logging.getLogger(__name__)
 
 _MIN_DBFS = -160.0
 _EPS = 1e-10
-_VAD_SAMPLE_RATES: tuple[int, ...] = (8000, 16000, 32000, 48000)
 
 
 def _ensure_2d(samples: np.ndarray) -> np.ndarray:
@@ -131,8 +128,6 @@ class SquelchConfig:
     trim_silence: bool = True
     trim_lead_seconds: float = 0.15
     trim_trail_seconds: float = 0.35
-    webrtc_mode: int = 2
-    webrtc_frame_ms: int = 20
 
     def resolve_noise_floor(self, envelope_db: np.ndarray) -> float:
         if self.auto_noise_floor:
@@ -221,63 +216,12 @@ def _static_mask(envelope_db: np.ndarray, threshold_db: float) -> np.ndarray:
     return envelope_db >= threshold_db
 
 
-def _resample_mono(signal_in: np.ndarray, sample_rate: int, target_rate: int) -> np.ndarray:
-    if sample_rate == target_rate:
-        return signal_in.astype(np.float32, copy=False)
-    ratio = Fraction(target_rate, sample_rate).limit_denominator(512)
-    resampled = signal.resample_poly(signal_in, ratio.numerator, ratio.denominator)
-    return np.asarray(resampled, dtype=np.float32)
-
-
-def _webrtc_mask(
-    mono: np.ndarray,
-    sample_rate: float,
-    config: SquelchConfig,
-) -> np.ndarray:
-    sample_rate_hz = max(1, int(round(sample_rate)))
-    sample_rate_float = float(sample_rate_hz)
-    target_rate = sample_rate_hz if sample_rate_hz in _VAD_SAMPLE_RATES else 16000
-    frame_ms = int(config.webrtc_frame_ms)
-    if frame_ms not in (10, 20, 30):
-        raise ValueError("WebRTC VAD frame duration must be 10, 20, or 30 milliseconds.")
-    resampled = _resample_mono(mono, sample_rate_hz, target_rate)
-    frame_length = int(target_rate * frame_ms / 1000)
-    if frame_length <= 0:
-        raise ValueError("WebRTC VAD frame length must be positive.")
-    frame_count = resampled.shape[0] // frame_length
-    if frame_count == 0:
-        return np.zeros(mono.shape[0], dtype=bool)
-    trimmed = resampled[: frame_count * frame_length]
-    pcm = np.clip(trimmed * 32768.0, -32768.0, 32767.0).astype(np.int16)
-    frames = pcm.reshape(frame_count, frame_length)
-    vad = webrtcvad.Vad(int(np.clip(config.webrtc_mode, 0, 3)))
-    speech_flags = np.fromiter(
-        (vad.is_speech(frame.tobytes(), target_rate) for frame in frames),
-        dtype=bool,
-        count=frame_count,
-    )
-    mask = np.zeros(mono.shape[0], dtype=bool)
-    frame_duration = frame_length / float(target_rate)
-    for index, flag in enumerate(speech_flags):
-        if not flag:
-            continue
-        start_time = index * frame_duration
-        end_time = start_time + frame_duration
-        start_idx = int(round(start_time * sample_rate_float))
-        end_idx = int(round(end_time * sample_rate_float))
-        if end_idx <= start_idx:
-            end_idx = min(mask.size, start_idx + 1)
-        mask[start_idx:end_idx] = True
-    return mask
-
-
 def apply_squelch(
     audio: np.ndarray,
     sample_rate: float,
     config: SquelchConfig,
 ) -> tuple[np.ndarray, float, float]:
     samples = _ensure_2d(np.asarray(audio, dtype=np.float32))
-    mono = np.asarray(np.mean(samples, axis=1, dtype=np.float32), dtype=np.float32)
     window = max(1, int(round(config.window_seconds * sample_rate)))
     envelope = _envelope(samples, window)
     envelope_db = _dbfs(envelope)
@@ -290,8 +234,6 @@ def apply_squelch(
         mask = _adaptive_mask(envelope_db, threshold_db)
     elif config.method == "static":
         mask = _static_mask(envelope_db, threshold_db)
-    elif config.method == "webrtc":
-        mask = _webrtc_mask(mono, sample_rate, config)
     else:
         raise ValueError(f"Unsupported squelch method: {config.method}")
 

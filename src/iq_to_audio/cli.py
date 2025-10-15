@@ -221,7 +221,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--audio-post-mode",
         dest="audio_post_mode",
-        choices=["adaptive", "static", "transient", "webrtc"],
+        choices=["adaptive", "static", "transient"],
         default="adaptive",
         help="Squelch algorithm to use when --audio-post is supplied (default: adaptive).",
     )
@@ -244,22 +244,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=6.0,
         help="Margin above noise floor in dBFS for the squelch threshold (default: 6).",
-    )
-    parser.add_argument(
-        "--audio-post-webrtc-mode",
-        dest="audio_post_webrtc_mode",
-        type=int,
-        choices=[0, 1, 2, 3],
-        default=2,
-        help="WebRTC VAD aggressiveness (0=least, 3=most) when using --audio-post-mode=webrtc (default: 2).",
-    )
-    parser.add_argument(
-        "--audio-post-webrtc-frame-ms",
-        dest="audio_post_webrtc_frame_ms",
-        type=int,
-        choices=[10, 20, 30],
-        default=20,
-        help="WebRTC VAD frame duration in milliseconds (default: 20).",
     )
     parser.add_argument(
         "--audio-post-lead",
@@ -338,8 +322,6 @@ def main(argv: list[str] | None = None) -> int:
             trim_silence=args.audio_post_trim,
             trim_lead_seconds=args.audio_post_lead,
             trim_trail_seconds=args.audio_post_trail,
-            webrtc_mode=args.audio_post_webrtc_mode,
-            webrtc_frame_ms=args.audio_post_webrtc_frame_ms,
         )
         post_options = AudioPostOptions(
             config=squelch_config,

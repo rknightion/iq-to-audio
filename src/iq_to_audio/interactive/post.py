@@ -115,7 +115,6 @@ class AudioPostPage(QtWidgets.QWidget):
         self.method_combo.addItem("Adaptive (voice)", "adaptive")
         self.method_combo.addItem("Static threshold", "static")
         self.method_combo.addItem("Transient bursts (digital)", "transient")
-        self.method_combo.addItem("WebRTC VAD (speech-trained)", "webrtc")
         method_row.addWidget(self.method_combo, stretch=1)
         panel_layout.addLayout(method_row)
         self._control_widgets.append(self.method_combo)
@@ -178,28 +177,6 @@ class AudioPostPage(QtWidgets.QWidget):
         panel_layout.addLayout(margin_row)
         self._control_widgets.append(self.margin_spin)
         self._elevate_height(self.margin_spin)
-
-        self.webrtc_row_widget = QtWidgets.QWidget()
-        webrtc_row = QtWidgets.QHBoxLayout(self.webrtc_row_widget)
-        webrtc_row.setContentsMargins(0, 0, 0, 0)
-        webrtc_row.setSpacing(row_spacing)
-        webrtc_row.addWidget(QtWidgets.QLabel("WebRTC aggressiveness:"))
-        self.webrtc_mode_combo = QtWidgets.QComboBox()
-        self.webrtc_mode_combo.addItem("0 — Lowest (sensitive)", 0)
-        self.webrtc_mode_combo.addItem("1 — Low", 1)
-        self.webrtc_mode_combo.addItem("2 — Balanced", 2)
-        self.webrtc_mode_combo.addItem("3 — Highest (strict)", 3)
-        webrtc_row.addWidget(self.webrtc_mode_combo)
-        self._elevate_height(self.webrtc_mode_combo)
-        webrtc_row.addWidget(QtWidgets.QLabel("Frame (ms):"))
-        self.webrtc_frame_combo = QtWidgets.QComboBox()
-        for frame_ms in (10, 20, 30):
-            self.webrtc_frame_combo.addItem(f"{frame_ms}", frame_ms)
-        webrtc_row.addWidget(self.webrtc_frame_combo)
-        self._elevate_height(self.webrtc_frame_combo)
-        webrtc_row.addStretch(1)
-        panel_layout.addWidget(self.webrtc_row_widget)
-        self._control_widgets.extend([self.webrtc_mode_combo, self.webrtc_frame_combo])
 
         trim_row = QtWidgets.QHBoxLayout()
         trim_row.setContentsMargins(0, 0, 0, 0)
@@ -404,7 +381,7 @@ class AudioPostPage(QtWidgets.QWidget):
             return None
 
         method = self.method_combo.currentData()
-        manual_noise = self.noise_mode_combo.currentIndex() == 1 and method != "webrtc"
+        manual_noise = self.noise_mode_combo.currentIndex() == 1
         manual_value = float(self.noise_floor_spin.value())
         config = SquelchConfig(
             method=method,
@@ -415,8 +392,6 @@ class AudioPostPage(QtWidgets.QWidget):
             trim_silence=self.trim_silence_check.isChecked(),
             trim_lead_seconds=float(self.lead_in_spin.value()),
             trim_trail_seconds=float(self.trailing_spin.value()),
-            webrtc_mode=int(self.webrtc_mode_combo.currentData()),
-            webrtc_frame_ms=int(self.webrtc_frame_combo.currentData()),
         )
         suffix_text = self.suffix_entry.text().strip() or "-cleaned"
         options = AudioPostOptions(
@@ -498,7 +473,7 @@ class AudioPostPage(QtWidgets.QWidget):
         method = self.method_combo.currentData()
         if isinstance(method, str):
             self.state.audio_post_method = method
-        auto_noise = self.noise_mode_combo.currentIndex() == 0 or method == "webrtc"
+        auto_noise = self.noise_mode_combo.currentIndex() == 0
         self.state.audio_post_auto_noise = auto_noise
         self.state.audio_post_manual_noise_floor = float(self.noise_floor_spin.value())
         self.state.audio_post_percentile = float(self.percentile_spin.value())
@@ -506,8 +481,6 @@ class AudioPostPage(QtWidgets.QWidget):
         self.state.audio_post_trim = self.trim_silence_check.isChecked()
         self.state.audio_post_lead = float(self.lead_in_spin.value())
         self.state.audio_post_trail = float(self.trailing_spin.value())
-        self.state.audio_post_webrtc_mode = int(self.webrtc_mode_combo.currentData())
-        self.state.audio_post_webrtc_frame_ms = int(self.webrtc_frame_combo.currentData())
         overwrite = self.overwrite_radio.isChecked()
         self.state.audio_post_overwrite = overwrite
         suffix_text = self.suffix_entry.text().strip() or "-cleaned"
@@ -532,12 +505,6 @@ class AudioPostPage(QtWidgets.QWidget):
         self.trim_silence_check.setChecked(self.state.audio_post_trim)
         self.lead_in_spin.setValue(self.state.audio_post_lead)
         self.trailing_spin.setValue(self.state.audio_post_trail)
-        mode_index = self.webrtc_mode_combo.findData(self.state.audio_post_webrtc_mode)
-        if mode_index >= 0:
-            self.webrtc_mode_combo.setCurrentIndex(mode_index)
-        frame_index = self.webrtc_frame_combo.findData(self.state.audio_post_webrtc_frame_ms)
-        if frame_index >= 0:
-            self.webrtc_frame_combo.setCurrentIndex(frame_index)
         if self.state.audio_post_overwrite:
             self.overwrite_radio.setChecked(True)
         else:
@@ -576,16 +543,10 @@ class AudioPostPage(QtWidgets.QWidget):
         self.choose_file_button.setEnabled(allow and self.use_specific_file_radio.isChecked())
         self.choose_directory_button.setEnabled(allow and self.use_directory_radio.isChecked())
 
-        method = self.method_combo.currentData()
-        webrtc_active = method == "webrtc"
-        manual_noise = self.noise_mode_combo.currentIndex() == 1 and not webrtc_active
-        if webrtc_active and self.noise_mode_combo.currentIndex() != 0:
-            self.noise_mode_combo.blockSignals(True)
-            self.noise_mode_combo.setCurrentIndex(0)
-            self.noise_mode_combo.blockSignals(False)
-        self.noise_mode_combo.setEnabled(allow and not webrtc_active)
+        manual_noise = self.noise_mode_combo.currentIndex() == 1
+        self.noise_mode_combo.setEnabled(allow)
         self.noise_floor_spin.setEnabled(allow and manual_noise)
-        self.percentile_spin.setEnabled(allow and not manual_noise and not webrtc_active)
+        self.percentile_spin.setEnabled(allow and not manual_noise)
         for widget in (
             self.method_combo,
             self.margin_spin,
@@ -597,10 +558,6 @@ class AudioPostPage(QtWidgets.QWidget):
             self.suffix_entry,
         ):
             widget.setEnabled(allow)
-        self.margin_spin.setEnabled(allow and not webrtc_active)
-        self.webrtc_row_widget.setVisible(webrtc_active)
-        self.webrtc_mode_combo.setEnabled(allow and webrtc_active)
-        self.webrtc_frame_combo.setEnabled(allow and webrtc_active)
         self.suffix_entry.setEnabled(allow and not self.overwrite_radio.isChecked())
         self.apply_button.setEnabled(allow)
         self.preview_button.setEnabled(False)

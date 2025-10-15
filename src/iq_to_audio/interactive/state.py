@@ -100,8 +100,6 @@ class InteractiveState:
     audio_post_trail: float = 0.35
     audio_post_overwrite: bool = False
     audio_post_suffix: str = "-cleaned"
-    audio_post_webrtc_mode: int = 2
-    audio_post_webrtc_frame_ms: int = 20
 
     def __post_init__(self) -> None:
         self.snapshot_seconds = max(self.default_snapshot, 0.25)
@@ -196,10 +194,6 @@ class InteractiveState:
         suffix = kwargs.get("audio_post_suffix", self.audio_post_suffix)
         if isinstance(suffix, str) and suffix:
             self.audio_post_suffix = suffix
-        self.audio_post_webrtc_mode = int(kwargs.get("audio_post_webrtc_mode", self.audio_post_webrtc_mode))
-        self.audio_post_webrtc_frame_ms = int(
-            kwargs.get("audio_post_webrtc_frame_ms", self.audio_post_webrtc_frame_ms)
-        )
 
     def update_center(self, center: float, source: str) -> None:
         self.center_freq = center

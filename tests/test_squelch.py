@@ -55,14 +55,6 @@ def test_apply_squelch_transient_highlights_bursts(rng: np.random.Generator) -> 
     assert active_ratio < 0.5
 
 
-def test_apply_squelch_webrtc_detects_speech(rng: np.random.Generator) -> None:
-    audio, sample_rate = _synthetic_audio(rng, seconds=2.0, sample_rate=16_000)
-    config = SquelchConfig(method="webrtc", webrtc_mode=3, trim_silence=False)
-    cleaned, noise_floor_db, threshold_db = apply_squelch(audio, float(sample_rate), config)
-    assert cleaned.shape[0] <= audio.shape[0]
-    assert noise_floor_db < threshold_db
-
-
 def test_process_audio_batch_creates_cleaned_files(tmp_path: Path, rng: np.random.Generator) -> None:
     audio, sample_rate = _synthetic_audio(rng, seconds=2.0)
     source = tmp_path / "sample.wav"
