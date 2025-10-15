@@ -33,6 +33,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..digital import get_decoder
+from ..docker_backend import (
+    DockerBackend,
+    DockerConnectionError,
+    DockerConnectivity,
+    DockerLaunchRequest,
+)
 from ..input_formats import InputFormatSpec, detect_input_format, list_supported_formats
 from ..probe import probe_sample_rate
 from ..processing import ProcessingCancelled, ProcessingConfig
@@ -40,6 +47,7 @@ from ..progress import ProgressSink
 from ..squelch import AudioPostOptions, SquelchSummary, gather_audio_targets
 from ..utils import detect_center_frequency
 from ..visualize import SelectionResult, ensure_matplotlib
+from .docker_console import DockerConsoleDialog
 from .models import (
     InteractiveOutcome,
     InteractiveSessionResult,
@@ -59,7 +67,15 @@ from .post import AudioPostPage, DigitalPostPage
 from .state import COLOR_THEMES, InteractiveState
 from .styles import DARK_STYLESHEET
 from .widgets import LockedSplitter, PanelGroup, SpanController, WaterfallWindow
-from .workers import AudioPostJob, AudioPostWorker, PreviewWorker, SnapshotJob, SnapshotWorker
+from .workers import (
+    AudioPostJob,
+    AudioPostWorker,
+    DockerLaunchWorker,
+    DockerProbeWorker,
+    PreviewWorker,
+    SnapshotJob,
+    SnapshotWorker,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -216,6 +232,11 @@ class InteractiveWindow(QMainWindow):
         self.result_configs: list[ProcessingConfig] | None = None
         self.waterfall_window: WaterfallWindow | None = None
         self._audio_post_targets: list[Path] = []
+        self.docker_backend = DockerBackend()
+        self._docker_console: DockerConsoleDialog | None = None
+        self._docker_launch_worker: DockerLaunchWorker | None = None
+        self._docker_probe_worker: DockerProbeWorker | None = None
+        self._last_docker_status: DockerConnectivity | None = None
 
         self.figure: Figure | None = None
         self.canvas: FigureCanvasQTAgg | None = None
@@ -296,6 +317,8 @@ class InteractiveWindow(QMainWindow):
         self.audio_post_page_index = stack.addWidget(self.audio_post_page)
 
         self.digital_post_page = DigitalPostPage(state=self.state)
+        self.digital_post_page.prepare_requested.connect(self._on_digital_prepare_requested)
+        self.digital_post_page.docker_probe_requested.connect(self._on_docker_probe_requested)
         self.digital_post_page_index = stack.addWidget(self.digital_post_page)
 
         stack.setCurrentIndex(self.capture_page_index)
@@ -556,6 +579,150 @@ class InteractiveWindow(QMainWindow):
         QtWidgets.QMessageBox.critical(self, "Audio post-processing failed", str(exc))
         self._set_status(f"Audio post-processing failed: {exc}", error=True)
 
+    # ------------------------------------------------------------------
+    # Digital backend integration
+    # ------------------------------------------------------------------
+
+    def _ensure_docker_probe(self, *, initial: bool = False, force: bool = False) -> None:
+        if self.digital_post_page is None:
+            return
+        if self._docker_probe_worker is not None:
+            return
+        if not force and initial and self._last_docker_status is not None:
+            self.digital_post_page.set_docker_status(self._last_docker_status)
+            return
+        self.digital_post_page.set_docker_status(None)
+        worker = DockerProbeWorker(self.docker_backend)
+        self._docker_probe_worker = worker
+        worker.signals.finished.connect(self._on_docker_probe_finished)
+        worker.signals.failed.connect(self._on_docker_probe_failed)
+        self.thread_pool.start(worker)
+
+    def _on_docker_probe_finished(self, status: DockerConnectivity) -> None:
+        self._docker_probe_worker = None
+        self._last_docker_status = status
+        if self.digital_post_page:
+            self.digital_post_page.set_docker_status(status)
+        if not status.available:
+            LOG.warning("Docker connectivity check failed: %s", status.message)
+
+    def _on_docker_probe_failed(self, exc: Exception) -> None:
+        self._docker_probe_worker = None
+        status = DockerConnectivity(False, str(exc))
+        self._last_docker_status = status
+        if self.digital_post_page:
+            self.digital_post_page.set_docker_status(status)
+        LOG.error("Docker connectivity check failed: %s", exc)
+
+    def _on_docker_probe_requested(self) -> None:
+        self._ensure_docker_probe(force=True)
+
+    def _ensure_docker_console(self) -> DockerConsoleDialog:
+        if self._docker_console is None:
+            self._docker_console = DockerConsoleDialog(self)
+        return self._docker_console
+
+    def _on_digital_prepare_requested(self, request: DockerLaunchRequest) -> None:
+        page = self.digital_post_page
+        if page is None:
+            return
+        if self._docker_launch_worker is not None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Decoder running",
+                "A decoder session is already active. Wait for it to complete before launching another.",
+            )
+            page.set_launch_in_progress(True)
+            return
+        connectivity = self.docker_backend.probe()
+        self._last_docker_status = connectivity
+        page.set_docker_status(connectivity)
+        if not connectivity.available:
+            page.set_launch_in_progress(False)
+            QtWidgets.QMessageBox.warning(self, "Docker unavailable", connectivity.message)
+            return
+        try:
+            decoder = get_decoder(request.decoder_key)
+        except KeyError:
+            page.set_launch_in_progress(False)
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Decoder unavailable",
+                f"Decoder preset '{request.decoder_key}' is not available.",
+            )
+            return
+
+        console = self._ensure_docker_console()
+        console.prepare(
+            decoder_label=decoder.label,
+            command=request.command,
+            audio_dir=request.audio_dir,
+        )
+        console.set_running(True)
+        console.show()
+        console.raise_()
+        console.activateWindow()
+
+        worker = DockerLaunchWorker(self.docker_backend, request)
+        self._docker_launch_worker = worker
+        worker.signals.log.connect(self._on_docker_log_chunk)
+        worker.signals.finished.connect(self._on_docker_launch_finished)
+        worker.signals.failed.connect(self._on_docker_launch_failed)
+        worker.signals.cancelled.connect(self._on_docker_launch_cancelled)
+        console.cancel_requested.connect(worker.request_cancellation)
+        self.thread_pool.start(worker)
+
+    def _on_docker_log_chunk(self, text: str) -> None:
+        if not text:
+            return
+        console = self._docker_console
+        if console is not None:
+            console.append_log(text)
+
+    def _on_docker_launch_finished(self, status: int) -> None:
+        self._docker_launch_worker = None
+        if self.digital_post_page:
+            self.digital_post_page.set_launch_in_progress(False)
+        console = self._docker_console
+        if console is not None:
+            console.append_log("\n[decoder] Process completed successfully.\n")
+            console.set_running(False)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Decoder finished",
+            "The decoder command completed successfully.",
+        )
+
+    def _on_docker_launch_failed(self, exc: Exception) -> None:
+        self._docker_launch_worker = None
+        if self.digital_post_page:
+            self.digital_post_page.set_launch_in_progress(False)
+        message = str(exc)
+        console = self._docker_console
+        if console is not None:
+            console.append_log(f"\n[error] {message}\n")
+            console.set_running(False)
+        if isinstance(exc, DockerConnectionError):
+            status = DockerConnectivity(False, message)
+            self._last_docker_status = status
+            if self.digital_post_page:
+                self.digital_post_page.set_docker_status(status)
+        QtWidgets.QMessageBox.critical(self, "Decoder launch failed", message)
+
+    def _on_docker_launch_cancelled(self) -> None:
+        self._docker_launch_worker = None
+        if self.digital_post_page:
+            self.digital_post_page.set_launch_in_progress(False)
+        console = self._docker_console
+        if console is not None:
+            console.append_log("\n[decoder] Cancelled by user.\n")
+            console.set_running(False)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Decoder cancelled",
+            "The decoder was stopped at your request.",
+        )
+
     def _set_active_page(self, index: int) -> None:
         if self.page_stack is None:
             return
@@ -573,6 +740,8 @@ class InteractiveWindow(QMainWindow):
         capture_active = index == self.capture_page_index
         if self.toolbar_widget:
             self.toolbar_widget.setEnabled(capture_active)
+        if index == self.digital_post_page_index:
+            self._ensure_docker_probe(initial=True)
 
     def _connect_panel_signals(self) -> None:
         if (

@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 from PySide6 import QtCore
 
+from ..docker_backend import DockerBackend, DockerConnectivity, DockerLaunchRequest
 from ..input_formats import resolve_input_format
 from ..preview import run_preview
 from ..probe import SampleRateProbe, probe_sample_rate
@@ -436,3 +437,116 @@ class AudioPostWorker(QtCore.QRunnable):
             self.signals.failed.emit(exc)
         else:
             self.signals.finished.emit(summary)
+
+
+class DockerWorkerSignals(QtCore.QObject):
+    """Signals shared by docker launch workers."""
+
+    started = QtCore.Signal()
+    log = QtCore.Signal(str)
+    failed = QtCore.Signal(Exception)
+    finished = QtCore.Signal(int)
+    cancelled = QtCore.Signal()
+
+
+class DockerLaunchWorker(QtCore.QRunnable):
+    """Background worker that runs the backend container."""
+
+    def __init__(self, backend: DockerBackend, request: DockerLaunchRequest) -> None:
+        super().__init__()
+        self.backend = backend
+        self.request = request
+        self.signals = DockerWorkerSignals()
+        self._container = None
+        self._cancel_requested = False
+
+    def request_cancellation(self) -> None:
+        """Request the worker to stop the running container."""
+        self._cancel_requested = True
+        container = self._container
+        if container is None:
+            return
+        # mypy: Container is guaranteed non-None here
+        with contextlib.suppress(Exception):  # type: ignore[unreachable]  # pragma: no cover
+            container.kill()
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        self.signals.started.emit()
+        try:
+            # Store container reference for cancellation support
+            status = self._run_with_cancellation()
+        except Exception as exc:  # pragma: no cover - bubbled to UI
+            if self._cancel_requested:
+                self.signals.cancelled.emit()
+            else:
+                self.signals.failed.emit(exc)
+        else:
+            if self._cancel_requested:
+                self.signals.cancelled.emit()
+            else:
+                self.signals.finished.emit(status)
+
+    def _run_with_cancellation(self) -> int:
+        """Run container with cancellation support."""
+        from docker.errors import APIError, DockerException
+
+        self.request.validate()
+        if self.request.pull_if_missing:
+            self.backend._ensure_image_available()
+
+        options = {
+            "image": self.backend.config.image,
+            "command": list(self.request.command),
+            "detach": True,
+            "remove": self.backend.config.auto_remove,
+            "volumes": self.backend._volume_spec(self.request.audio_dir),
+            "working_dir": self.backend.config.audio_mount.as_posix(),
+            "environment": self.backend.config.environment or None,
+            "tty": self.backend.config.tty,
+            "stdin_open": self.backend.config.stdin_open,
+        }
+
+        self._container = self.backend.client.containers.run(**options)
+        assert self._container is not None  # Guaranteed by containers.run
+        container = self._container  # type: ignore[unreachable]
+
+        try:
+            for chunk in self.backend._stream_container_logs(container):
+                if self._cancel_requested:
+                    break
+                self.signals.log.emit(chunk)
+        finally:
+            if self._cancel_requested:
+                with contextlib.suppress(DockerException, APIError):  # pragma: no cover
+                    container.kill()
+            exit_info = self.backend._wait_for_exit(container)
+
+        return self.backend._coerce_status_code(exit_info.get("StatusCode", 1))
+
+
+class DockerProbeSignals(QtCore.QObject):
+    """Signals emitted during docker connectivity probes."""
+
+    started = QtCore.Signal()
+    finished = QtCore.Signal(DockerConnectivity)
+    failed = QtCore.Signal(Exception)
+
+
+class DockerProbeWorker(QtCore.QRunnable):
+    """Check docker connectivity without blocking the UI thread."""
+
+    def __init__(self, backend: DockerBackend) -> None:
+        super().__init__()
+        self.backend = backend
+        self.signals = DockerProbeSignals()
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        self.signals.started.emit()
+        try:
+            status: DockerConnectivity = self.backend.probe()
+        except Exception as exc:  # pragma: no cover - bubbled to UI
+            self.signals.failed.emit(exc)
+        else:
+            self.signals.finished.emit(status)
