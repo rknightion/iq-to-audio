@@ -8,6 +8,7 @@ import math
 import os
 import queue
 import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -98,6 +99,8 @@ class IQReader:
         self.input_format = input_format
         self.sample_rate = sample_rate
         self.proc: subprocess.Popen | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stderr_buffer: list[str] = []  # Store for error reporting
         self.frame_bytes = 8  # float32 stereo output
         self.input_bytes_per_frame = input_format.bytes_per_frame
 
@@ -163,17 +166,67 @@ class IQReader:
             raise RuntimeError(FFMPEG_HINT) from exc
         except OSError as exc:  # pragma: no cover - runtime failure launching ffmpeg
             raise RuntimeError(f"Failed to launch ffmpeg: {exc}") from exc
+
+        # Start stderr consumer thread to prevent deadlock on large IQ files.
+        # In frozen builds, pipe buffers can fill up if stderr isn't consumed,
+        # blocking ffmpeg while we're busy reading stdout.
+        def _consume_stderr():
+            if not self.proc or not self.proc.stderr:
+                return
+            try:
+                for line in self.proc.stderr:
+                    try:
+                        decoded = line.decode("utf-8", errors="replace").strip()
+                        if decoded:
+                            self._stderr_buffer.append(decoded)
+                            # Keep only last 50 lines to prevent unbounded growth
+                            if len(self._stderr_buffer) > 50:
+                                self._stderr_buffer.pop(0)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        self._stderr_thread = threading.Thread(
+            target=_consume_stderr,
+            name="IQReader-stderr",
+            daemon=True,
+        )
+        self._stderr_thread.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if self.proc:
+            # Close pipes first to signal subprocess
             if self.proc.stdout:
-                self.proc.stdout.close()
+                with contextlib.suppress(Exception):
+                    self.proc.stdout.close()
             if self.proc.stderr:
-                self.proc.stderr.close()
+                with contextlib.suppress(Exception):
+                    self.proc.stderr.close()
+
+            # Gentle shutdown first
             self.proc.terminate()
-            self.proc.wait(timeout=5)
-        self.proc = None
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Force kill if terminate didn't work (critical for frozen builds)
+                LOG.warning("IQReader ffmpeg process did not terminate gracefully, forcing kill")
+                self.proc.kill()
+                try:
+                    self.proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    LOG.error("Failed to kill IQReader ffmpeg subprocess (PID %d)", self.proc.pid)
+
+            # Report any stderr messages if there were errors
+            if exc_type is not None and self._stderr_buffer:
+                LOG.debug("ffmpeg stderr: %s", " | ".join(self._stderr_buffer[-5:]))
+
+            self.proc = None
+
+        # Ensure stderr thread completes
+        if self._stderr_thread and self._stderr_thread.is_alive():
+            self._stderr_thread.join(timeout=1)
 
     def __iter__(self) -> Iterator[np.ndarray]:
         while True:
