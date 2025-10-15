@@ -1,6 +1,7 @@
 from __future__ import annotations
+
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, Optional
 
 try:  # pragma: no cover - tqdm is optional for programmatic use
     from tqdm import tqdm
@@ -85,10 +86,10 @@ class TqdmProgressSink(ProgressSink):
             raise RuntimeError(
                 "tqdm is required for progress reporting but is not installed."
             )
-        self._overall: Optional[tqdm] = None
-        self._bars: Dict[str, tqdm] = {}
-        self._status: Optional[str] = None
-        self._cancel_callback: Optional[Callable[[], None]] = None
+        self._overall: tqdm | None = None
+        self._bars: dict[str, tqdm] = {}
+        self._status: str | None = None
+        self._cancel_callback: Callable[[], None] | None = None
 
     def start(self, phases: Iterable[PhaseState], *, overall_total: float) -> None:
         phases_list = list(phases)
@@ -160,9 +161,9 @@ class ProgressTracker:
 
     _MAX_STATUS_WIDTH = 48
 
-    def __init__(self, sink: Optional[ProgressSink] = None):
+    def __init__(self, sink: ProgressSink | None = None):
         self._sink: ProgressSink = sink or NullProgressSink()
-        self._phases: Dict[str, PhaseState] = {}
+        self._phases: dict[str, PhaseState] = {}
         self._overall_total = 0.0
         self._overall_completed = 0.0
         self._started = False

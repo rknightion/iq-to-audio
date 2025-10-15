@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional
 
 import numpy as np
 from scipy.signal import lfilter
@@ -28,7 +27,7 @@ class QuadratureDemod:
 class DeemphasisFilter:
     """Single-pole de-emphasis filter expressed in discrete time."""
 
-    def __init__(self, tau_us: float, sample_rate: Optional[float] = None):
+    def __init__(self, tau_us: float, sample_rate: float | None = None):
         self.tau_us = tau_us
         self.alpha = 0.0
         self.beta = 0.0
@@ -72,15 +71,15 @@ class NarrowbandFMDecoder(Decoder):
         self._deemph_us = deemph_us
         self._demod = QuadratureDemod()
         self._deemph = DeemphasisFilter(deemph_us)
-        self._last_stats: Optional[DecoderStats] = None
-        self._intermediates: Dict[str, tuple[np.ndarray, float]] = {}
+        self._last_stats: DecoderStats | None = None
+        self._intermediates: dict[str, tuple[np.ndarray, float]] = {}
         self._sample_rate = 0.0
 
     def setup(self, sample_rate: float) -> None:
         self._deemph.configure(sample_rate)
         self._sample_rate = sample_rate
 
-    def process(self, samples: np.ndarray) -> tuple[np.ndarray, Optional[DecoderStats]]:
+    def process(self, samples: np.ndarray) -> tuple[np.ndarray, DecoderStats | None]:
         if self._sample_rate == 0.0:
             raise RuntimeError("Decoder.setup(sample_rate) must be called before processing data.")
         demod = self._demod.process(samples)
@@ -102,10 +101,10 @@ class NarrowbandFMDecoder(Decoder):
         return
 
     @property
-    def last_stats(self) -> Optional[DecoderStats]:
+    def last_stats(self) -> DecoderStats | None:
         return self._last_stats
 
-    def intermediates(self) -> Dict[str, tuple[np.ndarray, float]]:
+    def intermediates(self) -> dict[str, tuple[np.ndarray, float]]:
         return dict(self._intermediates)
 
 

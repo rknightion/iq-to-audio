@@ -5,7 +5,6 @@ import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import soundfile as sf
 
@@ -14,9 +13,9 @@ from .utils import resolve_ffprobe_executable
 
 @dataclass
 class SampleRateProbe:
-    ffprobe: Optional[float]
-    header: Optional[float]
-    wave: Optional[float] = None
+    ffprobe: float | None
+    header: float | None
+    wave: float | None = None
 
     @property
     def value(self) -> float:
@@ -38,7 +37,7 @@ def probe_sample_rate(path: Path) -> SampleRateProbe:
     return SampleRateProbe(ffprobe=ffprobe_rate, header=header_rate, wave=wave_rate)
 
 
-def _ffprobe_sample_rate(path: Path) -> Optional[float]:
+def _ffprobe_sample_rate(path: Path) -> float | None:
     global _FFPROBE_WARNED
     ffprobe_path = resolve_ffprobe_executable()
     if ffprobe_path is None:
@@ -62,9 +61,7 @@ def _ffprobe_sample_rate(path: Path) -> Optional[float]:
         str(path),
     ]
     try:
-        result = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
-        )
+        result = subprocess.run(cmd, capture_output=True, check=True)
     except subprocess.CalledProcessError as exc:
         LOG.warning("ffprobe failed for %s: %s", path, exc)
         return None
@@ -84,7 +81,7 @@ def _ffprobe_sample_rate(path: Path) -> Optional[float]:
         return None
 
 
-def _header_sample_rate(path: Path) -> Optional[float]:
+def _header_sample_rate(path: Path) -> float | None:
     try:
         info = sf.info(str(path))
     except RuntimeError:
@@ -92,7 +89,7 @@ def _header_sample_rate(path: Path) -> Optional[float]:
     return float(info.samplerate) if info.samplerate else None
 
 
-def _wave_sample_rate(path: Path) -> Optional[float]:
+def _wave_sample_rate(path: Path) -> float | None:
     import wave
 
     try:

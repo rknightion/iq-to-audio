@@ -16,9 +16,10 @@ import shutil
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any
 
 import matplotlib
 
@@ -27,14 +28,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 import soundfile as sf  # noqa: E402
-from scipy import __version__ as SCIPY_VERSION  # noqa: E402
 from scipy.signal import spectrogram  # noqa: E402
 from scipy.signal.windows import hann  # noqa: E402
 
 from iq_to_audio.benchmark import run_benchmark  # noqa: E402
+from iq_to_audio.preview import run_preview  # noqa: E402
 from iq_to_audio.processing import ProcessingConfig, ProcessingPipeline  # noqa: E402
 from iq_to_audio.progress import NullProgressSink  # noqa: E402
-from iq_to_audio.preview import run_preview  # noqa: E402
 from iq_to_audio.utils import CenterFrequencyResult, detect_center_frequency  # noqa: E402
 
 REPORT_DIR = Path("testreports")
@@ -69,7 +69,7 @@ class AudioStats:
     peak: float
     nonzero_fraction: float
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "samples": self.samples,
             "sample_rate": self.sample_rate,
@@ -103,7 +103,7 @@ class PipelineRunReport:
     preview_time: float
     log_path: Path
     preview_log_path: Path
-    extra: Dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -429,14 +429,14 @@ def process_sample(
     )
 
 
-def run_benchmarks() -> List[BenchmarkReport]:
+def run_benchmarks() -> list[BenchmarkReport]:
     LOG.info("Executing synthetic benchmarks…")
     specs = [
         {"demod": "nfm", "seconds": 1.0, "sample_rate": 2_500_000.0, "offset": 25_000.0},
         {"demod": "am", "seconds": 1.0, "sample_rate": 1_000_000.0, "offset": 10_000.0},
         {"demod": "usb", "seconds": 0.8, "sample_rate": 3_000_000.0, "offset": 12_500.0},
     ]
-    reports: List[BenchmarkReport] = []
+    reports: list[BenchmarkReport] = []
     for idx, spec in enumerate(specs, start=1):
         base_kwargs = {
             "target_freq": 0.0,
@@ -802,7 +802,7 @@ def main() -> None:
         },
     ]
 
-    pipeline_reports: List[PipelineRunReport] = []
+    pipeline_reports: list[PipelineRunReport] = []
     for spec in samples:
         pipeline_reports.append(process_sample(**spec))
 

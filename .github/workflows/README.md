@@ -146,4 +146,4 @@ act push -W .github/workflows/release.yml -s GITHUB_TOKEN="..."
 
 4. **Testing Requirements**: CI requires 70% code coverage minimum. This can be adjusted in pyproject.toml.
 
-5. **Build Matrix**: CI tests on Python 3.13 only (as per project requirements). Add more versions to the matrix if needed.
+5. **Build Matrix**: CI tests on Python 3.14 only (as per project requirements). Add more versions to the matrix if needed.

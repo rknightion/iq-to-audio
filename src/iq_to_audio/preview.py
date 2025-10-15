@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Optional, Tuple
 
 from .processing import ProcessingConfig, ProcessingPipeline, ProcessingResult
-from .utils import detect_center_frequency
 from .progress import ProgressSink
+from .utils import detect_center_frequency
 
 LOG = logging.getLogger(__name__)
 
@@ -25,9 +25,9 @@ def run_preview(
     config: ProcessingConfig,
     seconds: float,
     *,
-    progress_sink: Optional[ProgressSink] = None,
-    on_pipeline: Optional[Callable[[ProcessingPipeline], None]] = None,
-) -> Tuple[ProcessingResult, Path]:
+    progress_sink: ProgressSink | None = None,
+    on_pipeline: Callable[[ProcessingPipeline], None] | None = None,
+) -> tuple[ProcessingResult, Path]:
     if seconds <= 0:
         raise ValueError("Preview seconds must be positive.")
     preview_output = _preview_output_path(config)

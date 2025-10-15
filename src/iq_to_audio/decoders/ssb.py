@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional
 
 import numpy as np
 
@@ -28,8 +27,8 @@ class SSBDecoder(Decoder):
         self._sideband = sideband
         self._agc_enabled = agc_enabled
         self._dc_blocker = DCBlocker(radius=dc_radius)
-        self._last_stats: Optional[DecoderStats] = None
-        self._intermediates: Dict[str, tuple[np.ndarray, float]] = {}
+        self._last_stats: DecoderStats | None = None
+        self._intermediates: dict[str, tuple[np.ndarray, float]] = {}
         self._sample_rate = 0.0
         self._agc_level = 10.0 ** (agc_target_dbfs / 20.0)
         self._agc_decay = agc_decay
@@ -37,13 +36,10 @@ class SSBDecoder(Decoder):
     def setup(self, sample_rate: float) -> None:
         self._sample_rate = sample_rate
 
-    def process(self, samples: np.ndarray) -> tuple[np.ndarray, Optional[DecoderStats]]:
+    def process(self, samples: np.ndarray) -> tuple[np.ndarray, DecoderStats | None]:
         if self._sample_rate == 0.0:
             raise RuntimeError("Decoder.setup(sample_rate) must be called before processing data.")
-        if self._sideband == "lsb":
-            analytic = np.conj(samples)
-        else:
-            analytic = samples
+        analytic = np.conj(samples) if self._sideband == "lsb" else samples
         baseband = analytic.real.astype(np.float32, copy=False)
         dc_audio = self._dc_blocker.process(baseband)
         processed = self._apply_agc(dc_audio) if self._agc_enabled else dc_audio
@@ -52,7 +48,7 @@ class SSBDecoder(Decoder):
         stats = DecoderStats(rms_dbfs=dbfs)
         self._last_stats = stats
         if samples.size:
-            intermediates: Dict[str, tuple[np.ndarray, float]] = {
+            intermediates: dict[str, tuple[np.ndarray, float]] = {
                 "analytic": (analytic.copy(), self._sample_rate),
                 "dc_block": (dc_audio.copy(), self._sample_rate),
             }
@@ -65,7 +61,7 @@ class SSBDecoder(Decoder):
     def finalize(self) -> None:
         return
 
-    def intermediates(self) -> Dict[str, tuple[np.ndarray, float]]:
+    def intermediates(self) -> dict[str, tuple[np.ndarray, float]]:
         return dict(self._intermediates)
 
     def _apply_agc(self, audio: np.ndarray) -> np.ndarray:
@@ -84,5 +80,5 @@ class SSBDecoder(Decoder):
         return out
 
     @property
-    def last_stats(self) -> Optional[DecoderStats]:
+    def last_stats(self) -> DecoderStats | None:
         return self._last_stats

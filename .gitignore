@@ -3,7 +3,7 @@
 baseband*
 testfiles/*preview.wav
 testfiles/*.tar.xz
-!testfiles/fc*.wav
+testfiles/*.wav
 testreports/
 
 

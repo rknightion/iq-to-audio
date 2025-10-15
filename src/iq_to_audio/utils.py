@@ -10,7 +10,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
 
 import soundfile as sf
 
@@ -36,7 +35,7 @@ _METADATA_KEYS = [
 
 @dataclass
 class CenterFrequencyResult:
-    value: Optional[float]
+    value: float | None
     source: str = "unavailable"
 
 
@@ -51,7 +50,7 @@ def detect_center_frequency(path: Path) -> CenterFrequencyResult:
     return CenterFrequencyResult(value=None, source="unavailable")
 
 
-def parse_center_frequency(path: Path) -> Optional[float]:
+def parse_center_frequency(path: Path) -> float | None:
     """Backwards-compatible shim returning only the detected value."""
     return detect_center_frequency(path).value
 
@@ -152,8 +151,8 @@ def resolve_ffprobe_executable() -> Path | None:
     return None
 
 
-def _center_frequency_from_metadata(path: Path) -> Optional[CenterFrequencyResult]:
-    tags: Dict[str, str] = {}
+def _center_frequency_from_metadata(path: Path) -> CenterFrequencyResult | None:
+    tags: dict[str, str] = {}
     tags.update(_soundfile_tags(path))
     ffprobe_tags = _ffprobe_tags(path)
     for key, value in ffprobe_tags.items():
@@ -177,7 +176,7 @@ def _center_frequency_from_metadata(path: Path) -> Optional[CenterFrequencyResul
     return None
 
 
-def _center_frequency_from_filename(path: Path) -> Optional[CenterFrequencyResult]:
+def _center_frequency_from_filename(path: Path) -> CenterFrequencyResult | None:
     name = path.name
     matches = []
     for match in _FILENAME_FREQ_PATTERN.finditer(name):
@@ -201,8 +200,8 @@ def _center_frequency_from_filename(path: Path) -> Optional[CenterFrequencyResul
     return CenterFrequencyResult(value, source)
 
 
-def _soundfile_tags(path: Path) -> Dict[str, str]:
-    tags: Dict[str, str] = {}
+def _soundfile_tags(path: Path) -> dict[str, str]:
+    tags: dict[str, str] = {}
     try:
         info = sf.info(str(path))
     except RuntimeError:
@@ -224,7 +223,7 @@ def _soundfile_tags(path: Path) -> Dict[str, str]:
     return tags
 
 
-def _ffprobe_tags(path: Path) -> Dict[str, str]:
+def _ffprobe_tags(path: Path) -> dict[str, str]:
     ffprobe_path = resolve_ffprobe_executable()
     if ffprobe_path is None:
         return {}
@@ -239,12 +238,7 @@ def _ffprobe_tags(path: Path) -> Dict[str, str]:
         str(path),
     ]
     try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
+        result = subprocess.run(cmd, capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         LOG.debug("ffprobe metadata probe failed for %s: %s", path, exc)
         return {}
@@ -253,7 +247,7 @@ def _ffprobe_tags(path: Path) -> Dict[str, str]:
     except json.JSONDecodeError as exc:
         LOG.debug("ffprobe metadata parse failed for %s: %s", path, exc)
         return {}
-    tags: Dict[str, str] = {}
+    tags: dict[str, str] = {}
     format_tags = (
         parsed.get("format", {}).get("tags", {})
         if isinstance(parsed, dict)
@@ -270,7 +264,7 @@ def _ffprobe_tags(path: Path) -> Dict[str, str]:
     return tags
 
 
-def _parse_frequency_text(text: Optional[str]) -> Optional[float]:
+def _parse_frequency_text(text: str | None) -> float | None:
     if text is None:
         return None
     stripped = text.strip()
@@ -298,7 +292,7 @@ def _parse_frequency_text(text: Optional[str]) -> Optional[float]:
     return value if value > 0 else None
 
 
-def _apply_unit(raw_value: str, unit: str) -> Optional[float]:
+def _apply_unit(raw_value: str, unit: str) -> float | None:
     try:
         magnitude = float(raw_value)
     except ValueError:

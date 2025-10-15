@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -36,8 +36,8 @@ def plot_psd(
     title: str,
     xlabel: str = "Frequency offset (Hz)",
     ylabel: str = "Power (dBFS/Hz)",
-    center_freq: Optional[float] = None,
-    ax: Optional[Axes] = None,
+    center_freq: float | None = None,
+    ax: Axes | None = None,
 ) -> Axes:
     """Render PSD on provided axes (creates figure if missing)."""
     ensure_matplotlib()
@@ -59,7 +59,7 @@ def plot_psd(
 
 
 def save_stage_psd(
-    stage_samples: Dict[str, Tuple[np.ndarray, float]],
+    stage_samples: dict[str, tuple[np.ndarray, float]],
     output_path: Path,
     center_freq: float,
 ) -> None:
@@ -140,7 +140,7 @@ def interactive_select_frequency(
             )
             if hasattr(self.selector, "span_stays"):
                 try:
-                    setattr(self.selector, "span_stays", True)
+                    self.selector.span_stays = True
                 except Exception:
                     LOG.debug("Unable to enable persistent span selection.")
             self.fig.canvas.mpl_connect("key_press_event", self._on_key)

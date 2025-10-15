@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional
 
 import numpy as np
 
@@ -16,14 +15,14 @@ class AMDecoder(Decoder):
 
     def __init__(self, dc_radius: float = 0.995):
         self._dc_blocker = DCBlocker(radius=dc_radius)
-        self._last_stats: Optional[DecoderStats] = None
-        self._intermediates: Dict[str, tuple[np.ndarray, float]] = {}
+        self._last_stats: DecoderStats | None = None
+        self._intermediates: dict[str, tuple[np.ndarray, float]] = {}
         self._sample_rate = 0.0
 
     def setup(self, sample_rate: float) -> None:
         self._sample_rate = sample_rate
 
-    def process(self, samples: np.ndarray) -> tuple[np.ndarray, Optional[DecoderStats]]:
+    def process(self, samples: np.ndarray) -> tuple[np.ndarray, DecoderStats | None]:
         if self._sample_rate == 0.0:
             raise RuntimeError("Decoder.setup(sample_rate) must be called before processing data.")
         envelope = np.abs(samples).astype(np.float32, copy=False)
@@ -43,9 +42,9 @@ class AMDecoder(Decoder):
     def finalize(self) -> None:
         return
 
-    def intermediates(self) -> Dict[str, tuple[np.ndarray, float]]:
+    def intermediates(self) -> dict[str, tuple[np.ndarray, float]]:
         return dict(self._intermediates)
 
     @property
-    def last_stats(self) -> Optional[DecoderStats]:
+    def last_stats(self) -> DecoderStats | None:
         return self._last_stats

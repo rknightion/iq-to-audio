@@ -18,7 +18,6 @@ import pytest
 from iq_to_audio.benchmark import run_benchmark
 from iq_to_audio.processing import ProcessingConfig, ProcessingPipeline
 
-
 # ============================================================================
 # Base Configuration Helpers
 # ============================================================================

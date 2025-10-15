@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 from scipy.fft import fft, fftfreq, fftshift
@@ -18,7 +17,7 @@ def compute_psd(
     sample_rate: float,
     nfft: int = 1 << 18,
     *,
-    fft_workers: Optional[int] = None,
+    fft_workers: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute a single-sided PSD (dBFS) for complex samples.
 
@@ -57,9 +56,9 @@ def streaming_waterfall(
     sample_rate: float,
     *,
     nfft: int,
-    hop: Optional[int] = None,
+    hop: int | None = None,
     max_slices: int = 400,
-    fft_workers: Optional[int] = None,
+    fft_workers: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, WaterfallResult, int]:
     """Generate averaged PSD and waterfall slices from a stream of blocks.
 
@@ -70,7 +69,7 @@ def streaming_waterfall(
     hop = max(1, hop or nfft // 4)
     fft_plan = _SlidingFFT(sample_rate=sample_rate, nfft=nfft, fft_workers=fft_workers)
     aggregator = _WaterfallAggregator(max_slices=max_slices)
-    psd_sum: Optional[np.ndarray] = None
+    psd_sum: np.ndarray | None = None
     frames = 0
 
     for start_index, window in _sliding_windows(chunks, nfft=nfft, hop=hop):
@@ -131,7 +130,7 @@ def _sliding_windows(
 def _fft_dispatch(
     samples: np.ndarray,
     nfft: int,
-    fft_workers: Optional[int],
+    fft_workers: int | None,
 ) -> np.ndarray:
     if fft_workers and fft_workers > 1:
         try:
@@ -147,7 +146,7 @@ class _SlidingFFT:
         *,
         sample_rate: float,
         nfft: int,
-        fft_workers: Optional[int],
+        fft_workers: int | None,
     ):
         self.sample_rate = sample_rate
         self.nfft = nfft

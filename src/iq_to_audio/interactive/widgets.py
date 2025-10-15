@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.colorbar import Colorbar
 from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
-from matplotlib.colorbar import Colorbar
 from matplotlib.widgets import SpanSelector
 from PySide6 import QtGui, QtWidgets
 from PySide6.QtCore import Qt

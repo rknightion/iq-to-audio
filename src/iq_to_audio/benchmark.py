@@ -4,8 +4,9 @@ import logging
 import math
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any
 
 import numpy as np
 import soundfile as sf
@@ -42,8 +43,8 @@ def run_benchmark(
     seconds: float,
     sample_rate: float,
     freq_offset: float,
-    center_freq: Optional[float],
-    target_freq: Optional[float],
+    center_freq: float | None,
+    target_freq: float | None,
     base_kwargs: Mapping[str, object] | None,
 ) -> int:
     if seconds <= 0:
