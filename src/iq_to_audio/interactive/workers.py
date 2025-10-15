@@ -205,7 +205,9 @@ def compute_full_psd(
     frame_bytes = input_spec.bytes_per_frame
     payload_bytes = max(file_size - header_bytes, 0)
     estimated_total_samples = payload_bytes // frame_bytes if payload_bytes > 0 else 0
-    estimated_chunks = int(math.ceil(estimated_total_samples / chunk_samples)) if estimated_total_samples else 0
+    estimated_chunks = (
+        int(math.ceil(estimated_total_samples / chunk_samples)) if estimated_total_samples else 0
+    )
     status_stride = max(1, estimated_chunks // 25) if estimated_chunks else 4
 
     from ..processing import IQReader

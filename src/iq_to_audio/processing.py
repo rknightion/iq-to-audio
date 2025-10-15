@@ -841,12 +841,12 @@ class ProcessingPipeline:
                 preview_seconds = None
             max_input_samples: int | None = None
             if preview_seconds is not None and sample_rate > 0:
-                max_input_samples = max(
-                    1, int(math.floor(preview_seconds * sample_rate))
-                )
+                max_input_samples = max(1, int(math.floor(preview_seconds * sample_rate)))
 
             if self.config.target_freq <= 0 and not self.config.probe_only:
-                raise ValueError("Target frequency must be positive. Provide --ft or use --interactive.")
+                raise ValueError(
+                    "Target frequency must be positive. Provide --ft or use --interactive."
+                )
             if self.config.bandwidth <= 0:
                 raise ValueError("Bandwidth must be positive.")
 
@@ -921,28 +921,20 @@ class ProcessingPipeline:
             total_input_samples = max(payload_bytes / frame_bytes, 0.0)
             if max_input_samples is not None:
                 if total_input_samples > 0:
-                    total_input_samples = float(
-                        min(total_input_samples, max_input_samples)
-                    )
+                    total_input_samples = float(min(total_input_samples, max_input_samples))
                 else:
                     total_input_samples = float(max_input_samples)
-            estimated_channel_samples = (
-                total_input_samples / max(decimation, 1)
-            )
+            estimated_channel_samples = total_input_samples / max(decimation, 1)
             duration_seconds = total_input_samples / sample_rate if sample_rate > 0 else 0.0
             chunk_size = self._effective_chunk_size(sample_rate)
             estimated_chunks = (
-                int(math.ceil(total_input_samples / chunk_size))
-                if total_input_samples > 0
-                else 0
+                int(math.ceil(total_input_samples / chunk_size)) if total_input_samples > 0 else 0
             )
             if max_input_samples is not None and preview_seconds is not None:
                 duration_seconds = min(duration_seconds, preview_seconds)
             estimated_audio_samples = max(duration_seconds * 48_000.0, 0.0)
             if max_input_samples is not None and preview_seconds is not None:
-                limited_duration = (
-                    duration_seconds if duration_seconds > 0 else preview_seconds
-                )
+                limited_duration = duration_seconds if duration_seconds > 0 else preview_seconds
                 LOG.info(
                     "Preview constrained to %.2f s of IQ (~%.3f M complex samples).",
                     limited_duration,
@@ -998,9 +990,7 @@ class ProcessingPipeline:
             _check_cancel("initialization")
 
             oscillator = ComplexOscillator(freq_offset, sample_rate)
-            channel_filter = OverlapSaveFIR(
-                taps, self.config.filter_block, workers=fft_workers
-            )
+            channel_filter = OverlapSaveFIR(taps, self.config.filter_block, workers=fft_workers)
             decimator = Decimator(decimation)
             decoder = None
             if not pass_through:
@@ -1013,9 +1003,7 @@ class ProcessingPipeline:
             iq_writer = IQDebugWriter(self.config.dump_iq_path, fs_channel)
 
             output_path = (
-                self.config.output_path
-                if self.config.output_path
-                else self._default_output_path()
+                self.config.output_path if self.config.output_path else self._default_output_path()
             )
 
             stage_snapshots: dict[str, tuple[np.ndarray, float]] = {}
@@ -1126,13 +1114,17 @@ class ProcessingPipeline:
                         if pass_through:
                             report(_status_text("demod", chunk=idx + 1))
                             if slice_writer is None:
-                                raise RuntimeError("IQ slice writer missing during pass-through mode.")
+                                raise RuntimeError(
+                                    "IQ slice writer missing during pass-through mode."
+                                )
                             slice_writer.write(decimated)
                             tracker.advance("demod", float(decimated.size))
                         else:
                             report(_status_text("demod", chunk=idx + 1))
                             if decoder is None or audio_writer is None:
-                                raise RuntimeError("Decoder or audio writer unavailable during demodulation.")
+                                raise RuntimeError(
+                                    "Decoder or audio writer unavailable during demodulation."
+                                )
                             audio, stats = decoder.process(decimated)
                             intermediates = decoder.intermediates()
                             if intermediates:
@@ -1157,10 +1149,7 @@ class ProcessingPipeline:
                             if audio.size:
                                 duration = audio.size / max(fs_channel, 1e-9)
                                 tracker.advance("encode", duration * 48_000.0)
-                        if (
-                            max_input_samples is not None
-                            and processed_samples >= max_input_samples
-                        ):
+                        if max_input_samples is not None and processed_samples >= max_input_samples:
                             limit_exhausted = True
                             break
                 finally:
@@ -1174,9 +1163,7 @@ class ProcessingPipeline:
                         slice_writer.close()
 
             if limit_exhausted and preview_seconds is not None:
-                processed_duration = (
-                    processed_samples / sample_rate if sample_rate > 0 else 0.0
-                )
+                processed_duration = processed_samples / sample_rate if sample_rate > 0 else 0.0
                 LOG.info(
                     "Stopped after %.2f s due to preview limit (processed %.3f M complex samples).",
                     processed_duration if processed_duration > 0 else preview_seconds,
