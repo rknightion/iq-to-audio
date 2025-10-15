@@ -21,6 +21,7 @@ dependencies = [
   "matplotlib>=3.10.7",
   "PySide6>=6.6.0",
   "PySide6-Addons>=6.6.0",
+  "docker>=7.0.0",
 ]
 
 [project.scripts]
@@ -119,6 +120,7 @@ module = [
   "scipy.*",
   "tqdm",
   "PyInstaller.*",
+  "docker.*",
 ]
 ignore_missing_imports = true
 
