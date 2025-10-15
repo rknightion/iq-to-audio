@@ -365,18 +365,31 @@ class PreviewWorker(QtCore.QRunnable):
         self.signals.started.emit()
         outputs: list[Path] = []
         total = len(self.configs)
+        current_pipeline = None
+
+        def _capture_pipeline(pipeline):
+            nonlocal current_pipeline
+            current_pipeline = pipeline
+
         try:
             for index, config in enumerate(self.configs, start=1):
                 if total > 1:
                     with contextlib.suppress(Exception):
                         self.progress_sink.status(f"Preview {index}/{total}")
+
+                # Clear previous pipeline reference
+                current_pipeline = None
+
                 _, preview_path = run_preview(
                     config,
                     self.seconds,
                     progress_sink=self.progress_sink,
-                    on_pipeline=self.register_pipeline,
+                    on_pipeline=_capture_pipeline,
                 )
                 outputs.append(preview_path)
+
+                # Clear pipeline after successful completion
+                current_pipeline = None
         except ProcessingCancelled as exc:
             self.signals.failed.emit(exc)
         except Exception as exc:  # pragma: no cover - worker surfaces error upstream
@@ -384,6 +397,12 @@ class PreviewWorker(QtCore.QRunnable):
         else:
             self.signals.finished.emit(outputs)
         finally:
+            # Ensure active pipeline is cancelled and cleaned up
+            if current_pipeline is not None:
+                with contextlib.suppress(Exception):
+                    current_pipeline.cancel()
+
+            # Notify that no pipeline is active
             with contextlib.suppress(Exception):
                 self.register_pipeline(None)
 
