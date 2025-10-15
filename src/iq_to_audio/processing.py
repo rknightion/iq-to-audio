@@ -483,20 +483,48 @@ class AudioWriter:
         if self._closed:
             return
         self._closed = True
+
+        # Signal writer thread to stop
         self._queue.put(None)
         if self._writer.is_alive():
             self._writer.join(timeout=10)
+
         if self.proc:
+            # Close stdin to signal EOF to ffmpeg
             if self.proc.stdin:
-                with contextlib.suppress(Exception):  # pragma: no cover - defensive
+                with contextlib.suppress(Exception):
                     self.proc.stdin.close()
-            self.proc.wait(timeout=10)
+
+            # Gentle then forceful shutdown
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                # Force kill if wait timed out (critical for frozen builds)
+                LOG.warning("AudioWriter ffmpeg process did not exit gracefully, forcing kill")
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    try:
+                        self.proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        LOG.error(
+                            "Failed to kill AudioWriter ffmpeg subprocess (PID %d)", self.proc.pid
+                        )
+
+            # Read any stderr messages
             if self.proc.stderr:
-                err = self.proc.stderr.read().decode("utf-8").strip()
-                if err:
-                    LOG.debug("ffmpeg: %s", err)
+                try:
+                    err = self.proc.stderr.read().decode("utf-8", errors="replace").strip()
+                    if err:
+                        LOG.debug("ffmpeg: %s", err)
+                except Exception:
+                    pass
+
             if self._error:
                 raise RuntimeError("ffmpeg writer failed") from self._error
+
             self.proc = None
 
 
