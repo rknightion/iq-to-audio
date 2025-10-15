@@ -7,6 +7,16 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .digital import DEFAULT_DECODER_KEY, DIGITAL_DECODERS, get_decoder
+from .docker_backend import (
+    DEFAULT_IMAGE,
+    DockerBackend,
+    DockerBackendConfig,
+    DockerBackendError,
+    DockerConnectionError,
+    DockerLaunchError,
+    DockerLaunchRequest,
+)
 from .input_formats import parse_user_format
 from .preview import run_preview
 from .processing import (
@@ -29,6 +39,113 @@ def positive_float(value: str) -> float:
     if val <= 0:
         raise argparse.ArgumentTypeError("Expected a positive value.")
     return val
+
+
+DIGITAL_DECODER_KEYS: tuple[str, ...] = tuple(decoder.key for decoder in DIGITAL_DECODERS)
+
+
+def _add_digital_subcommand(parser: argparse.ArgumentParser) -> None:
+    subparsers = parser.add_subparsers(dest="subcommand", metavar="command")
+
+    digital = subparsers.add_parser(
+        "digital",
+        help="Launch a digital decoder within the backend container.",
+        description=(
+            "Use docker-py to run the iq-to-audio backend container and invoke a decoder such as "
+            "DSD-FME. The selected audio directory is bind-mounted into the container, allowing "
+            "decoders to process exported recordings."
+        ),
+    )
+    digital.add_argument(
+        "--audio-dir",
+        dest="audio_dir",
+        type=Path,
+        required=True,
+        help="Directory containing exported audio to bind-mount inside the container.",
+    )
+    digital.add_argument(
+        "--decoder",
+        dest="decoder",
+        choices=DIGITAL_DECODER_KEYS,
+        default=DEFAULT_DECODER_KEY,
+        help="Decoder preset to use (default: %(default)s).",
+    )
+    digital.add_argument(
+        "--image",
+        dest="image",
+        type=str,
+        default=DEFAULT_IMAGE,
+        help=f"Docker image to launch (default: {DEFAULT_IMAGE}).",
+    )
+    digital.add_argument(
+        "--no-pull",
+        dest="pull",
+        action="store_false",
+        help="Do not automatically pull the backend image if it is missing locally.",
+    )
+    digital.add_argument(
+        "decoder_args",
+        nargs=argparse.REMAINDER,
+        help="Command to execute inside the container (prefix with -- to pass flags like --help).",
+    )
+    digital.set_defaults(pull=True)
+
+
+def run_digital_command(args: argparse.Namespace) -> int:
+    audio_dir: Path = args.audio_dir
+    if not audio_dir.exists():
+        LOG.error("Audio directory does not exist: %s", audio_dir)
+        return 1
+    if not audio_dir.is_dir():
+        LOG.error("Audio path is not a directory: %s", audio_dir)
+        return 1
+
+    try:
+        decoder = get_decoder(args.decoder)
+    except KeyError:
+        LOG.error("Unsupported decoder preset: %s", args.decoder)
+        return 1
+
+    extra_args = list(getattr(args, "decoder_args", []) or [])
+    if extra_args and extra_args[0] == "--":
+        extra_args = extra_args[1:]
+    command_tokens = tuple(extra_args) if extra_args else decoder.default_command
+    if not command_tokens:
+        LOG.error("No command specified for backend container.")
+        return 1
+
+    config = DockerBackendConfig(image=args.image)
+    backend = DockerBackend(config=config)
+    launch = DockerLaunchRequest(
+        command=command_tokens,
+        audio_dir=audio_dir,
+        decoder_key=decoder.key,
+        pull_if_missing=bool(args.pull),
+    )
+    try:
+        backend.ensure_connection()
+    except DockerConnectionError as exc:
+        LOG.error("Docker engine unavailable: %s", exc)
+        return 1
+    LOG.info(
+        "Launching backend decoder '%s' with command: %s",
+        decoder.key,
+        " ".join(command_tokens),
+    )
+
+    def _emit_log(text: str) -> None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    try:
+        backend.run_and_stream(launch, log_callback=_emit_log)
+    except (DockerLaunchError, DockerBackendError) as exc:
+        LOG.error("Backend execution failed: %s", exc)
+        return 1
+    except ValueError as exc:
+        LOG.error("Invalid launch parameters: %s", exc)
+        return 1
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -291,12 +408,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.set_defaults(agc_enabled=True)
     parser.set_defaults(audio_post_trim=True)
+    _add_digital_subcommand(parser)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if getattr(args, "subcommand", None) == "digital":
+        return run_digital_command(args)
 
     if args.cli and args.interactive:
         parser.error("--cli cannot be combined with --interactive.")
