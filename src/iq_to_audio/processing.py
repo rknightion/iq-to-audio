@@ -697,15 +697,38 @@ class ProcessingPipeline:
     def _resolve_fft_workers(self) -> int | None:
         if self._resolved_fft_workers is not None:
             return self._resolved_fft_workers
+
         configured = self.config.fft_workers
         if configured is not None:
             self._resolved_fft_workers = None if configured <= 1 else configured
             return self._resolved_fft_workers
+
         cpu_count = os.cpu_count() or 1
+
+        # In frozen builds, be more conservative with worker allocation to prevent
+        # thread contention with Qt event loop, subprocess I/O, and NumPy's own
+        # thread pools (OpenMP/MKL/OpenBLAS).
+        if getattr(sys, "frozen", False):
+            # Leave significant headroom for other threads
+            # Use 1 worker on low-core systems, half of cores otherwise
+            max_workers = 1 if cpu_count <= 4 else max(2, cpu_count // 2)
+            max_cap = 8  # Cap at 8 workers even on high-core systems
+        else:
+            # Development builds can be more aggressive
+            max_workers = cpu_count - 1
+            max_cap = 12
+
         if cpu_count <= 2:
             self._resolved_fft_workers = None
         else:
-            self._resolved_fft_workers = min(12, max(2, cpu_count - 1))
+            self._resolved_fft_workers = min(max_cap, max(2, max_workers))
+
+        LOG.debug(
+            "FFT workers: auto=%d (cpu_count=%d, frozen=%s)",
+            self._resolved_fft_workers or 0,
+            cpu_count,
+            getattr(sys, "frozen", False),
+        )
         return self._resolved_fft_workers
 
     def _effective_chunk_size(self, sample_rate: float) -> int:
