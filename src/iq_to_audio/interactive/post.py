@@ -24,19 +24,41 @@ class AudioPostPage(QtWidgets.QWidget):
 
         self._control_widgets: list[QtWidgets.QWidget] = []
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
+        # Wrap content in scroll area to prevent overlap when window is small
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+
+        # Container for all content
+        container = QtWidgets.QWidget()
+        container_layout = QtWidgets.QVBoxLayout(container)
+        container_layout.setContentsMargins(12, 12, 12, 12)
+        container_layout.setSpacing(12)
 
         self.source_panel = self._build_source_panel()
         self.options_panel = self._build_options_panel()
         self.output_panel = self._build_output_panel()
         self.results_panel = self._build_results_panel()
 
-        layout.addWidget(self.source_panel)
-        layout.addWidget(self.options_panel)
-        layout.addWidget(self.output_panel)
-        layout.addWidget(self.results_panel, stretch=1)
+        # Set minimum sizes to prevent collapse
+        self.source_panel.setMinimumHeight(150)
+        self.options_panel.setMinimumHeight(350)
+        self.output_panel.setMinimumHeight(120)
+        self.results_panel.setMinimumHeight(200)
+
+        container_layout.addWidget(self.source_panel)
+        container_layout.addWidget(self.options_panel)
+        container_layout.addWidget(self.output_panel)
+        container_layout.addWidget(self.results_panel)
+        container_layout.addStretch()
+
+        scroll_area.setWidget(container)
+
+        # Main page layout
+        page_layout = QtWidgets.QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(scroll_area)
 
         self._update_recent_labels()
         self._apply_state_defaults()
@@ -49,7 +71,7 @@ class AudioPostPage(QtWidgets.QWidget):
     def _build_source_panel(self) -> PanelGroup:
         panel = PanelGroup("Source recordings")
         panel_layout = QtWidgets.QVBoxLayout()
-        panel_layout.setSpacing(12)
+        panel_layout.setSpacing(11)
 
         self.recent_capture_label = QtWidgets.QLabel("")
         self.recent_capture_label.setWordWrap(True)
@@ -204,7 +226,9 @@ class AudioPostPage(QtWidgets.QWidget):
         self._elevate_height(self.trailing_spin)
         trim_row.addStretch(1)
         panel_layout.addLayout(trim_row)
-        self._control_widgets.extend([self.trim_silence_check, self.lead_in_spin, self.trailing_spin])
+        self._control_widgets.extend(
+            [self.trim_silence_check, self.lead_in_spin, self.trailing_spin]
+        )
 
         self.progress_label = QtWidgets.QLabel("Ready.")
         self.progress_label.setWordWrap(True)
@@ -238,7 +262,7 @@ class AudioPostPage(QtWidgets.QWidget):
     def _build_output_panel(self) -> PanelGroup:
         panel = PanelGroup("Output handling")
         panel_layout = QtWidgets.QVBoxLayout()
-        panel_layout.setSpacing(12)
+        panel_layout.setSpacing(11)
 
         self.copy_radio = QtWidgets.QRadioButton("Write cleaned copy (append suffix)")
         self.overwrite_radio = QtWidgets.QRadioButton("Overwrite original files")
@@ -263,7 +287,7 @@ class AudioPostPage(QtWidgets.QWidget):
     def _build_results_panel(self) -> PanelGroup:
         panel = PanelGroup("Processed files")
         panel_layout = QtWidgets.QVBoxLayout()
-        panel_layout.setSpacing(12)
+        panel_layout.setSpacing(11)
 
         self.results_table = QtWidgets.QTableWidget(0, 5)
         self.results_table.setHorizontalHeaderLabels(
@@ -370,7 +394,9 @@ class AudioPostPage(QtWidgets.QWidget):
     def _collect_options(self) -> tuple[Path, AudioPostOptions] | None:
         target_path = self._selected_target_path()
         if target_path is None:
-            QtWidgets.QMessageBox.warning(self, "Audio post-processing", "Select a file or directory to process.")
+            QtWidgets.QMessageBox.warning(
+                self, "Audio post-processing", "Select a file or directory to process."
+            )
             return None
         if not target_path.exists():
             QtWidgets.QMessageBox.warning(
@@ -424,7 +450,9 @@ class AudioPostPage(QtWidgets.QWidget):
         dialog = QtWidgets.QFileDialog(self)
         dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
         dialog.setNameFilters(["Audio files (*.wav *.flac *.ogg *.mp3)", "All files (*)"])
-        default_dir = self._recent_output_dir or (self._recent_capture_path.parent if self._recent_capture_path else None)
+        default_dir = self._recent_output_dir or (
+            self._recent_capture_path.parent if self._recent_capture_path else None
+        )
         if default_dir:
             dialog.setDirectory(default_dir.as_posix())
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -535,7 +563,9 @@ class AudioPostPage(QtWidgets.QWidget):
 
     def _refresh_enablement(self) -> None:
         allow = not self._processing
-        manual_selection = self.use_specific_file_radio.isChecked() or self.use_directory_radio.isChecked()
+        manual_selection = (
+            self.use_specific_file_radio.isChecked() or self.use_directory_radio.isChecked()
+        )
         self.use_recent_radio.setEnabled(allow)
         self.use_specific_file_radio.setEnabled(allow)
         self.use_directory_radio.setEnabled(allow)
@@ -562,7 +592,9 @@ class AudioPostPage(QtWidgets.QWidget):
         self.apply_button.setEnabled(allow)
         self.preview_button.setEnabled(False)
 
-    def _set_table_item(self, row: int, column: int, text: str, *, tooltip: str | None = None) -> None:
+    def _set_table_item(
+        self, row: int, column: int, text: str, *, tooltip: str | None = None
+    ) -> None:
         item = QtWidgets.QTableWidgetItem(text)
         if tooltip:
             item.setToolTip(tooltip)
@@ -573,7 +605,9 @@ class AudioPostPage(QtWidgets.QWidget):
         height = max(int(metrics.height() * 1.6), widget.sizeHint().height() + 4)
         widget.setMinimumHeight(height)
         if isinstance(widget, (QtWidgets.QComboBox, QtWidgets.QAbstractSpinBox)):
-            widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+            widget.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed
+            )
 
 
 class DigitalPostPage(QtWidgets.QWidget):
@@ -604,29 +638,54 @@ class DigitalPostPage(QtWidgets.QWidget):
         self.state = state
         self._recent_output_dir: Path | None = state.resolved_output_dir()
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
+        # Wrap content in scroll area to prevent overlap when window is small
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
-        layout.addWidget(self._build_source_panel())
-        layout.addWidget(self._build_decoder_panel())
-        layout.addWidget(self._build_options_panel())
+        # Container for all content
+        container = QtWidgets.QWidget()
+        container_layout = QtWidgets.QVBoxLayout(container)
+        container_layout.setContentsMargins(12, 12, 12, 12)
+        container_layout.setSpacing(12)
+
+        source_panel = self._build_source_panel()
+        decoder_panel = self._build_decoder_panel()
+        options_panel = self._build_options_panel()
+
+        # Set minimum sizes to prevent collapse
+        source_panel.setMinimumHeight(150)
+        decoder_panel.setMinimumHeight(120)
+        options_panel.setMinimumHeight(250)
+
+        container_layout.addWidget(source_panel)
+        container_layout.addWidget(decoder_panel)
+        container_layout.addWidget(options_panel)
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
         self.prepare_button = QtWidgets.QPushButton("Prepare transfer")
         self.prepare_button.clicked.connect(self._show_placeholder_message)
         button_row.addWidget(self.prepare_button)
-        layout.addLayout(button_row)
+        container_layout.addLayout(button_row)
 
-        layout.addStretch(1)
+        container_layout.addStretch(1)
+
+        scroll_area.setWidget(container)
+
+        # Main page layout
+        page_layout = QtWidgets.QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(scroll_area)
+
         self._update_source_hint()
         self._on_tool_changed(0)
 
     def _build_source_panel(self) -> PanelGroup:
         panel = PanelGroup("Source recordings")
         panel_layout = QtWidgets.QVBoxLayout()
-        panel_layout.setSpacing(12)
+        panel_layout.setSpacing(11)
 
         self.source_hint_label = QtWidgets.QLabel("")
         self.source_hint_label.setWordWrap(True)
@@ -634,7 +693,9 @@ class DigitalPostPage(QtWidgets.QWidget):
 
         path_row = QtWidgets.QHBoxLayout()
         self.source_path_entry = QtWidgets.QLineEdit()
-        self.source_path_entry.setPlaceholderText("Choose directory that contains demodulated exports.")
+        self.source_path_entry.setPlaceholderText(
+            "Choose directory that contains demodulated exports."
+        )
         path_row.addWidget(self.source_path_entry, stretch=1)
         self.source_browse_button = QtWidgets.QPushButton("Browse Folder…")
         path_row.addWidget(self.source_browse_button)
@@ -655,7 +716,7 @@ class DigitalPostPage(QtWidgets.QWidget):
     def _build_decoder_panel(self) -> PanelGroup:
         panel = PanelGroup("Decoder routing")
         panel_layout = QtWidgets.QVBoxLayout()
-        panel_layout.setSpacing(12)
+        panel_layout.setSpacing(11)
 
         self.decoder_combo = QtWidgets.QComboBox()
         for key, label, _description in self.DECODER_OPTIONS:
@@ -674,7 +735,7 @@ class DigitalPostPage(QtWidgets.QWidget):
     def _build_options_panel(self) -> PanelGroup:
         panel = PanelGroup("Tool-specific options")
         panel_layout = QtWidgets.QVBoxLayout()
-        panel_layout.setSpacing(12)
+        panel_layout.setSpacing(11)
 
         self.tool_options_stack = QtWidgets.QStackedWidget()
         self.tool_options_stack.addWidget(self._build_dsd_fme_options())
@@ -695,7 +756,9 @@ class DigitalPostPage(QtWidgets.QWidget):
         layout.addRow("Input protocol:", self.dsd_input_combo)
 
         self.dsd_channel_mode_combo = QtWidgets.QComboBox()
-        self.dsd_channel_mode_combo.addItems(["Single talkgroup", "Follow trunking control", "Manual slot assignment"])
+        self.dsd_channel_mode_combo.addItems(
+            ["Single talkgroup", "Follow trunking control", "Manual slot assignment"]
+        )
         layout.addRow("Channel mode:", self.dsd_channel_mode_combo)
 
         self.dsd_talkgroup_entry = QtWidgets.QLineEdit()
@@ -766,7 +829,9 @@ class DigitalPostPage(QtWidgets.QWidget):
         if self._recent_output_dir:
             hint = f"Defaulting to latest capture outputs: {self._recent_output_dir.as_posix()}"
         else:
-            hint = "Select the directory that contains channelized audio to send to external decoders."
+            hint = (
+                "Select the directory that contains channelized audio to send to external decoders."
+            )
         self.source_hint_label.setText(hint)
 
     def _on_browse_source(self) -> None:
