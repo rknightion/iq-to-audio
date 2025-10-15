@@ -44,6 +44,19 @@ if bundle_root:
     # Ship FFmpeg/FFprobe inside dist/ffmpeg for predictable lookup.
     _ensure_path_has(bundle_root / "ffmpeg")
 
+    # Limit NumPy/SciPy thread pools to prevent oversubscription.
+    # The application uses explicit threading via QThreadPool and threading.Thread,
+    # so we want NumPy's internal parallelism to be conservative.
+    # These must be set BEFORE numpy/scipy are imported.
+    _cpu_count = os.cpu_count() or 4
+    _thread_limit = max(2, min(4, _cpu_count // 2))
+
+    os.environ.setdefault("OMP_NUM_THREADS", str(_thread_limit))  # OpenMP (used by various BLAS)
+    os.environ.setdefault("MKL_NUM_THREADS", str(_thread_limit))  # Intel MKL
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", str(_thread_limit))  # OpenBLAS
+    os.environ.setdefault("BLIS_NUM_THREADS", str(_thread_limit))  # BLIS
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", str(_thread_limit))  # macOS Accelerate
+
     if sys.platform == "darwin":
         # Qt6 on macOS needs layer-backed rendering to draw correctly when frozen.
         os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")
