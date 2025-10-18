@@ -70,6 +70,7 @@ from .widgets import LockedSplitter, PanelGroup, SpanController, WaterfallWindow
 from .workers import (
     AudioPostJob,
     AudioPostWorker,
+    DockerImageUpdateWorker,
     DockerLaunchWorker,
     DockerProbeWorker,
     PreviewWorker,
@@ -236,6 +237,7 @@ class InteractiveWindow(QMainWindow):
         self._docker_console: DockerConsoleDialog | None = None
         self._docker_launch_worker: DockerLaunchWorker | None = None
         self._docker_probe_worker: DockerProbeWorker | None = None
+        self._docker_image_update_worker: DockerImageUpdateWorker | None = None
         self._last_docker_status: DockerConnectivity | None = None
 
         self.figure: Figure | None = None
@@ -319,6 +321,7 @@ class InteractiveWindow(QMainWindow):
         self.digital_post_page = DigitalPostPage(state=self.state)
         self.digital_post_page.prepare_requested.connect(self._on_digital_prepare_requested)
         self.digital_post_page.docker_probe_requested.connect(self._on_docker_probe_requested)
+        self.digital_post_page.image_update_requested.connect(self._on_image_update_requested)
         self.digital_post_page_index = stack.addWidget(self.digital_post_page)
 
         stack.setCurrentIndex(self.capture_page_index)
@@ -603,6 +606,12 @@ class InteractiveWindow(QMainWindow):
         self._last_docker_status = status
         if self.digital_post_page:
             self.digital_post_page.set_docker_status(status)
+            # Query and display image info if Docker is available
+            if status.available:
+                image_info = self.docker_backend.get_image_info()
+                self.digital_post_page.set_image_status(image_info)
+            else:
+                self.digital_post_page.set_image_status(None)
         if not status.available:
             LOG.warning("Docker connectivity check failed: %s", status.message)
 
@@ -612,10 +621,58 @@ class InteractiveWindow(QMainWindow):
         self._last_docker_status = status
         if self.digital_post_page:
             self.digital_post_page.set_docker_status(status)
+            self.digital_post_page.set_image_status(None)
         LOG.error("Docker connectivity check failed: %s", exc)
 
     def _on_docker_probe_requested(self) -> None:
         self._ensure_docker_probe(force=True)
+
+    def _on_image_update_requested(self) -> None:
+        """Handle request to pull the latest backend image."""
+        if self._docker_image_update_worker is not None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Update in progress",
+                "An image update is already running. Please wait for it to complete.",
+            )
+            return
+
+        page = self.digital_post_page
+        if page:
+            page.set_launch_in_progress(True)
+
+        worker = DockerImageUpdateWorker(self.docker_backend)
+        self._docker_image_update_worker = worker
+        worker.signals.finished.connect(self._on_image_update_finished)
+        worker.signals.failed.connect(self._on_image_update_failed)
+        self.thread_pool.start(worker)
+        self._set_status("Pulling latest container image from registry...", error=False)
+
+    def _on_image_update_finished(self) -> None:
+        self._docker_image_update_worker = None
+        if self.digital_post_page:
+            self.digital_post_page.set_launch_in_progress(False)
+            # Update image status display with new version
+            image_info = self.docker_backend.get_image_info()
+            self.digital_post_page.set_image_status(image_info)
+        self._set_status("Container image updated successfully", error=False)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Image updated",
+            "The backend container image has been updated to the latest version.",
+        )
+
+    def _on_image_update_failed(self, exc: Exception) -> None:
+        self._docker_image_update_worker = None
+        if self.digital_post_page:
+            self.digital_post_page.set_launch_in_progress(False)
+        message = str(exc)
+        self._set_status(f"Image update failed: {message}", error=True)
+        QtWidgets.QMessageBox.critical(
+            self,
+            "Image update failed",
+            f"Failed to pull the latest container image:\n\n{message}",
+        )
 
     def _ensure_docker_console(self) -> DockerConsoleDialog:
         if self._docker_console is None:
@@ -683,6 +740,9 @@ class InteractiveWindow(QMainWindow):
         self._docker_launch_worker = None
         if self.digital_post_page:
             self.digital_post_page.set_launch_in_progress(False)
+            # Update image status (may have loaded bundled image)
+            image_info = self.docker_backend.get_image_info()
+            self.digital_post_page.set_image_status(image_info)
         console = self._docker_console
         if console is not None:
             console.append_log("\n[decoder] Process completed successfully.\n")

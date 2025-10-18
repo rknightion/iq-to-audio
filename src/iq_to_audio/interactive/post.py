@@ -7,7 +7,7 @@ from PySide6 import QtWidgets
 from PySide6.QtCore import Qt, Signal
 
 from ..digital import iter_decoders
-from ..docker_backend import DockerConnectivity, DockerLaunchRequest
+from ..docker_backend import DockerConnectivity, DockerImageInfo, DockerLaunchRequest
 from ..squelch import AudioPostOptions, SquelchConfig, SquelchSummary
 from .state import InteractiveState
 from .widgets import PanelGroup
@@ -618,6 +618,7 @@ class DigitalPostPage(QtWidgets.QWidget):
 
     prepare_requested = Signal(DockerLaunchRequest)
     docker_probe_requested = Signal()
+    image_update_requested = Signal()
 
     def __init__(self, *, state: InteractiveState) -> None:
         super().__init__()
@@ -760,15 +761,26 @@ class DigitalPostPage(QtWidgets.QWidget):
         self.docker_retry_button = QtWidgets.QPushButton("Re-check")
         status_row.addWidget(self.docker_retry_button)
 
+        self.docker_update_button = QtWidgets.QPushButton("Update Image")
+        self.docker_update_button.setToolTip("Pull the latest container image from the registry")
+        status_row.addWidget(self.docker_update_button)
+
         self.docker_help_button = QtWidgets.QToolButton()
         self.docker_help_button.setText("?")
         self.docker_help_button.setToolTip("Docker requirements and setup guidance")
         status_row.addWidget(self.docker_help_button)
 
         self.docker_retry_button.clicked.connect(self.docker_probe_requested.emit)
+        self.docker_update_button.clicked.connect(self._on_update_image_clicked)
         self.docker_help_button.clicked.connect(self._show_docker_requirements)
 
         panel_layout.addLayout(status_row)
+
+        # Image status label below connectivity status
+        self.docker_image_label = QtWidgets.QLabel("")
+        self.docker_image_label.setWordWrap(True)
+        self.docker_image_label.setStyleSheet("color: palette(mid); font-size: 90%;")
+        panel_layout.addWidget(self.docker_image_label)
 
         panel.set_layout(panel_layout)
         return panel
@@ -791,6 +803,14 @@ class DigitalPostPage(QtWidgets.QWidget):
         self.docker_status_label.setStyleSheet(f"color: {color};")
         self.docker_retry_button.setEnabled(allow_retry and not self._launch_in_progress)
 
+    def set_image_status(self, image_info: DockerImageInfo | None) -> None:
+        """Update the image status label."""
+        if image_info is None:
+            self.docker_image_label.setText("")
+        else:
+            status_text = image_info.format_status()
+            self.docker_image_label.setText(status_text)
+
     def set_launch_in_progress(self, active: bool) -> None:
         self._launch_in_progress = active
         self.prepare_button.setEnabled(not active)
@@ -800,6 +820,7 @@ class DigitalPostPage(QtWidgets.QWidget):
         self.source_browse_button.setEnabled(not active)
         self.tool_options_stack.setEnabled(not active)
         self.docker_retry_button.setEnabled(self._docker_status is not None and not active)
+        self.docker_update_button.setEnabled(not active)
 
     def _on_launch_clicked(self) -> None:
         if self._launch_in_progress:
@@ -902,6 +923,29 @@ class DigitalPostPage(QtWidgets.QWidget):
                 "<p>After installing, launch Docker and press <b>Re-check</b> to verify connectivity.</p>"
             ),
         )
+
+    def _on_update_image_clicked(self) -> None:
+        """Handle Update Image button click."""
+        if self._docker_status is not None and not self._docker_status.available:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Docker unavailable",
+                "Docker Engine is not reachable. Start Docker and click Re-check before updating the image.",
+            )
+            return
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Update container image",
+            (
+                "Pull the latest backend container image from the registry?\n\n"
+                "This requires an internet connection and may take a few minutes depending on your connection speed."
+            ),
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.image_update_requested.emit()
 
     def _build_dsd_fme_options(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()

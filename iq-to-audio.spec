@@ -92,6 +92,29 @@ def _ffmpeg_binaries() -> list[tuple[str, str]]:
     return binaries
 
 
+def _bundled_docker_image() -> list[tuple[str, str]]:
+    """Bundle platform-specific Docker image tar for offline-first operation."""
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        tar_name = "backend-amd64.tar.xz"
+    elif machine in ("arm64", "aarch64"):
+        tar_name = "backend-arm64.tar.xz"
+    else:
+        print(f"[pyinstaller] Unsupported architecture for Docker bundling: {machine}")
+        return []
+
+    tar_path = PACKAGING_ROOT / "docker" / tar_name
+    if not tar_path.exists():
+        print(
+            f"[pyinstaller] Docker image tar not found: {tar_path} "
+            "(offline mode will be unavailable, will fall back to docker pull)"
+        )
+        return []
+
+    print(f"[pyinstaller] Bundling Docker image: {tar_path} ({tar_path.stat().st_size / 1024 / 1024:.1f} MB)")
+    return [(str(tar_path), "docker")]
+
+
 SYSTEM = platform.system()
 TARGET_ARCH = os.environ.get("IQ_TO_AUDIO_TARGET_ARCH") if SYSTEM == "Darwin" else None
 
@@ -142,7 +165,7 @@ a = Analysis(
     PYTHON_SOURCES,
     pathex=[str(SRC_ROOT)],
     binaries=_ffmpeg_binaries(),
-    datas=datas,
+    datas=datas + _bundled_docker_image(),
     hiddenimports=hiddenimports,
     hookspath=[str(PYINSTALLER_ROOT / "hooks")],
     hooksconfig={},

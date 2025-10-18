@@ -1,0 +1,9 @@
+# Docker image tars are large binaries generated during build
+# Include .gitignore but exclude the actual tar files
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.zst
+
+# Keep README for documentation
+!README.md

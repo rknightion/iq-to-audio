@@ -550,3 +550,30 @@ class DockerProbeWorker(QtCore.QRunnable):
             self.signals.failed.emit(exc)
         else:
             self.signals.finished.emit(status)
+
+
+class DockerImageUpdateSignals(QtCore.QObject):
+    """Signals emitted during image pull operations."""
+
+    started = QtCore.Signal()
+    finished = QtCore.Signal()
+    failed = QtCore.Signal(Exception)
+
+
+class DockerImageUpdateWorker(QtCore.QRunnable):
+    """Pull the latest backend image in the background."""
+
+    def __init__(self, backend: DockerBackend) -> None:
+        super().__init__()
+        self.backend = backend
+        self.signals = DockerImageUpdateSignals()
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        self.signals.started.emit()
+        try:
+            self.backend.pull_image()
+        except Exception as exc:  # pragma: no cover - bubbled to UI
+            self.signals.failed.emit(exc)
+        else:
+            self.signals.finished.emit()
