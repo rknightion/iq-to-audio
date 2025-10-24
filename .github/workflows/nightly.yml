@@ -134,7 +134,7 @@ jobs:
 
       - name: Upload artifact
         if: github.event.inputs.upload_artifacts != 'false'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: iq-to-audio-${{ matrix.platform }}-${{ matrix.arch }}-dev
           path: |
@@ -153,7 +153,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           path: artifacts
 
